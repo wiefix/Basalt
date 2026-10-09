@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -26,6 +27,8 @@ type Server struct {
 	MemTotal      uint64
 	LastSeen      *time.Time
 	LastIP        string
+	PHPVersions   []string
+	Isolated      bool
 	CreatedAt     time.Time
 }
 
@@ -33,19 +36,23 @@ var ErrNameTaken = errors.New("name already in use")
 
 const serverColumns = `id, name, enrolled_at IS NOT NULL, enroll_expires_at, COALESCE(cert_fp, ''),
 	COALESCE(prev_cert_fp, ''), cert_expires_at, hostname, os, arch, kernel, distro, agent_version,
-	cpu_count, mem_total, last_seen_at, last_ip, created_at`
+	cpu_count, mem_total, last_seen_at, last_ip, php_versions, isolated, created_at`
 
 func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 	var s Server
 	var enrollExp, certExp, lastSeen sql.NullInt64
 	var created int64
+	var phpVersions string
 	err := row.Scan(&s.ID, &s.Name, &s.Enrolled, &enrollExp, &s.CertFP, &s.PrevCertFP, &certExp,
 		&s.Hostname, &s.OS, &s.Arch, &s.Kernel, &s.Distro, &s.AgentVersion,
-		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &created)
+		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &phpVersions, &s.Isolated, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(phpVersions), &s.PHPVersions); err != nil {
 		return nil, err
 	}
 	s.EnrollExpires = timePtr(enrollExp)
@@ -104,11 +111,15 @@ func (db *DB) SetServerCert(ctx context.Context, id int64, fp string, expires, n
 }
 
 func (db *DB) UpdateServerHello(ctx context.Context, id int64, s Server) error {
+	if s.PHPVersions == nil {
+		s.PHPVersions = []string{}
+	}
+	php, _ := json.Marshal(s.PHPVersions)
 	return db.execOne(ctx,
 		`UPDATE servers SET hostname = ?, os = ?, arch = ?, kernel = ?, distro = ?, agent_version = ?,
-		 cpu_count = ?, mem_total = ?, last_ip = ?, last_seen_at = ? WHERE id = ?`,
+		 cpu_count = ?, mem_total = ?, last_ip = ?, last_seen_at = ?, php_versions = ?, isolated = ? WHERE id = ?`,
 		s.Hostname, s.OS, s.Arch, s.Kernel, s.Distro, s.AgentVersion, s.CPUCount, s.MemTotal,
-		s.LastIP, s.LastSeen.Unix(), id)
+		s.LastIP, s.LastSeen.Unix(), string(php), s.Isolated, id)
 }
 
 func (db *DB) ServerByID(ctx context.Context, id int64) (*Server, error) {

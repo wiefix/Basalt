@@ -54,7 +54,8 @@ export function SitesPage({ user }: { user: User }) {
                   <td>
                     <Link to={`/sites/${s.id}`}>
                       <strong>{s.name}</strong>
-                    </Link>
+                    </Link>{" "}
+                    <span className="badge plain">{s.php_version ? `PHP ${s.php_version}` : "static"}</span>
                   </td>
                   <td>
                     {s.domains.map((d) => (
@@ -91,6 +92,9 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
   const [name, setName] = useState("");
   const [domains, setDomains] = useState("");
   const [tls, setTls] = useState("auto");
+  const [php, setPhp] = useState("");
+  const server = enrolled.find((s) => s.id === Number(serverId || enrolled[0]?.id));
+  const phpVersions = server?.isolated ? server.php_versions : [];
   const create = useMutation({
     mutationFn: () =>
       api.createSite({
@@ -98,6 +102,7 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
         name: name.trim(),
         domains: domains.split(/[\s,]+/).filter(Boolean),
         tls,
+        php_version: php,
       }),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["sites"] });
@@ -141,10 +146,36 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
             <input className="input" value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="example.com www.example.com" required />
           </Field>
           <Field label="Server">
-            <select className="input" value={serverId || enrolled[0].id} onChange={(e) => setServerId(Number(e.target.value))}>
+            <select
+              className="input"
+              value={serverId || enrolled[0].id}
+              onChange={(e) => {
+                setServerId(Number(e.target.value));
+                setPhp("");
+              }}
+            >
               {enrolled.map((s) => (
                 <option key={s.id} value={s.id}>
                   {s.name} {s.status !== "online" ? `(${s.status})` : ""}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field
+            label="Type"
+            help={
+              phpVersions.length === 0
+                ? server?.isolated
+                  ? "Install php-fpm on the server to host PHP sites."
+                  : "PHP needs the agent running as root on Linux (per-site users)."
+                : "PHP runs as the site's own system user, isolated from other sites."
+            }
+          >
+            <select className="input" value={php} onChange={(e) => setPhp(e.target.value)}>
+              <option value="">Static (HTML, CSS, JS)</option>
+              {phpVersions.map((v) => (
+                <option key={v} value={v}>
+                  PHP {v}
                 </option>
               ))}
             </select>

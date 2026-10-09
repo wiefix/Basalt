@@ -140,22 +140,26 @@ function AddServerModal({ onClose }: { onClose: () => void }) {
 }
 
 export function EnrollInstructions({ enrollment }: { enrollment: Enrollment }) {
+  const minutes = Math.max(0, Math.round((new Date(enrollment.expires_at).getTime() - Date.now()) / 60000));
   return (
     <div className="stack">
       <p className="muted" style={{ margin: 0 }}>
-        Run these commands on the server as root. The token works once and expires in{" "}
-        <strong>{Math.max(0, Math.round((new Date(enrollment.expires_at).getTime() - Date.now()) / 60000))} minutes</strong>.
+        Run this as <strong>root</strong> on a fresh Debian or Ubuntu server. It installs Basalt, connects the server
+        to this panel and starts everything. The command works once and expires in <strong>{minutes} minutes</strong>.
       </p>
-      <Field label="1. Register the agent">
-        <CodeBox text={enrollment.command} />
-      </Field>
-      <Field label="2. Start the agent and the proxy">
-        <CodeBox text={"basalt proxy &\nbasalt agent"} />
-      </Field>
+      <CodeBox text={enrollment.install_command} />
       <div className="alert small">
-        The command contains a fingerprint of this panel's certificate authority. The agent refuses to talk to anything
-        else, so the token cannot be intercepted by an impostor.
+        The command pins this panel's certificate authority by its fingerprint: the installer and the binary are only
+        accepted from this panel, so nobody in between can substitute them.
       </div>
+      <details>
+        <summary className="muted small" style={{ cursor: "pointer" }}>
+          Basalt already installed on that server?
+        </summary>
+        <div style={{ marginTop: 10 }}>
+          <CodeBox text={enrollment.command} />
+        </div>
+      </details>
     </div>
   );
 }

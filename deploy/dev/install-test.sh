@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# End-to-end test of deploy/install.sh on two systemd containers:
+# "panel" (install.sh panel) and "node1" (the one-line command from the panel).
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+ARCH=$(docker version --format '{{.Server.Arch}}')
+make build-linux >/dev/null
+docker build -q -t basalt-systemd -f deploy/dev/systemd.Dockerfile deploy/dev >/dev/null
+
+cleanup() { docker rm -f basalt-panel basalt-node1 >/dev/null 2>&1 || true; docker network rm basalt-net >/dev/null 2>&1 || true; }
+cleanup
+[ "${KEEP:-}" = 1 ] || trap cleanup EXIT
+docker network create basalt-net >/dev/null
+run() { # name
+  docker run -d --name "basalt-$1" --hostname "$1" --network basalt-net --privileged --cgroupns=host \
+    -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
+    -v "$PWD/bin":/dist:ro -v "$PWD/deploy":/deploy:ro basalt-systemd >/dev/null
+}
+run panel
+run node1
+sleep 3
+
+echo "### install panel"
+docker exec basalt-panel sh /deploy/install.sh panel --binary /dist/basalt-linux-$ARCH
+
+echo "### services on panel"
+docker exec basalt-panel systemctl is-active basalt-server basalt-proxy basalt-agent
+echo "### panel UI through the proxy"
+PANELIP=$(docker inspect -f '{{(index .NetworkSettings.Networks "basalt-net").IPAddress}}' basalt-panel)
+for i in $(seq 30); do
+  docker exec basalt-panel curl -sk "https://$PANELIP/" | grep -q "<title>Basalt</title>" && break; sleep 1
+done
+docker exec basalt-panel curl -sk "https://$PANELIP/" | grep -o "<title>[^<]*</title>"
+
+TOKEN=$(docker exec basalt-panel cat /var/lib/basalt/server/setup-token)
+API="docker exec basalt-panel curl -sS -b /tmp/j -c /tmp/j -H Content-Type:application/json"
+$API -d "{\"setup_token\":\"$TOKEN\",\"email\":\"admin@example.test\",\"name\":\"Admin\",\"password\":\"installer test password\"}" http://127.0.0.1:8080/api/v1/setup >/dev/null
+echo "### servers after install (local agent auto-enrolled)"
+$API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; [print(" ", s["name"], s["status"], "isolated" if s["isolated"] else "") for s in json.load(sys.stdin)["servers"]]'
+
+echo "### add node1 with the one-line command from the panel"
+CMD=$($API -d '{"name":"node1"}' http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print(json.load(sys.stdin)["enrollment"]["install_command"])')
+docker exec basalt-node1 sh -c "$CMD --with-php --with-mariadb"
+docker exec basalt-node1 systemctl is-active basalt-proxy basalt-agent
+docker exec basalt-node1 ps -o user=,comm= -C basalt | sort | uniq -c
+
+for i in $(seq 30); do
+  $API http://127.0.0.1:8080/api/v1/servers | grep -q '"name":"node1","status":"online"' && break; sleep 1
+done
+$API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; [print(" ", s["name"], s["status"], "php:", s["php_versions"], "isolated:", s["isolated"]) for s in json.load(sys.stdin)["servers"]]'
+NODE=$($API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print([s["id"] for s in json.load(sys.stdin)["servers"] if s["name"]=="node1"][0])')
+PHPV=$($API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print([s["php_versions"][0] for s in json.load(sys.stdin)["servers"] if s["name"]=="node1"][0])')
+
+echo "### PHP site on node1 (proxy runs as basalt-proxy, PHP as the site user)"
+SITE=$($API -d "{\"server_id\":$NODE,\"name\":\"shop\",\"domains\":[\"shop.test\"],\"tls\":\"internal\",\"php_version\":\"$PHPV\"}" http://127.0.0.1:8080/api/v1/sites | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["site"]["id"]); print(d.get("provision_error",""), file=sys.stderr)')
+printf '%s' '<?php echo "php ", PHP_VERSION, " as ", posix_getpwuid(posix_geteuid())["name"];' > /tmp/basalt-index.php
+docker cp /tmp/basalt-index.php basalt-panel:/root/index.php
+$API -X PUT -H Content-Type:application/octet-stream --data-binary @/root/index.php "http://127.0.0.1:8080/api/v1/sites/$SITE/files/content?path=/public/index.php" >/dev/null
+$API -d '{"paths":["/public/index.html"]}' "http://127.0.0.1:8080/api/v1/sites/$SITE/files/delete" >/dev/null
+NODEIP=$(docker inspect -f '{{(index .NetworkSettings.Networks "basalt-net").IPAddress}}' basalt-node1)
+for i in $(seq 30); do
+  docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " && break; sleep 1
+done
+docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/; echo
+echo "### done"

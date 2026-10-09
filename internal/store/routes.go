@@ -81,8 +81,10 @@ func bumpProxyRevision(ctx context.Context, tx *sql.Tx, serverID int64) error {
 // Routes returns a server's routes, ordered by ID, with sorted domains.
 func (db *DB) Routes(ctx context.Context, serverID int64) ([]*ProxyRoute, error) {
 	rows, err := db.R.QueryContext(ctx,
-		`SELECT r.id, r.kind, r.root, r.upstream, r.tls, r.hsts, r.created_at, COALESCE(r.site_id, 0), d.domain
+		`SELECT r.id, r.kind, r.root, r.upstream, r.tls, r.hsts, r.created_at, COALESCE(r.site_id, 0),
+		        COALESCE(s.php_version, '') != '', d.domain
 		 FROM proxy_routes r JOIN proxy_route_domains d ON d.route_id = r.id
+		 LEFT JOIN sites s ON s.id = r.site_id
 		 WHERE r.server_id = ? ORDER BY r.id, d.domain`, serverID)
 	if err != nil {
 		return nil, err
@@ -93,7 +95,7 @@ func (db *DB) Routes(ctx context.Context, serverID int64) ([]*ProxyRoute, error)
 		var r ProxyRoute
 		var created int64
 		var domain string
-		if err := rows.Scan(&r.ID, &r.Kind, &r.Root, &r.Upstream, &r.TLS, &r.HSTS, &created, &r.SiteID, &domain); err != nil {
+		if err := rows.Scan(&r.ID, &r.Kind, &r.Root, &r.Upstream, &r.TLS, &r.HSTS, &created, &r.SiteID, &r.PHP, &domain); err != nil {
 			return nil, err
 		}
 		if n := len(out); n > 0 && out[n-1].ID == r.ID {

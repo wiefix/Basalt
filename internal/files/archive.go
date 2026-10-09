@@ -169,7 +169,7 @@ func (x *extractor) dir(name string) error {
 	if err := x.count(); err != nil {
 		return err
 	}
-	if err := x.site.root.MkdirAll(t, 0o755); err != nil {
+	if err := x.site.mkdirAll(t, 0o755); err != nil {
 		return err
 	}
 	x.res.Dirs++
@@ -190,16 +190,23 @@ func (x *extractor) file(name string, mode fs.FileMode, r io.Reader) error {
 			return nil
 		}
 	}
-	if err := x.site.root.MkdirAll(path.Dir(t), 0o755); err != nil {
+	if err := x.site.mkdirAll(path.Dir(t), 0o755); err != nil {
 		return err
 	}
 	perm := fs.FileMode(0o644)
 	if mode&0o111 != 0 {
 		perm = 0o755
 	}
+	_, existed := x.site.root.Lstat(t)
 	f, err := x.site.root.OpenFile(t, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return err
+	}
+	if existed != nil {
+		if err := x.site.chownFile(f, t); err != nil {
+			f.Close()
+			return err
+		}
 	}
 	// Enforce the size budget on actual decompressed bytes, not on headers,
 	// which an attacker controls.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -91,6 +92,9 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	s.setupMu.Lock()
 	s.setupToken = ""
 	s.setupMu.Unlock()
+	if s.setupFile != "" {
+		os.Remove(s.setupFile)
+	}
 
 	s.audit(r, &u.ID, "setup.completed", map[string]any{"email": u.Email})
 	s.log.Info("setup completed", "owner", u.Email)

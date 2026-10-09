@@ -165,6 +165,10 @@ export function ServerPage({ user }: { user: User }) {
             <dl className="kv">
               <dt>System</dt>
               <dd>{[s.distro, s.os, s.arch].filter(Boolean).join(" · ") || "—"}</dd>
+              <dt>Site isolation</dt>
+              <dd>{s.isolated ? "per-site system users" : "off (agent not running as root on Linux)"}</dd>
+              <dt>PHP</dt>
+              <dd>{s.php_versions?.length ? s.php_versions.join(", ") : "not installed"}</dd>
               <dt>Agent version</dt>
               <dd className="mono">{s.agent_version || "—"}</dd>
               <dt>Address</dt>

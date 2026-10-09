@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -33,6 +34,11 @@ type Options struct {
 	// reach it, shown in enrollment commands.
 	Agents   AgentHub
 	AgentURL string
+	// TrustedProxies may set X-Forwarded-For (e.g. the local proxy).
+	TrustedProxies []netip.Prefix
+	// SetupTokenFile, if set, receives the setup token so an installer can
+	// show it; it is removed once setup completes.
+	SetupTokenFile string
 	// Now is the clock; defaults to time.Now.
 	Now func() time.Time
 }
@@ -43,6 +49,8 @@ type Server struct {
 	box           *secrets.Box
 	hasher        *auth.Hasher
 	secureCookies bool
+	trusted       []netip.Prefix
+	setupFile     string
 	agents        AgentHub
 	agentURL      string
 	now           func() time.Time
@@ -65,6 +73,8 @@ func New(o Options) *Server {
 		box:           o.Box,
 		hasher:        o.Hasher,
 		secureCookies: o.SecureCookies,
+		trusted:       o.TrustedProxies,
+		setupFile:     o.SetupTokenFile,
 		agents:        o.Agents,
 		agentURL:      o.AgentURL,
 		now:           o.Now,
@@ -111,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/sites", s.requireRole(store.RoleAdmin, s.handleCreateSite))
 	mux.Handle("GET /api/v1/sites/{id}", s.requireRole(store.RoleViewer, s.handleGetSite))
 	mux.Handle("PUT /api/v1/sites/{id}/domains", s.requireRole(store.RoleAdmin, s.handleSetSiteDomains))
+	mux.Handle("PUT /api/v1/sites/{id}/php", s.requireRole(store.RoleAdmin, s.handleSetSitePHP))
 	mux.Handle("DELETE /api/v1/sites/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteSite))
 	mux.Handle("GET /api/v1/sites/{id}/files", s.requireRole(store.RoleViewer, s.handleListFiles))
 	mux.Handle("GET /api/v1/sites/{id}/files/stat", s.requireRole(store.RoleViewer, s.handleStatFile))
@@ -118,6 +129,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/sites/{id}/files/content", s.requireRole(store.RoleViewer, s.handleDownload))
 	mux.Handle("PUT /api/v1/sites/{id}/files/content", s.requireRole(store.RoleMember, s.handleUpload))
 	mux.Handle("POST /api/v1/sites/{id}/files/{op}", s.requireRole(store.RoleMember, s.handleFileOp))
+	mux.Handle("GET /api/v1/sites/{id}/databases", s.requireRole(store.RoleViewer, s.handleListDatabases))
+	mux.Handle("POST /api/v1/sites/{id}/databases", s.requireRole(store.RoleAdmin, s.handleCreateDatabase))
+	mux.Handle("POST /api/v1/sites/{id}/databases/{did}/password", s.requireRole(store.RoleAdmin, s.handleResetDatabasePassword))
+	mux.Handle("DELETE /api/v1/sites/{id}/databases/{did}", s.requireRole(store.RoleAdmin, s.handleDeleteDatabase))
 	mux.Handle("GET /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleViewer, s.handleListSFTPUsers))
 	mux.Handle("POST /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleAdmin, s.handleCreateSFTPUser))
 	mux.Handle("DELETE /api/v1/sites/{id}/sftp-users/{uid}", s.requireRole(store.RoleAdmin, s.handleDeleteSFTPUser))
@@ -134,6 +149,7 @@ func (s *Server) Handler() http.Handler {
 	h = http.NewCrossOriginProtection().Handler(h)
 	h = securityHeaders(h)
 	h = s.logRequests(h)
+	h = realIP(s.trusted, h)
 	h = s.recoverPanics(h)
 	return h
 }

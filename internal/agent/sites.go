@@ -16,6 +16,8 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/files"
+	"github.com/wiefix/basalt/internal/php"
+	"github.com/wiefix/basalt/internal/sysuser"
 )
 
 const (
@@ -33,12 +35,25 @@ const placeholderPage = `<!doctype html>
 
 // sitesManager owns the per-site directories under SitesRoot:
 //
-//	<SitesRoot>/<id>/public   served by the proxy
+//	<SitesRoot>/<id>/public   served by the proxy (and PHP-FPM)
 //	<SitesRoot>/<id>/logs
 //	<SitesRoot>/<id>/tmp
+//
+// With isolation on (Linux, agent running as root) each site has its own
+// system user. Site directories are owned by that user with the shared
+// web group, mode 2750: the proxy (a member of the web group) can read,
+// other sites cannot even enter, and setgid hands the web group to new files.
 type sitesManager struct {
 	log  *slog.Logger
 	root string
+
+	isolate   bool
+	wwwGroup  string
+	proxyUser string
+	php       *php.Host
+
+	identityOnce sync.Once
+	identityErr  error
 
 	mu      sync.Mutex
 	uploads map[string]*pendingUpload
@@ -51,8 +66,13 @@ type pendingUpload struct {
 	lastUsed time.Time
 }
 
-func newSitesManager(root string, log *slog.Logger) *sitesManager {
-	return &sitesManager{log: log, root: root, uploads: map[string]*pendingUpload{}}
+func newSitesManager(cfg Config, log *slog.Logger) *sitesManager {
+	return &sitesManager{
+		log: log, root: cfg.SitesRoot,
+		isolate: cfg.Isolate, wwwGroup: cfg.WWWGroup, proxyUser: cfg.ProxyUser,
+		php:     php.DefaultHost(cfg.PHPRunDir),
+		uploads: map[string]*pendingUpload{},
+	}
 }
 
 func (m *sitesManager) dir(id int64) (string, error) {
@@ -68,9 +88,26 @@ func (m *sitesManager) PublicDir(id int64) string {
 	return filepath.Join(d, "public")
 }
 
-// Ensure creates the site's directories (idempotent). A new, empty public
-// directory gets a placeholder page.
-func (m *sitesManager) Ensure(id int64) error {
+// PHPVersions lists the PHP-FPM versions installed on this host.
+func (m *sitesManager) PHPVersions() []string { return m.php.Versions() }
+
+// hostIdentity creates the shared web group and puts the proxy's user in it.
+func (m *sitesManager) hostIdentity(ctx context.Context) error {
+	m.identityOnce.Do(func() {
+		if _, err := sysuser.EnsureGroup(ctx, m.wwwGroup); err != nil {
+			m.identityErr = err
+			return
+		}
+		if m.proxyUser != "" {
+			m.identityErr = sysuser.AddToGroup(ctx, m.proxyUser, m.wwwGroup)
+		}
+	})
+	return m.identityErr
+}
+
+// Ensure creates the site's directories, system user and PHP pool
+// (idempotent). A new, empty public directory gets a placeholder page.
+func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string) error {
 	d, err := m.dir(id)
 	if err != nil {
 		return err
@@ -81,53 +118,119 @@ func (m *sitesManager) Ensure(id int64) error {
 	if fi, err := os.Lstat(d); err == nil && !fi.IsDir() {
 		return fmt.Errorf("%s exists and is not a directory", d)
 	}
-	for _, sub := range siteDirs {
-		if err := os.MkdirAll(filepath.Join(d, sub), 0o755); err != nil {
+
+	uid, gid, wwwGID := -1, -1, -1
+	if m.isolate {
+		if err := m.hostIdentity(ctx); err != nil {
+			return fmt.Errorf("prepare host users: %w", err)
+		}
+		if uid, gid, err = sysuser.EnsureUser(ctx, sysuser.SiteUser(id), d); err != nil {
+			return err
+		}
+		if wwwGID, err = sysuser.LookupGroup(m.wwwGroup); err != nil {
 			return err
 		}
 	}
-	pub := filepath.Join(d, "public")
-	entries, err := os.ReadDir(pub)
+
+	layout := []struct {
+		path string
+		mode fs.FileMode
+		gid  int
+	}{
+		{d, 0o750 | fs.ModeSetgid, wwwGID},
+		{filepath.Join(d, "public"), 0o750 | fs.ModeSetgid, wwwGID},
+		{filepath.Join(d, "logs"), 0o750 | fs.ModeSetgid, wwwGID},
+		{filepath.Join(d, "tmp"), 0o700, gid},
+	}
+	for _, l := range layout {
+		if err := os.Mkdir(l.path, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+			return err
+		}
+		if !m.isolate {
+			continue
+		}
+		// Lchown/Chmod on paths we just created or validated as directories
+		// under the root-owned sites directory.
+		if fi, err := os.Lstat(l.path); err != nil || !fi.IsDir() {
+			return fmt.Errorf("%s is not a directory", l.path)
+		}
+		if err := os.Lchown(l.path, uid, l.gid); err != nil {
+			return err
+		}
+		if err := os.Chmod(l.path, l.mode); err != nil {
+			return err
+		}
+	}
+
+	s, err := m.open(id)
 	if err != nil {
 		return err
 	}
-	if len(entries) == 0 {
-		if err := os.WriteFile(filepath.Join(pub, "index.html"), []byte(placeholderPage), 0o644); err != nil {
+	defer s.Close()
+	if entries, err := s.List("/public"); err == nil && len(entries) == 0 {
+		if err := s.WriteFile("/public/index.html", []byte(placeholderPage)); err != nil {
 			return err
 		}
 	}
-	return nil
+
+	if phpVersion == "" {
+		return m.php.Remove(id)
+	}
+	if !m.isolate {
+		return errors.New("PHP sites need per-site user isolation (agent running as root on Linux)")
+	}
+	return m.php.Apply(ctx, php.Pool{
+		SiteID: id, Version: phpVersion, User: sysuser.SiteUser(id),
+		SocketGroup: m.wwwGroup, SiteDir: d,
+	})
 }
 
-// Delete moves the site to the trash directory rather than erasing it, so an
-// accidental deletion can be recovered by an operator.
-func (m *sitesManager) Delete(id int64) error {
+// Delete removes the site's PHP pool and system user and moves its files to
+// the trash directory rather than erasing them, so an accidental deletion
+// can be recovered by an operator.
+func (m *sitesManager) Delete(ctx context.Context, id int64) error {
 	d, err := m.dir(id)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Lstat(d); errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
 	m.abortUploads(id)
-	trash := filepath.Join(m.root, trashDir)
-	if err := os.MkdirAll(trash, 0o700); err != nil {
-		return err
+	if err := m.php.Remove(id); err != nil {
+		m.log.Warn("remove PHP pool", "site_id", id, "err", err)
 	}
-	dest := filepath.Join(trash, fmt.Sprintf("%d-%d", id, time.Now().Unix()))
-	if err := os.Rename(d, dest); err != nil {
-		return err
+	if _, err := os.Lstat(d); err == nil {
+		trash := filepath.Join(m.root, trashDir)
+		if err := os.MkdirAll(trash, 0o700); err != nil {
+			return err
+		}
+		dest := filepath.Join(trash, fmt.Sprintf("%d-%d", id, time.Now().Unix()))
+		if err := os.Rename(d, dest); err != nil {
+			return err
+		}
+		m.log.Info("site moved to trash", "site_id", id, "path", dest)
 	}
-	m.log.Info("site moved to trash", "site_id", id, "path", dest)
+	if m.isolate {
+		return sysuser.DeleteUser(ctx, sysuser.SiteUser(id))
+	}
 	return nil
 }
 
+// open gives file access to a site. With isolation, everything created is
+// owned by the site's user so its PHP code can manage it.
 func (m *sitesManager) open(id int64) (*files.Site, error) {
 	d, err := m.dir(id)
 	if err != nil {
 		return nil, err
 	}
-	s, err := files.Open(d)
+	var s *files.Site
+	if m.isolate {
+		uid, _, lerr := sysuser.LookupUser(sysuser.SiteUser(id))
+		if lerr != nil {
+			return nil, fmt.Errorf("site %d has no system user", id)
+		}
+		s, err = files.OpenOwned(d, uid)
+	} else {
+		s, err = files.Open(d)
+	}
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, fmt.Errorf("site %d does not exist on this server", id)
 	}
@@ -214,14 +317,15 @@ func (m *sitesManager) handleFiles(ctx context.Context, req agentproto.FilesRequ
 
 // publicError strips absolute host paths from errors before they leave the
 // agent; the panel only needs to see paths relative to the site.
+//
+// Only a bare path error is rewritten: errors that already carry our own
+// context (e.g. "php-fpm 8.4 is not running: ...") keep their message.
 func publicError(err error) error {
-	var pe *fs.PathError
-	if errors.As(err, &pe) {
-		return fmt.Errorf("%s: %w", pe.Op, pe.Err)
-	}
-	var le *os.LinkError
-	if errors.As(err, &le) {
-		return fmt.Errorf("%s: %w", le.Op, le.Err)
+	switch e := err.(type) {
+	case *fs.PathError:
+		return fmt.Errorf("%s: %w", e.Op, e.Err)
+	case *os.LinkError:
+		return fmt.Errorf("%s: %w", e.Op, e.Err)
 	}
 	return err
 }

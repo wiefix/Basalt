@@ -29,6 +29,8 @@ export interface Server {
   last_ip?: string;
   cert_expires?: string;
   enroll_expires?: string;
+  php_versions: string[];
+  isolated: boolean;
   created_at: string;
 }
 
@@ -48,6 +50,7 @@ export interface Metrics {
 export interface Enrollment {
   token: string;
   expires_at: string;
+  install_command: string;
   command: string;
 }
 
@@ -77,6 +80,7 @@ export interface Site {
   kind: "static";
   domains: string[];
   tls: "auto" | "internal";
+  php_version: string;
   created_at: string;
 }
 
@@ -107,6 +111,20 @@ export interface SFTPUser {
 export interface SFTPConnection {
   port: number;
   host_key_fingerprint: string;
+}
+
+export interface Database {
+  id: number;
+  name: string;
+  username: string;
+  created_at: string;
+}
+
+export interface DatabaseCredentials {
+  host: string;
+  database: string;
+  username: string;
+  password: string;
 }
 
 export class ApiError extends Error {
@@ -202,10 +220,11 @@ export const api = {
 
   sites: () => get<{ sites: Site[] }>("/api/v1/sites"),
   site: (id: number) => get<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}`),
-  createSite: (b: { server_id: number; name: string; domains: string[]; tls: string }) =>
+  createSite: (b: { server_id: number; name: string; domains: string[]; tls: string; php_version: string }) =>
     post<{ site: Site; sync: Sync; provision_error?: string }>("/api/v1/sites", b),
   setSiteDomains: (id: number, domains: string[]) =>
     put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/domains`, { domains }),
+  setSitePHP: (id: number, version: string) => put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/php`, { version }),
   deleteSite: (id: number) => del<{ sync: Sync; cleanup_error?: string }>(`/api/v1/sites/${id}`),
 
   files: (siteId: number, path: string) =>
@@ -215,6 +234,13 @@ export const api = {
   fileOp: (siteId: number, op: string, b: Record<string, unknown>) =>
     post<{ ok: boolean; extract?: ExtractResult }>(`/api/v1/sites/${siteId}/files/${op}`, b),
   downloadUrl: (siteId: number, path: string) => `/api/v1/sites/${siteId}/files/content${q(path)}`,
+
+  databases: (siteId: number) => get<{ databases: Database[]; mariadb: string }>(`/api/v1/sites/${siteId}/databases`),
+  createDatabase: (siteId: number, name: string) =>
+    post<{ database: Database; credentials: DatabaseCredentials }>(`/api/v1/sites/${siteId}/databases`, { name }),
+  resetDatabasePassword: (siteId: number, id: number) =>
+    post<{ credentials: DatabaseCredentials }>(`/api/v1/sites/${siteId}/databases/${id}/password`),
+  deleteDatabase: (siteId: number, id: number) => del<void>(`/api/v1/sites/${siteId}/databases/${id}`),
 
   sftpUsers: (siteId: number) =>
     get<{ users: SFTPUser[]; connection: SFTPConnection | null }>(`/api/v1/sites/${siteId}/sftp-users`),

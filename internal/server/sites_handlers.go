@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -14,18 +15,19 @@ import (
 )
 
 type siteView struct {
-	ID        int64         `json:"id"`
-	ServerID  int64         `json:"server_id"`
-	Name      string        `json:"name"`
-	Kind      string        `json:"kind"`
-	Domains   []string      `json:"domains"`
-	TLS       proxy.TLSMode `json:"tls"`
-	CreatedAt time.Time     `json:"created_at"`
+	ID         int64         `json:"id"`
+	ServerID   int64         `json:"server_id"`
+	Name       string        `json:"name"`
+	Kind       string        `json:"kind"`
+	Domains    []string      `json:"domains"`
+	TLS        proxy.TLSMode `json:"tls"`
+	PHPVersion string        `json:"php_version"`
+	CreatedAt  time.Time     `json:"created_at"`
 }
 
 func viewSite(s *store.Site) siteView {
 	return siteView{ID: s.ID, ServerID: s.ServerID, Name: s.Name, Kind: s.Kind,
-		Domains: s.Domains, TLS: s.TLS, CreatedAt: s.CreatedAt}
+		Domains: s.Domains, TLS: s.TLS, PHPVersion: s.PHPVersion, CreatedAt: s.CreatedAt}
 }
 
 func (s *Server) pathSite(w http.ResponseWriter, r *http.Request) (*store.Site, bool) {
@@ -77,14 +79,16 @@ func (s *Server) SyncSites(ctx context.Context, serverID int64) {
 func (s *Server) ensureSite(ctx context.Context, site *store.Site) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	return s.agents.Call(ctx, site.ServerID, agentproto.TypeSiteEnsure, agentproto.SiteRequest{SiteID: site.ID}, nil)
+	return s.agents.Call(ctx, site.ServerID, agentproto.TypeSiteEnsure,
+		agentproto.SiteRequest{SiteID: site.ID, PHPVersion: site.PHPVersion}, nil)
 }
 
 type createSiteRequest struct {
-	ServerID int64         `json:"server_id"`
-	Name     string        `json:"name"`
-	Domains  []string      `json:"domains"`
-	TLS      proxy.TLSMode `json:"tls"`
+	ServerID   int64         `json:"server_id"`
+	Name       string        `json:"name"`
+	Domains    []string      `json:"domains"`
+	TLS        proxy.TLSMode `json:"tls"`
+	PHPVersion string        `json:"php_version"`
 }
 
 func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -102,15 +106,20 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, p *pri
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	if _, err := s.db.ServerByID(r.Context(), req.ServerID); errors.Is(err, store.ErrNotFound) {
+	srv, err := s.db.ServerByID(r.Context(), req.ServerID)
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusUnprocessableEntity, "server not found")
 		return
 	} else if err != nil {
 		s.internalError(w, r, "load server", err)
 		return
 	}
+	if msg := checkPHP(srv, req.PHPVersion); msg != "" {
+		writeError(w, http.StatusUnprocessableEntity, msg)
+		return
+	}
 
-	site, err := s.db.CreateSite(r.Context(), req.ServerID, name, domains, tls)
+	site, err := s.db.CreateSite(r.Context(), req.ServerID, name, domains, tls, req.PHPVersion)
 	var taken *store.ErrDomainTaken
 	switch {
 	case errors.As(err, &taken):
@@ -196,7 +205,10 @@ func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request, p *pri
 	if !ok {
 		return
 	}
-	if err := s.db.DeleteSite(r.Context(), site.ID); err != nil {
+	if err := s.db.DeleteSite(r.Context(), site.ID); errors.Is(err, store.ErrSiteHasDatabases) {
+		writeError(w, http.StatusConflict, "delete the site's databases first; they are not removed automatically to protect your data")
+		return
+	} else if err != nil {
 		s.internalError(w, r, "delete site", err)
 		return
 	}
@@ -219,4 +231,63 @@ func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request, p *pri
 		resp["cleanup_error"] = "server offline: files were left in place"
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// checkPHP validates a requested PHP version against what the server reports.
+func checkPHP(srv *store.Server, version string) string {
+	if version == "" {
+		return ""
+	}
+	if !slices.Contains(srv.PHPVersions, version) {
+		if len(srv.PHPVersions) == 0 {
+			return "PHP is not installed on this server"
+		}
+		return "PHP " + version + " is not installed on this server (available: " + strings.Join(srv.PHPVersions, ", ") + ")"
+	}
+	if !srv.Isolated {
+		return "PHP sites need per-site user isolation; run the agent as root on Linux"
+	}
+	return ""
+}
+
+type sitePHPRequest struct {
+	Version string `json:"version"`
+}
+
+// handleSetSitePHP switches a site between static and a PHP version.
+func (s *Server) handleSetSitePHP(w http.ResponseWriter, r *http.Request, p *principal) {
+	site, ok := s.pathSite(w, r)
+	if !ok {
+		return
+	}
+	var req sitePHPRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	srv, err := s.db.ServerByID(r.Context(), site.ServerID)
+	if err != nil {
+		s.internalError(w, r, "load server", err)
+		return
+	}
+	if msg := checkPHP(srv, req.Version); msg != "" {
+		writeError(w, http.StatusUnprocessableEntity, msg)
+		return
+	}
+	if !s.agents.Connected(site.ServerID) {
+		writeError(w, http.StatusConflict, "the server is offline; try again when it reconnects")
+		return
+	}
+	// Configure the pool first so the proxy never points at a missing socket.
+	site.PHPVersion = req.Version
+	if err := s.ensureSite(r.Context(), site); err != nil {
+		writeAgentError(w, err)
+		return
+	}
+	if err := s.db.SetSitePHP(r.Context(), site.ID, req.Version); err != nil {
+		s.internalError(w, r, "set site php", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "site.php_changed", map[string]any{"site_id": site.ID, "version": req.Version})
+	s.PushProxy(r.Context(), site.ServerID)
+	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site), "sync": s.proxySync(r.Context(), site.ServerID)})
 }

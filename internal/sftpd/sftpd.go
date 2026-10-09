@@ -48,10 +48,10 @@ type account struct {
 }
 
 type Server struct {
-	log     *slog.Logger
-	hostKey ssh.Signer
-	hasher  *auth.Hasher
-	siteDir func(siteID int64) string
+	log      *slog.Logger
+	hostKey  ssh.Signer
+	hasher   *auth.Hasher
+	openSite func(siteID int64) (*files.Site, error)
 
 	ipLimiter   *auth.Limiter
 	userLimiter *auth.Limiter
@@ -64,9 +64,11 @@ type Server struct {
 	total  int
 }
 
-func New(log *slog.Logger, hostKey ssh.Signer, hasher *auth.Hasher, siteDir func(int64) string) *Server {
+// New creates the server. openSite gives access to a site's files (with the
+// right ownership for files the user creates).
+func New(log *slog.Logger, hostKey ssh.Signer, hasher *auth.Hasher, openSite func(int64) (*files.Site, error)) *Server {
 	return &Server{
-		log: log, hostKey: hostKey, hasher: hasher, siteDir: siteDir,
+		log: log, hostKey: hostKey, hasher: hasher, openSite: openSite,
 		ipLimiter:   auth.NewLimiter(20, 3*time.Second),
 		userLimiter: auth.NewLimiter(10, 6*time.Second),
 		accounts:    map[string]*account{},
@@ -237,7 +239,7 @@ func (s *Server) session(ch ssh.Channel, requests <-chan *ssh.Request, siteID in
 		if !ok {
 			continue // shell, exec, pty, env: refused
 		}
-		site, err := files.Open(s.siteDir(siteID))
+		site, err := s.openSite(siteID)
 		if err != nil {
 			s.log.Warn("sftp: site unavailable", "site_id", siteID, "err", err)
 			return

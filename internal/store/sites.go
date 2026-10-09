@@ -11,29 +11,30 @@ import (
 )
 
 type Site struct {
-	ID        int64
-	ServerID  int64
-	Name      string
-	Kind      string
-	RouteID   int64
-	Domains   []string
-	TLS       proxy.TLSMode
-	CreatedAt time.Time
+	ID         int64
+	ServerID   int64
+	Name       string
+	Kind       string
+	RouteID    int64
+	Domains    []string
+	TLS        proxy.TLSMode
+	PHPVersion string
+	CreatedAt  time.Time
 }
 
 // CreateSite creates a site and the route that serves it, in one transaction.
-func (db *DB) CreateSite(ctx context.Context, serverID int64, name string, domains []string, tls proxy.TLSMode) (*Site, error) {
+func (db *DB) CreateSite(ctx context.Context, serverID int64, name string, domains []string, tls proxy.TLSMode, phpVersion string) (*Site, error) {
 	tx, err := db.W.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
-	site := &Site{ServerID: serverID, Name: name, Kind: "static", Domains: domains, TLS: tls}
+	site := &Site{ServerID: serverID, Name: name, Kind: "static", Domains: domains, TLS: tls, PHPVersion: phpVersion}
 	var created int64
 	err = tx.QueryRowContext(ctx,
-		`INSERT INTO sites (server_id, name, kind) VALUES (?, ?, 'static') RETURNING id, created_at`,
-		serverID, name).Scan(&site.ID, &created)
+		`INSERT INTO sites (server_id, name, kind, php_version) VALUES (?, ?, 'static', ?) RETURNING id, created_at`,
+		serverID, name, phpVersion).Scan(&site.ID, &created)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: sites.name") {
 			return nil, ErrNameTaken
@@ -100,7 +101,7 @@ func (db *DB) SetSiteDomains(ctx context.Context, siteID int64, domains []string
 	return tx.Commit()
 }
 
-const siteQuery = `SELECT s.id, s.server_id, s.name, s.kind, s.created_at, r.id, r.tls, COALESCE(d.domain, '')
+const siteQuery = `SELECT s.id, s.server_id, s.name, s.kind, s.php_version, s.created_at, r.id, r.tls, COALESCE(d.domain, '')
 	FROM sites s JOIN proxy_routes r ON r.site_id = s.id
 	LEFT JOIN proxy_route_domains d ON d.route_id = r.id`
 
@@ -111,7 +112,7 @@ func (db *DB) scanSites(rows *sql.Rows) ([]*Site, error) {
 		var s Site
 		var created int64
 		var domain string
-		if err := rows.Scan(&s.ID, &s.ServerID, &s.Name, &s.Kind, &created, &s.RouteID, &s.TLS, &domain); err != nil {
+		if err := rows.Scan(&s.ID, &s.ServerID, &s.Name, &s.Kind, &s.PHPVersion, &created, &s.RouteID, &s.TLS, &domain); err != nil {
 			return nil, err
 		}
 		if n := len(out); n > 0 && out[n-1].ID == s.ID {
@@ -166,8 +167,36 @@ func (db *DB) DeleteSite(ctx context.Context, id int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM databases WHERE site_id = ?`, id).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return ErrSiteHasDatabases
+	}
 	var serverID int64
 	err = tx.QueryRowContext(ctx, `DELETE FROM sites WHERE id = ? RETURNING server_id`, id).Scan(&serverID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if err := bumpProxyRevision(ctx, tx, serverID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SetSitePHP switches a site between static ("") and a PHP version.
+func (db *DB) SetSitePHP(ctx context.Context, siteID int64, version string) error {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var serverID int64
+	err = tx.QueryRowContext(ctx, `UPDATE sites SET php_version = ? WHERE id = ? RETURNING server_id`, version, siteID).Scan(&serverID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}

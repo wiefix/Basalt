@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/wiefix/basalt/internal/auth"
+	"github.com/wiefix/basalt/internal/files"
 )
 
 type fixture struct {
@@ -46,8 +47,8 @@ func start(t *testing.T) *fixture {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	userKey, _ := ssh.NewSignerFromKey(priv)
 
-	srv := New(slog.New(slog.NewTextHandler(io.Discard, nil)), hostKey, hasher, func(id int64) string {
-		return filepath.Join(base, strconv.FormatInt(id, 10))
+	srv := New(slog.New(slog.NewTextHandler(io.Discard, nil)), hostKey, hasher, func(id int64) (*files.Site, error) {
+		return files.Open(filepath.Join(base, strconv.FormatInt(id, 10)))
 	})
 	srv.SetUsers([]User{
 		{Name: "blog", SiteID: 1, PasswordHash: hash},

@@ -42,10 +42,14 @@ type Route struct {
 	Root    string    `json:"root,omitempty"` // static
 	// SiteID marks a static route serving a managed site. The panel leaves
 	// Root empty; the agent resolves it inside its sites directory.
-	SiteID   int64   `json:"site_id,omitempty"`
-	Upstream string  `json:"upstream,omitempty"` // reverse_proxy, host:port
-	TLS      TLSMode `json:"tls"`
-	HSTS     bool    `json:"hsts,omitempty"`
+	SiteID int64 `json:"site_id,omitempty"`
+	// PHP sends *.php requests of a site route to the site's PHP-FPM pool.
+	// PHPSocket is resolved by the agent; a value from the panel is ignored.
+	PHP       bool    `json:"php,omitempty"`
+	PHPSocket string  `json:"php_socket,omitempty"`
+	Upstream  string  `json:"upstream,omitempty"` // reverse_proxy, host:port
+	TLS       TLSMode `json:"tls"`
+	HSTS      bool    `json:"hsts,omitempty"`
 }
 
 // Desired is the complete proxy state the panel wants on one host.
@@ -165,13 +169,19 @@ func (r *Route) Validate(sitesRoot string) error {
 		if r.SiteID < 0 {
 			return errors.New("invalid site id")
 		}
+		if r.PHP && r.SiteID == 0 {
+			return errors.New("PHP is only available for sites")
+		}
+		if r.PHPSocket != "" && (!filepath.IsAbs(r.PHPSocket) || filepath.Clean(r.PHPSocket) != r.PHPSocket) {
+			return errors.New("invalid PHP socket path")
+		}
 		if r.SiteID > 0 && r.Root == "" {
 			return nil // resolved by the agent
 		}
 		return validateRoot(r.Root, sitesRoot)
 	case KindReverseProxy:
-		if r.Root != "" || r.SiteID != 0 {
-			return errors.New("reverse_proxy route cannot have a root or site")
+		if r.Root != "" || r.SiteID != 0 || r.PHP {
+			return errors.New("reverse_proxy route cannot have a root, site or PHP")
 		}
 		return ValidateUpstream(r.Upstream)
 	default:

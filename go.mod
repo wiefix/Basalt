@@ -7,6 +7,7 @@ ignore ./web/node_modules
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.7
+	github.com/go-sql-driver/mysql v1.10.1
 	github.com/pkg/sftp v1.13.11
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
@@ -59,7 +60,6 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.5 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/go-sql-driver/mysql v1.10.1 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/certificate-transparency-go v1.3.3 // indirect

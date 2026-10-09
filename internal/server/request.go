@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/mail"
+	"net/netip"
 	"strings"
 	"unicode/utf8"
 )
@@ -63,9 +64,8 @@ func jsonErrorMessage(err error) string {
 	}
 }
 
-// clientIP returns the peer address. Trusted reverse-proxy headers will be
-// honoured once a trusted-proxy list is configurable; until then they are
-// ignored so clients cannot spoof their address.
+// clientIP returns the peer address. When the panel is behind a trusted
+// reverse proxy, the realIP middleware has already replaced RemoteAddr.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -105,4 +105,65 @@ func truncate(s string, n int) string {
 		n--
 	}
 	return s[:n]
+}
+
+// realIP replaces RemoteAddr with the client address from X-Forwarded-For,
+// but only for requests that arrive from a trusted proxy. It takes the
+// rightmost address that is not itself a trusted proxy: entries further left
+// are supplied by the client and cannot be trusted.
+func realIP(trusted []netip.Prefix, next http.Handler) http.Handler {
+	if len(trusted) == 0 {
+		return next
+	}
+	isTrusted := func(a netip.Addr) bool {
+		for _, p := range trusted {
+			if p.Contains(a.Unmap()) {
+				return true
+			}
+		}
+		return false
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		peer, perr := netip.ParseAddr(host)
+		if err != nil || perr != nil || !isTrusted(peer) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
+		for i := len(hops) - 1; i >= 0; i-- {
+			a, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
+			if err != nil {
+				break // malformed: stop and keep the proxy's address
+			}
+			if !isTrusted(a) {
+				r2 := r.Clone(r.Context())
+				r2.RemoteAddr = netip.AddrPortFrom(a.Unmap(), 0).String()
+				next.ServeHTTP(w, r2)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ParseTrustedProxies parses a comma-separated list of IPs or CIDRs.
+func ParseTrustedProxies(s string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(part); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid trusted proxy %q", part)
+		}
+		out = append(out, netip.PrefixFrom(a.Unmap(), a.Unmap().BitLen()))
+	}
+	return out, nil
 }

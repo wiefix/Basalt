@@ -27,8 +27,10 @@ func AdminSocket(dir string) string { return filepath.Join(dir, "admin.sock") }
 func ConfigPath(dir string) string  { return filepath.Join(dir, "config.json") }
 func storagePath(dir string) string { return filepath.Join(dir, "storage") }
 
-// Never served from static sites even if present in the site root.
-var hiddenFiles = []string{".git", ".svn", ".hg", ".env", ".htaccess", ".htpasswd", ".DS_Store", ".user.ini"}
+// Never served from static sites even if present in the site root. PHP
+// sources are hidden too: a site switched from PHP to static must not
+// expose its code (and the credentials in it) as plain text.
+var hiddenFiles = []string{".git", ".svn", ".hg", ".env", ".htaccess", ".htpasswd", ".DS_Store", ".user.ini", "*.php"}
 
 func adminConfig(dir string) obj {
 	return obj{
@@ -136,7 +138,7 @@ func routeHandlers(r Route) (handlers []any, fsEntry obj) {
 
 	switch r.Kind {
 	case KindStatic:
-		if r.Root == "" {
+		if r.Root == "" || (r.PHP && r.PHPSocket == "") {
 			// Unresolved site route: serve nothing rather than guess a path.
 			return append(handlers, obj{"handler": "static_response", "status_code": 503}), nil
 		}
@@ -145,7 +147,7 @@ func routeHandlers(r Route) (handlers []any, fsEntry obj) {
 			"name":        fsName,
 			"file_system": obj{"backend": "basalt_root", "root": r.Root},
 		}
-		handlers = append(handlers,
+		static := []any{
 			obj{
 				"handler":   "encode",
 				"encodings": obj{"zstd": obj{}, "gzip": obj{}},
@@ -158,7 +160,12 @@ func routeHandlers(r Route) (handlers []any, fsEntry obj) {
 				"hide":                hiddenFiles,
 				"precompressed":       obj{"zstd": obj{}, "br": obj{}, "gzip": obj{}},
 				"precompressed_order": []any{"zstd", "br", "gzip"},
-			})
+			},
+		}
+		if !r.PHP {
+			return append(handlers, static...), fsEntry
+		}
+		return append(handlers, obj{"handler": "subroute", "routes": phpRoutes(r, fsName, static)}), fsEntry
 	case KindReverseProxy:
 		handlers = append(handlers, obj{
 			"handler":   "reverse_proxy",
@@ -198,4 +205,47 @@ func acmeIssuer(directory, email string) obj {
 		iss["email"] = email
 	}
 	return iss
+}
+
+// phpRoutes mirrors Caddy's php_fastcgi directive: redirect directories to
+// their canonical slash form when they hold an index.php, rewrite missing
+// paths to index.php (front controller), send *.php to PHP-FPM and serve the
+// rest as static files. File checks use the confined file system.
+func phpRoutes(r Route, fsName string, static []any) []any {
+	const path = "{http.request.uri.path}"
+	return []any{
+		obj{
+			"match": []any{obj{
+				"file": obj{"fs": fsName, "root": ".", "try_files": []any{path + "/index.php"}},
+				"not":  []any{obj{"path": []any{"*/"}}},
+			}},
+			"handle": []any{obj{
+				"handler":     "static_response",
+				"status_code": 308,
+				"headers":     obj{"Location": []any{"{http.request.orig_uri.path}/{http.request.orig_uri.prefixed_query}"}},
+			}},
+		},
+		obj{
+			"match": []any{obj{"file": obj{
+				"fs": fsName, "root": ".",
+				"try_files":  []any{path, path + "/index.php", "index.php"},
+				"try_policy": "first_exist_fallback",
+				"split_path": []any{".php"},
+			}}},
+			"handle": []any{obj{"handler": "rewrite", "uri": "{http.matchers.file.relative}"}},
+		},
+		obj{
+			"match": []any{obj{"path": []any{"*.php"}}},
+			"handle": []any{obj{
+				"handler": "reverse_proxy",
+				"transport": obj{
+					"protocol":   "fastcgi",
+					"root":       r.Root,
+					"split_path": []any{".php"},
+				},
+				"upstreams": []any{obj{"dial": "unix/" + r.PHPSocket}},
+			}},
+		},
+		obj{"handle": static},
+	}
 }

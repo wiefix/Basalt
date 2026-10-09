@@ -25,9 +25,16 @@ func (s *Site) OpenFile(p string, flag int, perm fs.FileMode) (*os.File, error) 
 	if perm == 0 || perm&^0o777 != 0 {
 		perm = 0o644
 	}
+	_, existed := s.root.Lstat(c)
 	f, err := s.root.OpenFile(c, flag, perm)
 	if err != nil {
 		return nil, err
+	}
+	if existed != nil && flag&os.O_CREATE != 0 {
+		if err := s.chownFile(f, c); err != nil {
+			f.Close()
+			return nil, err
+		}
 	}
 	if fi, err := f.Stat(); err == nil && fi.IsDir() && flag&(os.O_WRONLY|os.O_RDWR) != 0 {
 		f.Close()

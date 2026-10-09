@@ -20,6 +20,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/buildinfo"
+	"github.com/wiefix/basalt/internal/mariadb"
 	"github.com/wiefix/basalt/internal/pki"
 )
 
@@ -43,6 +44,21 @@ type Config struct {
 	ACMEDirectory string
 	// SFTPListen is the SFTP server address; empty disables SFTP.
 	SFTPListen string
+	// Isolate runs each site as its own system user (Linux, root only).
+	Isolate bool
+	// WWWGroup is the group shared by site directories and the proxy.
+	WWWGroup string
+	// ProxyUser is the system user `basalt proxy` runs as ("" if root).
+	ProxyUser string
+	// PHPRunDir holds PHP-FPM pool sockets.
+	PHPRunDir string
+	// MySQLSocket is the local MariaDB/MySQL socket ("" disables databases).
+	MySQLSocket string
+	// PanelDomain and PanelUpstream publish the panel itself through this
+	// host's proxy (set on the panel's own host). The route exists even
+	// before the panel has sent any state, so the UI is reachable at once.
+	PanelDomain   string
+	PanelUpstream string
 }
 
 type Agent struct {
@@ -51,6 +67,7 @@ type Agent struct {
 	proxy *proxyManager
 	sites *sitesManager
 	sftp  *sftpManager
+	mysql string
 
 	mu sync.Mutex
 	id *identity
@@ -66,7 +83,16 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	sites := newSitesManager(cfg.SitesRoot, log.With("subsystem", "sites"))
+	if cfg.Isolate && (runtime.GOOS != "linux" || os.Geteuid() != 0) {
+		return nil, errors.New("site isolation requires Linux and running as root")
+	}
+	if cfg.WWWGroup == "" {
+		cfg.WWWGroup = "basalt-www"
+	}
+	if cfg.PHPRunDir == "" {
+		cfg.PHPRunDir = "/run/basalt/php"
+	}
+	sites := newSitesManager(cfg, log.With("subsystem", "sites"))
 	sftp, err := newSFTPManager(cfg, sites, log.With("subsystem", "sftp"))
 	if err != nil {
 		return nil, err
@@ -75,6 +101,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		dir: cfg.DataDir, log: log, id: id,
 		sites:           sites,
 		sftp:            sftp,
+		mysql:           cfg.MySQLSocket,
 		proxy:           newProxyManager(cfg, sites, log.With("subsystem", "proxy")),
 		MetricsInterval: metricsInterval,
 		RenewBefore:     renewBefore,
@@ -173,6 +200,8 @@ func (a *Agent) session(ctx context.Context) error {
 
 	hello := hostFacts()
 	hello.SFTPPort, hello.SFTPFingerprint = a.sftp.Port(), a.sftp.Fingerprint()
+	hello.PHPVersions, hello.Isolated = a.sites.PHPVersions(), a.sites.isolate
+	hello.MariaDB = a.mariadbVersion(ctx)
 	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
 		return err
 	}
@@ -202,15 +231,21 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		if typ == agentproto.TypeSiteEnsure {
-			return struct{}{}, publicError(a.sites.Ensure(req.SiteID))
+			return struct{}{}, publicError(a.sites.Ensure(ctx, req.SiteID, req.PHPVersion))
 		}
-		return struct{}{}, publicError(a.sites.Delete(req.SiteID))
+		return struct{}{}, publicError(a.sites.Delete(ctx, req.SiteID))
 	case agentproto.TypeSFTPApply:
 		var st agentproto.SFTPApply
 		if err := json.Unmarshal(payload, &st); err != nil {
 			return nil, err
 		}
 		return struct{}{}, a.sftp.Apply(st)
+	case agentproto.TypeDatabase:
+		var req agentproto.DatabaseRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.database(ctx, req)
 	case agentproto.TypeFiles:
 		var req agentproto.FilesRequest
 		if err := json.Unmarshal(payload, &req); err != nil {
@@ -295,4 +330,43 @@ func hostFacts() agentproto.Hello {
 	h.Hostname, _ = os.Hostname()
 	h.Kernel, h.Distro, h.MemTotal = platformFacts()
 	return h
+}
+
+func (a *Agent) mariadbVersion(ctx context.Context) string {
+	if a.mysql == "" || !mariadb.Available(a.mysql) {
+		return ""
+	}
+	db, err := mariadb.Open(a.mysql)
+	if err != nil {
+		return ""
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	v, err := db.Version(ctx)
+	if err != nil {
+		a.log.Warn("MariaDB socket present but not usable", "err", err)
+		return ""
+	}
+	return v
+}
+
+func (a *Agent) database(ctx context.Context, req agentproto.DatabaseRequest) error {
+	if a.mysql == "" || !mariadb.Available(a.mysql) {
+		return errors.New("MariaDB is not available on this server")
+	}
+	db, err := mariadb.Open(a.mysql)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	switch req.Op {
+	case agentproto.DBCreate:
+		return db.CreateDatabase(ctx, req.Name, req.User, req.Password)
+	case agentproto.DBDrop:
+		return db.DropDatabase(ctx, req.Name, req.User)
+	case agentproto.DBPassword:
+		return db.SetPassword(ctx, req.User, req.Password)
+	}
+	return fmt.Errorf("unknown database operation %q", req.Op)
 }

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wiefix/basalt/deploy"
 	"github.com/wiefix/basalt/internal/agent"
 	"github.com/wiefix/basalt/internal/agenthub"
 	"github.com/wiefix/basalt/internal/auth"
@@ -84,6 +85,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 }
 
 func runServer(ctx context.Context, args []string, stderr io.Writer) error {
+	if len(args) > 0 && args[0] == "local-enroll" {
+		return runLocalEnroll(ctx, args[1:], os.Stdout, stderr)
+	}
 	cfg, err := config.ParseServer(args, stderr)
 	if err != nil {
 		return err
@@ -122,6 +126,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 
 	var setupToken string
+	setupFile := filepath.Join(cfg.DataDir, "setup-token")
 	users, err := db.CountUsers(ctx)
 	if err != nil {
 		return err
@@ -129,7 +134,16 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	if users == 0 {
 		setupToken = auth.NewToken()
 		log.Warn("no users yet: complete setup with this one-time token (valid until restart)",
-			"setup_token", setupToken)
+			"setup_token", setupToken, "file", setupFile)
+		if err := os.WriteFile(setupFile, []byte(setupToken+"\n"), 0o600); err != nil {
+			log.Warn("write setup token file", "err", err)
+		}
+	} else {
+		os.Remove(setupFile)
+	}
+	trusted, err := server.ParseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		return err
 	}
 	if cfg.InsecureCookies {
 		log.Warn("insecure cookies enabled: session cookies are sent over plain HTTP; development only")
@@ -140,16 +154,19 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	hub := agenthub.New(baseLog.With("component", "agenthub"), db, ca, nil)
+	hub.ServeInstaller(deploy.InstallScript, cfg.BinariesDir)
 
 	api := server.New(server.Options{
-		Log:           log,
-		DB:            db,
-		Box:           box,
-		Hasher:        auth.NewHasher(auth.DefaultArgon2Params, min(4, runtime.NumCPU())),
-		SetupToken:    setupToken,
-		SecureCookies: !cfg.InsecureCookies,
-		Agents:        hub,
-		AgentURL:      cfg.AgentURL,
+		Log:            log,
+		DB:             db,
+		Box:            box,
+		Hasher:         auth.NewHasher(auth.DefaultArgon2Params, min(4, runtime.NumCPU())),
+		SetupToken:     setupToken,
+		SecureCookies:  !cfg.InsecureCookies,
+		Agents:         hub,
+		AgentURL:       cfg.AgentURL,
+		TrustedProxies: trusted,
+		SetupTokenFile: setupFile,
 	})
 	hub.OnConnect(api.SyncSites)
 
@@ -196,12 +213,53 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		HTTPSPort:     cfg.HTTPSPort,
 		ACMEDirectory: cfg.ACMEDirectory,
 		SFTPListen:    cfg.SFTPListen,
+		Isolate:       cfg.Isolate == "on" || (cfg.Isolate == "auto" && runtime.GOOS == "linux" && os.Geteuid() == 0),
+		ProxyUser:     cfg.ProxyUser,
+		MySQLSocket:   cfg.MySQLSocket,
+		PanelDomain:   cfg.PanelDomain,
+		PanelUpstream: cfg.PanelUpstream,
 	}, log)
 	if err != nil {
 		return err
 	}
 	log.Info("starting", "version", buildinfo.Version, "server_id", a.ServerID(), "data_dir", cfg.DataDir)
 	return a.Run(ctx)
+}
+
+// runLocalEnroll creates (or reuses) a server entry for this host directly in
+// the database and prints the flags for `basalt agent enroll`. Used by the
+// installer so the panel's own host is managed without a manual step.
+func runLocalEnroll(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	cfg, err := config.ParseLocalEnroll(args, stderr)
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(ctx, filepath.Join(cfg.DataDir, "basalt.db"))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	box, err := secrets.LoadOrCreateKey(filepath.Join(cfg.DataDir, "master.key"))
+	if err != nil {
+		return err
+	}
+	instanceID, err := db.InstanceID(ctx)
+	if err != nil {
+		return err
+	}
+	ca, err := agenthub.LoadOrCreateCA(ctx, db, box, instanceID, time.Now())
+	if err != nil {
+		return err
+	}
+	token := auth.NewToken()
+	expires := time.Now().Add(time.Hour)
+	if _, err := db.CreateServer(ctx, cfg.Name, auth.HashToken(token), expires); errors.Is(err, store.ErrNameTaken) {
+		return fmt.Errorf("a server named %q already exists", cfg.Name)
+	} else if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "--panel %s --token %s --ca-sha256 %s\n", cfg.AgentURL, token, ca.Fingerprint())
+	return nil
 }
 
 func runProxy(ctx context.Context, args []string, stderr io.Writer) error {

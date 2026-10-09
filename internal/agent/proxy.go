@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -30,6 +31,7 @@ type proxyManager struct {
 	opts      proxy.BuildOptions
 	admin     *proxy.Admin
 	sites     *sitesManager
+	panel     *proxy.Route
 
 	applyMu sync.Mutex // serialises Apply calls
 
@@ -39,7 +41,13 @@ type proxyManager struct {
 }
 
 func newProxyManager(cfg Config, sites *sitesManager, log *slog.Logger) *proxyManager {
+	var panel *proxy.Route
+	if cfg.PanelDomain != "" && cfg.PanelUpstream != "" {
+		panel = &proxy.Route{Kind: proxy.KindReverseProxy, Domains: []string{cfg.PanelDomain},
+			Upstream: cfg.PanelUpstream, TLS: proxy.TLSAuto, HSTS: true}
+	}
 	return &proxyManager{
+		panel:     panel,
 		log:       log,
 		sites:     sites,
 		stateFile: filepath.Join(cfg.DataDir, fileProxyDesired),
@@ -82,7 +90,7 @@ func (m *proxyManager) Apply(ctx context.Context, d proxy.Desired) (string, erro
 	cur := m.desired
 	m.mu.Unlock()
 	if cur != nil && d.Revision < cur.Revision {
-		_, id, err := proxy.Build(*cur, m.opts)
+		_, id, err := proxy.Build(m.withPanel(*cur), m.opts)
 		m.log.Info("ignoring outdated proxy state", "revision", d.Revision, "current", cur.Revision)
 		return id, err
 	}
@@ -91,7 +99,7 @@ func (m *proxyManager) Apply(ctx context.Context, d proxy.Desired) (string, erro
 	if err := d.Validate(m.sitesRoot); err != nil {
 		return "", err
 	}
-	cfg, id, err := proxy.Build(d, m.opts)
+	cfg, id, err := proxy.Build(m.withPanel(d), m.opts)
 	if err != nil {
 		return "", err
 	}
@@ -110,6 +118,29 @@ func (m *proxyManager) Apply(ctx context.Context, d proxy.Desired) (string, erro
 	return id, nil
 }
 
+// withPanel adds the panel's own route. A site route claiming the panel's
+// domain is dropped: losing access to the panel would be worse.
+func (m *proxyManager) withPanel(d proxy.Desired) proxy.Desired {
+	if m.panel == nil {
+		return d
+	}
+	panel := *m.panel
+	if err := panel.Validate(""); err != nil {
+		m.log.Error("invalid panel route", "err", err)
+		return d
+	}
+	out := d
+	out.Routes = []proxy.Route{panel}
+	for _, r := range d.Routes {
+		if slices.ContainsFunc(r.Domains, func(x string) bool { return slices.Contains(panel.Domains, x) }) {
+			m.log.Warn("route uses the panel's domain; skipped", "route_id", r.ID)
+			continue
+		}
+		out.Routes = append(out.Routes, r)
+	}
+	return out
+}
+
 // resolveSites fills in the served directory of site routes. A root sent by
 // the panel for a site route is ignored: only the agent decides where a
 // site lives.
@@ -117,6 +148,10 @@ func (m *proxyManager) resolveSites(d *proxy.Desired) {
 	for i := range d.Routes {
 		if r := &d.Routes[i]; r.Kind == proxy.KindStatic && r.SiteID > 0 {
 			r.Root = m.sites.PublicDir(r.SiteID)
+			r.PHPSocket = ""
+			if r.PHP {
+				r.PHPSocket = m.sites.php.Socket(r.SiteID)
+			}
 		}
 	}
 }
@@ -129,8 +164,13 @@ func (m *proxyManager) persist(d proxy.Desired, cfg []byte) error {
 	if err := writeAtomic(m.stateFile, b, 0o600); err != nil {
 		return err
 	}
-	// The proxy loads this file on its own start.
-	return writeAtomic(proxy.ConfigPath(m.opts.Dir), cfg, 0o600)
+	// The proxy loads this file on its own start. It may run as its own
+	// user: hand the file to whoever owns the proxy directory.
+	path := proxy.ConfigPath(m.opts.Dir)
+	if err := writeAtomic(path, cfg, 0o600); err != nil {
+		return err
+	}
+	return chownLike(path, m.opts.Dir)
 }
 
 // reconcile re-applies the desired state if the proxy is not running it,
@@ -140,9 +180,12 @@ func (m *proxyManager) reconcile(ctx context.Context) {
 	d := m.desired
 	m.mu.Unlock()
 	if d == nil {
-		return
+		if m.panel == nil {
+			return
+		}
+		d = &proxy.Desired{} // nothing from the panel yet: still publish the panel
 	}
-	cfg, id, err := proxy.Build(*d, m.opts)
+	cfg, id, err := proxy.Build(m.withPanel(*d), m.opts)
 	if err != nil {
 		m.report(err)
 		return

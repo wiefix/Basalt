@@ -42,6 +42,8 @@ type serverView struct {
 	LastIP        string     `json:"last_ip,omitempty"`
 	CertExpires   *time.Time `json:"cert_expires,omitempty"`
 	EnrollExpires *time.Time `json:"enroll_expires,omitempty"`
+	PHPVersions   []string   `json:"php_versions"`
+	Isolated      bool       `json:"isolated"`
 	CreatedAt     time.Time  `json:"created_at"`
 }
 
@@ -58,21 +60,34 @@ func (s *Server) viewServer(srv *store.Server) serverView {
 		Arch: srv.Arch, Kernel: srv.Kernel, Distro: srv.Distro, AgentVersion: srv.AgentVersion,
 		CPUCount: srv.CPUCount, MemTotal: srv.MemTotal, LastSeen: srv.LastSeen, LastIP: srv.LastIP,
 		CertExpires: srv.CertExpires, EnrollExpires: srv.EnrollExpires, CreatedAt: srv.CreatedAt,
+		PHPVersions: srv.PHPVersions, Isolated: srv.Isolated,
 	}
 }
 
 type enrollmentView struct {
 	Token     string    `json:"token"`
 	ExpiresAt time.Time `json:"expires_at"`
-	Command   string    `json:"command"`
+	// InstallCommand installs and enrolls a fresh host in one go.
+	InstallCommand string `json:"install_command"`
+	// Command enrolls a host where basalt is already installed.
+	Command string `json:"command"`
 }
 
 func (s *Server) enrollment(token string, expires time.Time) enrollmentView {
+	fp := s.agents.CAFingerprint()
+	hostport := strings.TrimPrefix(s.agentURL, "https://")
+	args := "--panel " + s.agentURL + " --token " + token + " --ca-sha256 " + fp
 	return enrollmentView{
 		Token:     token,
 		ExpiresAt: expires,
-		Command: "basalt agent enroll --panel " + s.agentURL +
-			" --token " + token + " --ca-sha256 " + s.agents.CAFingerprint(),
+		// The CA is fetched without verification and then checked against the
+		// fingerprint; everything after that is fetched trusting only that CA.
+		InstallCommand: "curl -fsSk https://" + hostport + "/agent/v1/ca.der -o /tmp/basalt-ca.der" +
+			` && echo "` + fp + `  /tmp/basalt-ca.der" | sha256sum -c --quiet -` +
+			` && { echo '-----BEGIN CERTIFICATE-----'; base64 -w 64 /tmp/basalt-ca.der; echo '-----END CERTIFICATE-----'; } > /tmp/basalt-ca.pem` +
+			" && curl -fsS --cacert /tmp/basalt-ca.pem --connect-to basalt-panel:443:" + hostport +
+			" https://basalt-panel/agent/v1/install.sh | sh -s -- agent " + args,
+		Command: "basalt agent enroll " + args,
 	}
 }
 

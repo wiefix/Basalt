@@ -135,3 +135,34 @@ func TestGracefulShutdown(t *testing.T) {
 		t.Fatal("server did not shut down")
 	}
 }
+
+func TestRealIP(t *testing.T) {
+	trusted, err := ParseTrustedProxies("127.0.0.1, 10.0.0.0/8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	h := realIP(trusted, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = clientIP(r) }))
+	for _, c := range []struct{ peer, xff, want string }{
+		{"127.0.0.1:5000", "203.0.113.9", "203.0.113.9"},
+		{"127.0.0.1:5000", "6.6.6.6, 203.0.113.9", "203.0.113.9"},  // left entry is client-supplied
+		{"127.0.0.1:5000", "203.0.113.9, 10.1.2.3", "203.0.113.9"}, // skip inner trusted hop
+		{"198.51.100.7:5000", "1.2.3.4", "198.51.100.7"},           // untrusted peer: header ignored
+		{"127.0.0.1:5000", "", "127.0.0.1"},                        // no header
+		{"127.0.0.1:5000", "garbage, 203.0.113.9", "203.0.113.9"},  // garbage left of a valid hop
+		{"127.0.0.1:5000", "203.0.113.9, garbage", "127.0.0.1"},    // malformed last hop: keep peer
+	} {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = c.peer
+		if c.xff != "" {
+			r.Header.Set("X-Forwarded-For", c.xff)
+		}
+		h.ServeHTTP(httptest.NewRecorder(), r)
+		if got != c.want {
+			t.Errorf("peer %s xff %q: got %s want %s", c.peer, c.xff, got, c.want)
+		}
+	}
+	if _, err := ParseTrustedProxies("nope"); err == nil {
+		t.Error("invalid proxy accepted")
+	}
+}

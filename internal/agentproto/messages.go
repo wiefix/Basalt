@@ -28,6 +28,7 @@ const (
 	TypeSiteDelete = "site_delete"
 	TypeFiles      = "files"
 	TypeSFTPApply  = "sftp_apply"
+	TypeDatabase   = "database"
 )
 
 // EnrollRequest is posted once, authenticated by the one-time token.
@@ -57,6 +58,12 @@ type Hello struct {
 	// lets users verify the host on first connect.
 	SFTPPort        int    `json:"sftp_port,omitempty"`
 	SFTPFingerprint string `json:"sftp_fingerprint,omitempty"`
+	// PHPVersions installed on the host, newest first.
+	PHPVersions []string `json:"php_versions,omitempty"`
+	// Isolated is true when sites run as separate system users.
+	Isolated bool `json:"isolated,omitempty"`
+	// MariaDB is the version of the local database server ("" if absent).
+	MariaDB string `json:"mariadb,omitempty"`
 }
 
 type Metrics struct {
@@ -93,6 +100,8 @@ type ProxyApplyResponse struct {
 
 type SiteRequest struct {
 	SiteID int64 `json:"site_id"`
+	// PHPVersion enables a PHP-FPM pool for the site ("" = static only).
+	PHPVersion string `json:"php_version,omitempty"`
 }
 
 // File-manager operations.
@@ -140,4 +149,18 @@ type FilesResponse struct {
 type SFTPApply struct {
 	Revision int64        `json:"revision"`
 	Users    []sftpd.User `json:"users"`
+}
+
+// Database operations.
+const (
+	DBCreate   = "create"
+	DBDrop     = "drop"
+	DBPassword = "password"
+)
+
+type DatabaseRequest struct {
+	Op       string `json:"op"`
+	Name     string `json:"name"`
+	User     string `json:"user"`
+	Password string `json:"password,omitempty"`
 }

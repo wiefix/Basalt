@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -45,6 +46,9 @@ type Hub struct {
 	mu        sync.Mutex
 	conns     map[int64]*conn
 	onConnect func(ctx context.Context, serverID int64)
+
+	installScript []byte
+	binariesDir   string
 }
 
 // OnConnect registers a callback run (in its own goroutine) whenever an
@@ -90,6 +94,7 @@ func (h *Hub) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+agentproto.PathEnroll, h.handleEnroll)
 	mux.HandleFunc("POST "+agentproto.PathConnect, h.handleConnect)
+	h.registerInstaller(mux)
 	return mux
 }
 
@@ -285,10 +290,14 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 		if err := h.db.SetServerSFTP(ctx, id, max(0, min(m.SFTPPort, 65535)), clean(m.SFTPFingerprint)); err != nil {
 			return nil, err
 		}
+		if err := h.db.SetServerMariaDB(ctx, id, clean(m.MariaDB)); err != nil {
+			return nil, err
+		}
 		return nil, h.db.UpdateServerHello(ctx, id, store.Server{
 			Hostname: clean(m.Hostname), OS: clean(m.OS), Arch: clean(m.Arch), Kernel: clean(m.Kernel),
 			Distro: clean(m.Distro), AgentVersion: clean(m.AgentVersion),
 			CPUCount: max(0, m.CPUCount), MemTotal: m.MemTotal, LastIP: ip, LastSeen: &now,
+			PHPVersions: cleanVersions(m.PHPVersions), Isolated: m.Isolated,
 		})
 	case agentproto.TypeMetrics:
 		var m agentproto.Metrics
@@ -391,4 +400,16 @@ func clamp(v, lo, hi float64) float64 {
 		return lo
 	}
 	return min(max(v, lo), hi)
+}
+
+var phpVersionRE = regexp.MustCompile(`^[5-9]\.[0-9]$`)
+
+func cleanVersions(vs []string) []string {
+	out := []string{}
+	for _, v := range vs {
+		if phpVersionRE.MatchString(v) && len(out) < 20 {
+			out = append(out, v)
+		}
+	}
+	return out
 }

@@ -33,6 +33,18 @@ type Server struct {
 	AgentListen string
 	// AgentURL is the address agents use to reach AgentListen.
 	AgentURL string
+	// TrustedProxies may set X-Forwarded-For (comma-separated IPs/CIDRs).
+	TrustedProxies string
+	// BinariesDir optionally holds basalt-<os>-<arch> builds served to
+	// agents on other architectures.
+	BinariesDir string
+}
+
+// LocalEnroll configures `basalt server local-enroll`.
+type LocalEnroll struct {
+	Common
+	AgentURL string
+	Name     string
 }
 
 // AgentEnroll configures `basalt agent enroll`.
@@ -52,6 +64,11 @@ type Agent struct {
 	HTTPSPort     int
 	ACMEDirectory string
 	SFTPListen    string
+	Isolate       string // "auto", "on", "off"
+	ProxyUser     string
+	MySQLSocket   string
+	PanelDomain   string
+	PanelUpstream string
 }
 
 // Proxy configures `basalt proxy`.
@@ -106,6 +123,8 @@ func ParseServer(args []string, output io.Writer) (Server, error) {
 	fs.BoolVar(&cfg.InsecureCookies, "insecure-cookies", insecure, "allow session cookies over plain HTTP (development only)")
 	fs.StringVar(&cfg.AgentListen, "agent-listen", env("AGENT_LISTEN", ":8443"), "agent channel listen address (mutual TLS)")
 	fs.StringVar(&cfg.AgentURL, "agent-url", env("AGENT_URL", ""), "URL agents use to reach the agent channel (default https://<hostname>:<agent port>)")
+	fs.StringVar(&cfg.TrustedProxies, "trusted-proxies", env("TRUSTED_PROXIES", ""), "comma-separated IPs/CIDRs of reverse proxies allowed to set X-Forwarded-For")
+	fs.StringVar(&cfg.BinariesDir, "binaries-dir", env("BINARIES_DIR", ""), "directory with basalt-<os>-<arch> binaries to serve to agents")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -144,11 +163,21 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs.IntVar(&cfg.HTTPSPort, "https-port", 443, "public HTTPS port of the proxy")
 	fs.StringVar(&cfg.ACMEDirectory, "acme-directory", env("ACME_DIRECTORY", ""), "ACME directory URL override (e.g. Let's Encrypt staging)")
 	fs.StringVar(&cfg.SFTPListen, "sftp-listen", env("SFTP_LISTEN", ":2222"), "SFTP listen address (empty disables SFTP)")
+	fs.StringVar(&cfg.Isolate, "isolate", env("ISOLATE", "auto"), "per-site system users: auto (on when root on Linux), on, off")
+	fs.StringVar(&cfg.ProxyUser, "proxy-user", env("PROXY_USER", ""), "system user `basalt proxy` runs as (added to the web group)")
+	fs.StringVar(&cfg.PanelDomain, "panel-domain", env("PANEL_DOMAIN", ""), "publish the panel UI on this domain or IP through the local proxy (panel host only)")
+	fs.StringVar(&cfg.PanelUpstream, "panel-upstream", env("PANEL_UPSTREAM", "127.0.0.1:8080"), "address of the panel's HTTP listener")
+	fs.StringVar(&cfg.MySQLSocket, "mysql-socket", env("MYSQL_SOCKET", "/run/mysqld/mysqld.sock"), "local MariaDB/MySQL socket (empty disables databases)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
 	if fs.NArg() > 0 {
 		return cfg, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	switch cfg.Isolate {
+	case "auto", "on", "off":
+	default:
+		return cfg, fmt.Errorf("--isolate must be auto, on or off")
 	}
 	for _, p := range []int{cfg.HTTPPort, cfg.HTTPSPort} {
 		if p < 1 || p > 65535 {
@@ -182,6 +211,20 @@ func ParseAgentEnroll(args []string, output io.Writer) (AgentEnroll, error) {
 	}
 	if cfg.PanelURL == "" || cfg.Token == "" || cfg.CASHA256 == "" {
 		return cfg, errors.New("--panel, --token and --ca-sha256 are required")
+	}
+	return cfg, cfg.validate()
+}
+
+// ParseLocalEnroll parses flags for `basalt server local-enroll`.
+func ParseLocalEnroll(args []string, output io.Writer) (LocalEnroll, error) {
+	var cfg LocalEnroll
+	fs := flag.NewFlagSet("basalt server local-enroll", flag.ContinueOnError)
+	fs.SetOutput(output)
+	cfg.register(fs, "/var/lib/basalt/server")
+	fs.StringVar(&cfg.AgentURL, "agent-url", "https://127.0.0.1:8443", "agent channel URL as seen from this host")
+	fs.StringVar(&cfg.Name, "name", "local", "name of the server entry")
+	if err := fs.Parse(args); err != nil {
+		return cfg, err
 	}
 	return cfg, cfg.validate()
 }

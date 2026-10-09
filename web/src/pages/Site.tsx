@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
-import { api, can, type Site, type User } from "../api";
+import { api, can, type DatabaseCredentials, type Site, type User } from "../api";
 import { FileManager } from "../components/FileManager";
 import { CodeBox, CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useConfirm, useToast } from "../components/ui";
 import { SyncBadge } from "./Server";
@@ -27,6 +27,7 @@ export function SitePage({ user }: { user: User }) {
         <div>
           <div className="row">
             <h1>{s.name}</h1>
+            <span className="badge plain">{s.php_version ? `PHP ${s.php_version}` : "static"}</span>
             <SyncBadge sync={site.data.sync} />
           </div>
           <div className="sub row wrap">
@@ -50,13 +51,15 @@ export function SitePage({ user }: { user: User }) {
         {tab(`/sites/${id}`, "Files")}
         {tab(`/sites/${id}/domains`, "Domains")}
         {tab(`/sites/${id}/sftp`, "SFTP")}
+        {tab(`/sites/${id}/databases`, "Databases")}
         {can(user, "admin") && tab(`/sites/${id}/settings`, "Settings")}
       </div>
       <Routes>
         <Route index element={<FileManager siteId={id} canWrite={can(user, "member")} />} />
         <Route path="domains" element={<DomainsTab site={s} user={user} />} />
         <Route path="sftp" element={<SFTPTab site={s} user={user} host={server?.last_ip} />} />
-        <Route path="settings" element={<SettingsTab site={s} />} />
+        <Route path="databases" element={<DatabasesTab site={s} user={user} />} />
+        <Route path="settings" element={<SettingsTab site={s} phpVersions={server?.isolated ? server.php_versions : []} />} />
       </Routes>
     </>
   );
@@ -317,7 +320,61 @@ function AddSFTPModal({
   );
 }
 
-function SettingsTab({ site }: { site: Site }) {
+function SettingsTab({ site, phpVersions }: { site: Site; phpVersions: string[] }) {
+  return (
+    <div className="stack" style={{ maxWidth: 640 }}>
+      <RuntimeCard site={site} phpVersions={phpVersions} />
+      <DeleteCard site={site} />
+    </div>
+  );
+}
+
+function RuntimeCard({ site, phpVersions }: { site: Site; phpVersions: string[] }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [version, setVersion] = useState(site.php_version);
+  const options = Array.from(new Set([...phpVersions, ...(site.php_version ? [site.php_version] : [])]));
+  const save = useMutation({
+    mutationFn: () => api.setSitePHP(site.id, version),
+    onSuccess: (r) => {
+      qc.setQueryData(["site", site.id], { site: r.site, sync: r.sync });
+      qc.invalidateQueries({ queryKey: ["sites"] });
+      toast(version ? `Switched to PHP ${version}` : "Switched to static");
+    },
+  });
+  return (
+    <form
+      className="card card-body form"
+      onSubmit={(e: FormEvent) => {
+        e.preventDefault();
+        save.mutate();
+      }}
+    >
+      <h2>Runtime</h2>
+      <ErrorBox error={save.error} />
+      <Field
+        label="Type"
+        help="Static sites never expose .php files. PHP runs in a dedicated pool as this site's system user, limited to its directory."
+      >
+        <select className="input" value={version} onChange={(e) => setVersion(e.target.value)}>
+          <option value="">Static</option>
+          {options.map((v) => (
+            <option key={v} value={v}>
+              PHP {v}
+            </option>
+          ))}
+        </select>
+      </Field>
+      <div>
+        <button className="btn primary" disabled={save.isPending || version === site.php_version}>
+          Apply
+        </button>
+      </div>
+    </form>
+  );
+}
+
+function DeleteCard({ site }: { site: Site }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const toast = useToast();
@@ -332,7 +389,7 @@ function SettingsTab({ site }: { site: Site }) {
     },
   });
   return (
-    <div className="card card-body stack" style={{ maxWidth: 640 }}>
+    <div className="card card-body stack">
       <h2>Delete site</h2>
       <p className="muted" style={{ margin: 0 }}>
         The site stops being served immediately and its SFTP accounts are revoked. Files are moved to the server's trash
@@ -365,6 +422,154 @@ function SettingsTab({ site }: { site: Site }) {
             </Field>
           </div>
         </Modal>
+      )}
+    </div>
+  );
+}
+
+function DatabasesTab({ site, user }: { site: Site; user: User }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const dbs = useQuery({ queryKey: ["databases", site.id], queryFn: () => api.databases(site.id) });
+  const [name, setName] = useState("");
+  const [creds, setCreds] = useState<DatabaseCredentials | null>(null);
+  const prefix = `s${site.id}_`;
+  const create = useMutation({
+    mutationFn: () => api.createDatabase(site.id, name.trim()),
+    onSuccess: (r) => {
+      setCreds(r.credentials);
+      setName("");
+      qc.invalidateQueries({ queryKey: ["databases", site.id] });
+    },
+  });
+  const act = async (f: () => Promise<unknown>) => {
+    try {
+      await f();
+    } catch (e) {
+      toast(errorMessage(e), true);
+    }
+  };
+
+  if (dbs.isPending) return <Loading />;
+  if (dbs.error) return <ErrorBox error={dbs.error} />;
+  if (!dbs.data.mariadb)
+    return (
+      <div className="card empty">
+        <h3>MariaDB is not installed on this server</h3>
+        <p>
+          Install it with <code>apt install mariadb-server</code>; the agent detects it automatically.
+        </p>
+      </div>
+    );
+
+  return (
+    <div className="stack">
+      {creds && (
+        <div className="card card-body stack">
+          <h2>Database {creds.database} is ready</h2>
+          <div className="alert warn small">Copy the password now. It is not stored and will not be shown again.</div>
+          <dl className="kv">
+            <dt>Host</dt>
+            <dd className="mono">{creds.host}</dd>
+            <dt>Database</dt>
+            <dd className="mono">{creds.database}</dd>
+            <dt>Username</dt>
+            <dd className="mono">{creds.username}</dd>
+            <dt>Password</dt>
+            <dd>
+              <CodeBox text={creds.password} />
+            </dd>
+          </dl>
+          <div>
+            <button className="btn sm" onClick={() => setCreds(null)}>
+              Done
+            </button>
+          </div>
+        </div>
+      )}
+      <div className="card">
+        <div className="card-head">
+          <h2>Databases</h2>
+          <span className="faint small">{dbs.data.mariadb}</span>
+        </div>
+        {dbs.data.databases.length === 0 ? (
+          <div className="empty small">No databases yet.</div>
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Database</th>
+                <th>User</th>
+                <th>Created</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {dbs.data.databases.map((d) => (
+                <tr key={d.id}>
+                  <td className="mono">{d.name}</td>
+                  <td className="mono">{d.username}</td>
+                  <td className="muted">{formatDate(d.created_at)}</td>
+                  <td className="num">
+                    {can(user, "admin") && (
+                      <div className="row" style={{ justifyContent: "flex-end" }}>
+                        <button
+                          className="btn sm"
+                          onClick={async () => {
+                            if (!(await confirm({ title: "Reset password?", body: <p>Apps using the old password stop connecting until updated.</p>, confirm: "Reset" })))
+                              return;
+                            act(async () => setCreds((await api.resetDatabasePassword(site.id, d.id)).credentials));
+                          }}
+                        >
+                          <Icon name="key" size={14} /> New password
+                        </button>
+                        <button
+                          className="btn sm icon ghost"
+                          title="Delete"
+                          onClick={async () => {
+                            if (!(await confirm({ title: `Delete ${d.name}?`, body: <p>All tables and data in this database are permanently deleted.</p>, confirm: "Delete database", danger: true })))
+                              return;
+                            act(async () => {
+                              await api.deleteDatabase(site.id, d.id);
+                              qc.invalidateQueries({ queryKey: ["databases", site.id] });
+                            });
+                          }}
+                        >
+                          <Icon name="trash" size={14} />
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      {can(user, "admin") && (
+        <form
+          className="card card-body form"
+          style={{ maxWidth: 520 }}
+          onSubmit={(e: FormEvent) => {
+            e.preventDefault();
+            create.mutate();
+          }}
+        >
+          <h2>New database</h2>
+          <ErrorBox error={create.error} />
+          <Field label="Name" help={`Created as ${prefix}${name || "name"}, with a user of the same name.`}>
+            <div className="row">
+              <span className="mono faint">{prefix}</span>
+              <input className="input mono" value={name} onChange={(e) => setName(e.target.value)} placeholder="wordpress" required />
+            </div>
+          </Field>
+          <div>
+            <button className="btn primary" disabled={create.isPending || !name.trim()}>
+              Create database
+            </button>
+          </div>
+        </form>
       )}
     </div>
   );

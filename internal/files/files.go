@@ -82,6 +82,7 @@ func entryFrom(name string, fi fs.FileInfo) Entry {
 // Site is one site's directory.
 type Site struct {
 	root *os.Root
+	uid  int // owner for created entries; -1 keeps the caller's identity
 }
 
 func Open(dir string) (*Site, error) {
@@ -89,7 +90,7 @@ func Open(dir string) (*Site, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Site{root: r}, nil
+	return &Site{root: r, uid: -1}, nil
 }
 
 func (s *Site) Close() error { return s.root.Close() }
@@ -224,7 +225,7 @@ func (s *Site) Mkdir(p string) error {
 	} else if err != nil {
 		return err
 	}
-	return nil
+	return s.chownPath(c)
 }
 
 // Rename moves from to to. The destination must not exist.
@@ -316,6 +317,11 @@ func (s *Site) BeginUpload(p string) (*Upload, error) {
 	tmp := path.Join(dir, uploadPrefix+hex.EncodeToString(rnd[:]))
 	f, err := s.root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.chownFile(f, tmp); err != nil {
+		f.Close()
+		s.root.Remove(tmp)
 		return nil, err
 	}
 	return &Upload{site: s, f: f, tmp: tmp, final: c}, nil

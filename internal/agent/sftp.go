@@ -51,10 +51,7 @@ func newSFTPManager(cfg Config, sites *sitesManager, log *slog.Logger) (*sftpMan
 	}
 	m.hostKey = key
 	hasher := auth.NewHasher(auth.DefaultArgon2Params, min(2, runtime.NumCPU()))
-	m.srv = sftpd.New(log, key, hasher, func(id int64) string {
-		d, _ := sites.dir(id)
-		return d
-	})
+	m.srv = sftpd.New(log, key, hasher, sites.open)
 	return m, nil
 }
 

@@ -7,7 +7,7 @@ LDFLAGS := -s -w -X $(PKG).Version=$(VERSION) -X $(PKG).Commit=$(COMMIT) -X $(PK
 GOFLAGS := -trimpath
 export CGO_ENABLED := 0
 
-.PHONY: build build-linux test lint run clean web web-dev
+.PHONY: build build-linux test test-linux test-install lint run clean web web-dev
 
 build:
 	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o bin/basalt ./cmd/basalt
@@ -18,6 +18,14 @@ build-linux:
 
 test:
 	CGO_ENABLED=1 go test -race ./...
+
+# Real system users, PHP-FPM and MariaDB in a Debian container (needs Docker).
+test-linux:
+	deploy/dev/linux-test.sh
+
+# install.sh on two systemd containers: panel + a server added with the one-liner.
+test-install:
+	deploy/dev/install-test.sh
 
 lint:
 	gofmt -l . | (! grep .) || (echo "run gofmt"; exit 1)
