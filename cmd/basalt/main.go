@@ -8,13 +8,16 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"syscall"
+	"time"
 
+	"github.com/wiefix/basalt/internal/agent"
+	"github.com/wiefix/basalt/internal/agenthub"
 	"github.com/wiefix/basalt/internal/auth"
 	"github.com/wiefix/basalt/internal/buildinfo"
 	"github.com/wiefix/basalt/internal/config"
@@ -29,6 +32,7 @@ const usage = `Usage: basalt <command> [flags]
 Commands:
   server    run the control plane (API and web UI)
   agent     run the agent on a managed host
+            (agent enroll: register this host with a panel)
   version   print version information
 
 Run "basalt <command> -h" for command flags.
@@ -84,6 +88,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	baseLog := log
 	log = log.With("component", "server")
 
 	db, err := store.Open(ctx, filepath.Join(cfg.DataDir, "basalt.db"))
@@ -126,17 +131,48 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		log.Warn("insecure cookies enabled: session cookies are sent over plain HTTP; development only")
 	}
 
-	return server.New(server.Options{
+	ca, err := agenthub.LoadOrCreateCA(ctx, db, box, instanceID, time.Now())
+	if err != nil {
+		return err
+	}
+	hub := agenthub.New(baseLog.With("component", "agenthub"), db, ca, nil)
+
+	api := server.New(server.Options{
 		Log:           log,
 		DB:            db,
 		Box:           box,
 		Hasher:        auth.NewHasher(auth.DefaultArgon2Params, min(4, runtime.NumCPU())),
 		SetupToken:    setupToken,
 		SecureCookies: !cfg.InsecureCookies,
-	}).Serve(ctx, cfg.Listen)
+		Agents:        hub,
+		AgentURL:      cfg.AgentURL,
+	})
+
+	// Run both listeners; the first failure stops the other.
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	var wg sync.WaitGroup
+	for _, serve := range []func(context.Context) error{
+		func(ctx context.Context) error { return api.Serve(ctx, cfg.Listen) },
+		func(ctx context.Context) error { return hub.Serve(ctx, cfg.AgentListen) },
+	} {
+		wg.Go(func() {
+			if err := serve(ctx); err != nil {
+				cancel(err)
+			}
+		})
+	}
+	wg.Wait()
+	if err := context.Cause(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	return nil
 }
 
 func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
+	if len(args) > 0 && args[0] == "enroll" {
+		return runAgentEnroll(ctx, args[1:], stderr)
+	}
 	cfg, err := config.ParseAgent(args, stderr)
 	if err != nil {
 		return err
@@ -146,11 +182,30 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	log = log.With("component", "agent")
-	log.Info("starting", "version", buildinfo.Version, "data_dir", cfg.DataDir)
 
-	// Enrollment and the control channel arrive in phase 1, step 3.
-	log.Warn("agent is not implemented yet; idling until stopped")
-	<-ctx.Done()
-	log.Info("stopped", slog.String("reason", context.Cause(ctx).Error()))
+	a, err := agent.New(cfg.DataDir, log)
+	if err != nil {
+		return err
+	}
+	log.Info("starting", "version", buildinfo.Version, "server_id", a.ServerID(), "data_dir", cfg.DataDir)
+	return a.Run(ctx)
+}
+
+func runAgentEnroll(ctx context.Context, args []string, stderr io.Writer) error {
+	cfg, err := config.ParseAgentEnroll(args, stderr)
+	if err != nil {
+		return err
+	}
+	id, err := agent.Enroll(ctx, agent.EnrollOptions{
+		DataDir:  cfg.DataDir,
+		PanelURL: cfg.PanelURL,
+		Token:    cfg.Token,
+		CASHA256: cfg.CASHA256,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stderr, "enrolled as server %d; credentials saved in %s\nstart the agent with: basalt agent --data-dir %s\n",
+		id, cfg.DataDir, cfg.DataDir)
 	return nil
 }

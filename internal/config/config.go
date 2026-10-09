@@ -29,6 +29,18 @@ type Server struct {
 	// InsecureCookies drops the Secure cookie attribute for local development
 	// over plain HTTP. Never enable in production.
 	InsecureCookies bool
+	// AgentListen is where agents connect (mutual TLS).
+	AgentListen string
+	// AgentURL is the address agents use to reach AgentListen.
+	AgentURL string
+}
+
+// AgentEnroll configures `basalt agent enroll`.
+type AgentEnroll struct {
+	Common
+	PanelURL string
+	Token    string
+	CASHA256 string
 }
 
 // Agent configures `basalt agent`.
@@ -66,6 +78,8 @@ func ParseServer(args []string, output io.Writer) (Server, error) {
 		return cfg, err
 	}
 	fs.BoolVar(&cfg.InsecureCookies, "insecure-cookies", insecure, "allow session cookies over plain HTTP (development only)")
+	fs.StringVar(&cfg.AgentListen, "agent-listen", env("AGENT_LISTEN", ":8443"), "agent channel listen address (mutual TLS)")
+	fs.StringVar(&cfg.AgentURL, "agent-url", env("AGENT_URL", ""), "URL agents use to reach the agent channel (default https://<hostname>:<agent port>)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -74,6 +88,17 @@ func ParseServer(args []string, output io.Writer) (Server, error) {
 	}
 	if err := cfg.validate(); err != nil {
 		return cfg, err
+	}
+	_, agentPort, err := net.SplitHostPort(cfg.AgentListen)
+	if err != nil {
+		return cfg, fmt.Errorf("invalid agent listen address %q: %w", cfg.AgentListen, err)
+	}
+	if cfg.AgentURL == "" {
+		host, _ := os.Hostname()
+		cfg.AgentURL = "https://" + net.JoinHostPort(host, agentPort)
+	}
+	if !strings.HasPrefix(cfg.AgentURL, "https://") {
+		return cfg, fmt.Errorf("agent-url must start with https://")
 	}
 	if _, _, err := net.SplitHostPort(cfg.Listen); err != nil {
 		return cfg, fmt.Errorf("invalid listen address %q: %w", cfg.Listen, err)
@@ -92,6 +117,27 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	}
 	if fs.NArg() > 0 {
 		return cfg, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	return cfg, cfg.validate()
+}
+
+// ParseAgentEnroll parses flags for `basalt agent enroll`.
+func ParseAgentEnroll(args []string, output io.Writer) (AgentEnroll, error) {
+	var cfg AgentEnroll
+	fs := flag.NewFlagSet("basalt agent enroll", flag.ContinueOnError)
+	fs.SetOutput(output)
+	cfg.register(fs, "/var/lib/basalt/agent")
+	fs.StringVar(&cfg.PanelURL, "panel", "", "agent channel URL of the panel, e.g. https://panel.example.com:8443")
+	fs.StringVar(&cfg.Token, "token", env("ENROLL_TOKEN", ""), "one-time enrollment token")
+	fs.StringVar(&cfg.CASHA256, "ca-sha256", "", "SHA-256 fingerprint of the panel's agent CA")
+	if err := fs.Parse(args); err != nil {
+		return cfg, err
+	}
+	if fs.NArg() > 0 {
+		return cfg, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if cfg.PanelURL == "" || cfg.Token == "" || cfg.CASHA256 == "" {
+		return cfg, errors.New("--panel, --token and --ca-sha256 are required")
 	}
 	return cfg, cfg.validate()
 }

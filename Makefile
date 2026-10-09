@@ -24,7 +24,7 @@ lint:
 	go vet ./...
 
 run: build
-	./bin/basalt server --data-dir .data --log-level debug --insecure-cookies
+	./bin/basalt server --data-dir .data --log-level debug --insecure-cookies --agent-listen 127.0.0.1:8443 --agent-url https://127.0.0.1:8443
 
 clean:
 	rm -rf bin .data

@@ -29,6 +29,10 @@ type Options struct {
 	// SecureCookies sets the Secure attribute and the __Host- prefix.
 	// Disable only for local development over plain HTTP.
 	SecureCookies bool
+	// Agents is the agent channel; AgentURL is the address agents use to
+	// reach it, shown in enrollment commands.
+	Agents   AgentHub
+	AgentURL string
 	// Now is the clock; defaults to time.Now.
 	Now func() time.Time
 }
@@ -39,6 +43,8 @@ type Server struct {
 	box           *secrets.Box
 	hasher        *auth.Hasher
 	secureCookies bool
+	agents        AgentHub
+	agentURL      string
 	now           func() time.Time
 
 	setupMu    sync.Mutex
@@ -59,6 +65,8 @@ func New(o Options) *Server {
 		box:           o.Box,
 		hasher:        o.Hasher,
 		secureCookies: o.SecureCookies,
+		agents:        o.Agents,
+		agentURL:      o.AgentURL,
 		now:           o.Now,
 		setupToken:    o.SetupToken,
 		ipLimiter:     auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
@@ -87,6 +95,14 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/users", s.requireRole(store.RoleAdmin, s.handleListUsers))
 	mux.Handle("POST /api/v1/users", s.requireRole(store.RoleAdmin, s.handleCreateUser))
+
+	mux.Handle("GET /api/v1/servers", s.requireRole(store.RoleViewer, s.handleListServers))
+	mux.Handle("POST /api/v1/servers", s.requireRole(store.RoleAdmin, s.handleCreateServer))
+	mux.Handle("GET /api/v1/servers/{id}", s.requireRole(store.RoleViewer, s.handleGetServer))
+	mux.Handle("DELETE /api/v1/servers/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteServer))
+	mux.Handle("GET /api/v1/servers/{id}/metrics", s.requireRole(store.RoleViewer, s.handleServerMetrics))
+	mux.Handle("POST /api/v1/servers/{id}/ping", s.requireRole(store.RoleMember, s.handlePingServer))
+	mux.Handle("POST /api/v1/servers/{id}/enroll-token", s.requireRole(store.RoleAdmin, s.handleResetEnrollToken))
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
