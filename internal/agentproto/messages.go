@@ -1,6 +1,10 @@
 package agentproto
 
-import "time"
+import (
+	"time"
+
+	"github.com/wiefix/basalt/internal/proxy"
+)
 
 // HTTP paths on the agent listener.
 const (
@@ -16,7 +20,8 @@ const (
 	// agent -> server requests
 	TypeRenewCert = "renew_cert"
 	// server -> agent requests
-	TypePing = "ping"
+	TypePing       = "ping"
+	TypeProxyApply = "proxy_apply"
 )
 
 // EnrollRequest is posted once, authenticated by the one-time token.
@@ -67,4 +72,11 @@ type RenewCertResponse struct {
 
 type PingResponse struct {
 	AgentTime time.Time `json:"agent_time"`
+}
+
+// ProxyApply carries the complete desired proxy state for the host.
+type ProxyApply = proxy.Desired
+
+type ProxyApplyResponse struct {
+	ConfigID string `json:"config_id"`
 }

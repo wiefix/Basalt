@@ -1,0 +1,176 @@
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sync"
+	"time"
+
+	"github.com/wiefix/basalt/internal/proxy"
+)
+
+const (
+	fileProxyDesired  = "proxy-desired.json"
+	proxyReconcileGap = 15 * time.Second
+)
+
+// proxyManager keeps the local proxy running the routes the panel wants.
+// The desired state is persisted, so after a reboot sites come back even if
+// the panel is unreachable.
+type proxyManager struct {
+	log       *slog.Logger
+	stateFile string
+	sitesRoot string
+	opts      proxy.BuildOptions
+	admin     *proxy.Admin
+
+	applyMu sync.Mutex // serialises Apply calls
+
+	mu      sync.Mutex
+	desired *proxy.Desired
+	lastErr string
+}
+
+func newProxyManager(cfg Config, log *slog.Logger) *proxyManager {
+	return &proxyManager{
+		log:       log,
+		stateFile: filepath.Join(cfg.DataDir, fileProxyDesired),
+		sitesRoot: cfg.SitesRoot,
+		opts: proxy.BuildOptions{
+			Dir:           cfg.ProxyDir,
+			HTTPPort:      cfg.HTTPPort,
+			HTTPSPort:     cfg.HTTPSPort,
+			ACMEDirectory: cfg.ACMEDirectory,
+		},
+		admin: proxy.NewAdmin(proxy.AdminSocket(cfg.ProxyDir)),
+	}
+}
+
+func (m *proxyManager) loadSaved() error {
+	b, err := os.ReadFile(m.stateFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var d proxy.Desired
+	if err := json.Unmarshal(b, &d); err != nil {
+		return fmt.Errorf("parse %s: %w", m.stateFile, err)
+	}
+	m.mu.Lock()
+	m.desired = &d
+	m.mu.Unlock()
+	return nil
+}
+
+// Apply validates, persists and loads a new desired state. On error the
+// proxy keeps serving the previous configuration.
+func (m *proxyManager) Apply(ctx context.Context, d proxy.Desired) (string, error) {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
+
+	m.mu.Lock()
+	cur := m.desired
+	m.mu.Unlock()
+	if cur != nil && d.Revision < cur.Revision {
+		_, id, err := proxy.Build(*cur, m.opts)
+		m.log.Info("ignoring outdated proxy state", "revision", d.Revision, "current", cur.Revision)
+		return id, err
+	}
+
+	if err := d.Validate(m.sitesRoot); err != nil {
+		return "", err
+	}
+	cfg, id, err := proxy.Build(d, m.opts)
+	if err != nil {
+		return "", err
+	}
+	if err := m.admin.Load(ctx, cfg); err != nil {
+		return "", err
+	}
+	// Persist only what the proxy accepted.
+	if err := m.persist(d, cfg); err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	m.desired = &d
+	m.lastErr = ""
+	m.mu.Unlock()
+	m.log.Info("proxy configuration applied", "revision", d.Revision, "routes", len(d.Routes), "config_id", id)
+	return id, nil
+}
+
+func (m *proxyManager) persist(d proxy.Desired, cfg []byte) error {
+	b, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+	if err := writeAtomic(m.stateFile, b, 0o600); err != nil {
+		return err
+	}
+	// The proxy loads this file on its own start.
+	return writeAtomic(proxy.ConfigPath(m.opts.Dir), cfg, 0o600)
+}
+
+// reconcile re-applies the desired state if the proxy is not running it,
+// e.g. after the proxy process restarted.
+func (m *proxyManager) reconcile(ctx context.Context) {
+	m.mu.Lock()
+	d := m.desired
+	m.mu.Unlock()
+	if d == nil {
+		return
+	}
+	cfg, id, err := proxy.Build(*d, m.opts)
+	if err != nil {
+		m.report(err)
+		return
+	}
+	running, err := m.admin.Running(ctx, id)
+	if err != nil {
+		m.report(err)
+		return
+	}
+	if running {
+		return
+	}
+	if err := m.admin.Load(ctx, cfg); err != nil {
+		m.report(err)
+		return
+	}
+	m.log.Info("proxy configuration restored", "config_id", id)
+}
+
+// report logs an error once until it changes, so a stopped proxy does not
+// flood the log every reconcile interval.
+func (m *proxyManager) report(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err.Error() != m.lastErr {
+		m.lastErr = err.Error()
+		m.log.Warn("proxy reconcile", "err", err)
+	}
+}
+
+func (m *proxyManager) run(ctx context.Context) {
+	if err := m.loadSaved(); err != nil {
+		m.log.Error("load saved proxy state", "err", err)
+	}
+	t := time.NewTicker(proxyReconcileGap)
+	defer t.Stop()
+	for {
+		m.reconcile(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}

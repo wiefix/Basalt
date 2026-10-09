@@ -22,6 +22,7 @@ import (
 	"github.com/wiefix/basalt/internal/buildinfo"
 	"github.com/wiefix/basalt/internal/config"
 	"github.com/wiefix/basalt/internal/logging"
+	"github.com/wiefix/basalt/internal/proxy/caddyrun"
 	"github.com/wiefix/basalt/internal/secrets"
 	"github.com/wiefix/basalt/internal/server"
 	"github.com/wiefix/basalt/internal/store"
@@ -33,6 +34,7 @@ Commands:
   server    run the control plane (API and web UI)
   agent     run the agent on a managed host
             (agent enroll: register this host with a panel)
+  proxy     run the web proxy (embedded Caddy) on a managed host
   version   print version information
 
 Run "basalt <command> -h" for command flags.
@@ -57,6 +59,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = runServer(ctx, args[1:], stderr)
 	case "agent":
 		err = runAgent(ctx, args[1:], stderr)
+	case "proxy":
+		err = runProxy(ctx, args[1:], stderr)
 	case "version", "-version", "--version":
 		fmt.Fprintln(stdout, buildinfo.String())
 		return 0
@@ -147,6 +151,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		Agents:        hub,
 		AgentURL:      cfg.AgentURL,
 	})
+	hub.OnConnect(api.PushProxy)
 
 	// Run both listeners; the first failure stops the other.
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -183,12 +188,33 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	log = log.With("component", "agent")
 
-	a, err := agent.New(cfg.DataDir, log)
+	a, err := agent.New(agent.Config{
+		DataDir:       cfg.DataDir,
+		ProxyDir:      cfg.ProxyDir,
+		SitesRoot:     cfg.SitesRoot,
+		HTTPPort:      cfg.HTTPPort,
+		HTTPSPort:     cfg.HTTPSPort,
+		ACMEDirectory: cfg.ACMEDirectory,
+	}, log)
 	if err != nil {
 		return err
 	}
 	log.Info("starting", "version", buildinfo.Version, "server_id", a.ServerID(), "data_dir", cfg.DataDir)
 	return a.Run(ctx)
+}
+
+func runProxy(ctx context.Context, args []string, stderr io.Writer) error {
+	cfg, err := config.ParseProxy(args, stderr)
+	if err != nil {
+		return err
+	}
+	log, err := logging.New(stderr, cfg.LogLevel, cfg.LogFormat)
+	if err != nil {
+		return err
+	}
+	log = log.With("component", "proxy")
+	log.Info("starting", "version", buildinfo.Version, "data_dir", cfg.DataDir)
+	return caddyrun.Run(ctx, cfg.DataDir, log)
 }
 
 func runAgentEnroll(ctx context.Context, args []string, stderr io.Writer) error {

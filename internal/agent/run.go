@@ -31,9 +31,22 @@ const (
 	renewBefore = pki.AgentValidity / 3
 )
 
+// Config is the host-level agent configuration.
+type Config struct {
+	DataDir string
+	// ProxyDir is the data directory of `basalt proxy` on this host.
+	ProxyDir string
+	// SitesRoot confines every static site root.
+	SitesRoot     string
+	HTTPPort      int
+	HTTPSPort     int
+	ACMEDirectory string
+}
+
 type Agent struct {
-	dir string
-	log *slog.Logger
+	dir   string
+	log   *slog.Logger
+	proxy *proxyManager
 
 	mu sync.Mutex
 	id *identity
@@ -44,13 +57,14 @@ type Agent struct {
 	collector       *collector
 }
 
-func New(dataDir string, log *slog.Logger) (*Agent, error) {
-	id, err := loadIdentity(dataDir)
+func New(cfg Config, log *slog.Logger) (*Agent, error) {
+	id, err := loadIdentity(cfg.DataDir)
 	if err != nil {
 		return nil, err
 	}
 	return &Agent{
-		dir: dataDir, log: log, id: id,
+		dir: cfg.DataDir, log: log, id: id,
+		proxy:           newProxyManager(cfg, log.With("subsystem", "proxy")),
 		MetricsInterval: metricsInterval,
 		RenewBefore:     renewBefore,
 		collector:       newCollector(),
@@ -68,6 +82,9 @@ func (a *Agent) identity() *identity {
 // Run keeps a connection to the panel open until ctx is cancelled,
 // reconnecting with jittered exponential backoff.
 func (a *Agent) Run(ctx context.Context) error {
+	// The proxy is managed independently of the panel connection.
+	go a.proxy.run(ctx)
+
 	backoff := minBackoff
 	for {
 		start := time.Now()
@@ -154,6 +171,16 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 	switch typ {
 	case agentproto.TypePing:
 		return agentproto.PingResponse{AgentTime: time.Now()}, nil
+	case agentproto.TypeProxyApply:
+		var d agentproto.ProxyApply
+		if err := json.Unmarshal(payload, &d); err != nil {
+			return nil, err
+		}
+		id, err := a.proxy.Apply(ctx, d)
+		if err != nil {
+			return nil, err
+		}
+		return agentproto.ProxyApplyResponse{ConfigID: id}, nil
 	default:
 		return nil, fmt.Errorf("unsupported request %q", typ)
 	}

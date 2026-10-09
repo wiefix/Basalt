@@ -42,9 +42,14 @@ type Hub struct {
 	panelCerts    *pki.PanelCertificates
 	enrollLimiter *auth.Limiter
 
-	mu    sync.Mutex
-	conns map[int64]*conn
+	mu        sync.Mutex
+	conns     map[int64]*conn
+	onConnect func(ctx context.Context, serverID int64)
 }
+
+// OnConnect registers a callback run (in its own goroutine) whenever an
+// agent connects, e.g. to push desired state. Call before serving.
+func (h *Hub) OnConnect(f func(ctx context.Context, serverID int64)) { h.onConnect = f }
 
 type conn struct {
 	peer   *agentproto.Peer
@@ -255,6 +260,9 @@ func (h *Hub) handleConnect(w http.ResponseWriter, r *http.Request) {
 	h.conns[id] = c
 	h.mu.Unlock()
 	h.log.Info("agent connected", "server_id", id, "ip", ip)
+	if h.onConnect != nil {
+		go h.onConnect(ctx, id)
+	}
 
 	err = peer.Run(ctx)
 

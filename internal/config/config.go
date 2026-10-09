@@ -46,6 +46,31 @@ type AgentEnroll struct {
 // Agent configures `basalt agent`.
 type Agent struct {
 	Common
+	ProxyDir      string
+	SitesRoot     string
+	HTTPPort      int
+	HTTPSPort     int
+	ACMEDirectory string
+}
+
+// Proxy configures `basalt proxy`.
+type Proxy struct {
+	Common
+}
+
+// ParseProxy parses flags for `basalt proxy`.
+func ParseProxy(args []string, output io.Writer) (Proxy, error) {
+	var cfg Proxy
+	fs := flag.NewFlagSet("basalt proxy", flag.ContinueOnError)
+	fs.SetOutput(output)
+	cfg.register(fs, "/var/lib/basalt/proxy")
+	if err := fs.Parse(args); err != nil {
+		return cfg, err
+	}
+	if fs.NArg() > 0 {
+		return cfg, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	return cfg, cfg.validate()
 }
 
 func (c *Common) register(fs *flag.FlagSet, defaultDataDir string) {
@@ -112,11 +137,28 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs := flag.NewFlagSet("basalt agent", flag.ContinueOnError)
 	fs.SetOutput(output)
 	cfg.register(fs, "/var/lib/basalt/agent")
+	fs.StringVar(&cfg.ProxyDir, "proxy-dir", env("PROXY_DIR", "/var/lib/basalt/proxy"), "data directory of `basalt proxy` on this host")
+	fs.StringVar(&cfg.SitesRoot, "sites-root", env("SITES_ROOT", "/srv/basalt/sites"), "directory that contains all site files")
+	fs.IntVar(&cfg.HTTPPort, "http-port", 80, "public HTTP port of the proxy")
+	fs.IntVar(&cfg.HTTPSPort, "https-port", 443, "public HTTPS port of the proxy")
+	fs.StringVar(&cfg.ACMEDirectory, "acme-directory", env("ACME_DIRECTORY", ""), "ACME directory URL override (e.g. Let's Encrypt staging)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
 	if fs.NArg() > 0 {
 		return cfg, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	for _, p := range []int{cfg.HTTPPort, cfg.HTTPSPort} {
+		if p < 1 || p > 65535 {
+			return cfg, fmt.Errorf("invalid port %d", p)
+		}
+	}
+	for _, d := range []*string{&cfg.ProxyDir, &cfg.SitesRoot} {
+		abs, err := filepath.Abs(*d)
+		if err != nil {
+			return cfg, err
+		}
+		*d = abs
 	}
 	return cfg, cfg.validate()
 }

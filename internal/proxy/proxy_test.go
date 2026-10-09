@@ -1,0 +1,100 @@
+package proxy
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func TestNormalizeDomain(t *testing.T) {
+	for in, want := range map[string]string{
+		"Example.COM.": "example.com", "a-b.example.com": "a-b.example.com",
+		"xn--80ak6aa92e.com": "xn--80ak6aa92e.com", "localhost": "localhost", "10.0.0.1": "10.0.0.1",
+	} {
+		if got, err := NormalizeDomain(in); err != nil || got != want {
+			t.Errorf("NormalizeDomain(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"", "*.example.com", "-a.com", "a-.com", "a..com", "exa mple.com",
+		"ex\"ample.com", "пример.рф", "com", strings.Repeat("a", 64) + ".com", "a.com/evil"} {
+		if _, err := NormalizeDomain(bad); err == nil {
+			t.Errorf("NormalizeDomain(%q) accepted", bad)
+		}
+	}
+}
+
+func TestRouteValidation(t *testing.T) {
+	ok := Desired{Routes: []Route{
+		{ID: 1, Kind: KindStatic, Domains: []string{"A.example.com"}, Root: "/srv/basalt/sites/1/public"},
+		{ID: 2, Kind: KindReverseProxy, Domains: []string{"b.example.com"}, Upstream: "127.0.0.1:3000"},
+	}}
+	if err := ok.Validate("/srv/basalt"); err != nil {
+		t.Fatal(err)
+	}
+	if ok.Routes[0].Domains[0] != "a.example.com" || ok.Routes[0].TLS != TLSAuto {
+		t.Fatal("route not normalized")
+	}
+
+	bad := map[string]Desired{
+		"root outside sites": {Routes: []Route{{ID: 1, Kind: KindStatic, Domains: []string{"a.com"}, Root: "/etc"}}},
+		"root traversal":     {Routes: []Route{{ID: 1, Kind: KindStatic, Domains: []string{"a.com"}, Root: "/srv/basalt/../etc"}}},
+		"relative root":      {Routes: []Route{{ID: 1, Kind: KindStatic, Domains: []string{"a.com"}, Root: "srv/basalt/x"}}},
+		"sites root itself":  {Routes: []Route{{ID: 1, Kind: KindStatic, Domains: []string{"a.com"}, Root: "/srv/basalt"}}},
+		"prefix trick":       {Routes: []Route{{ID: 1, Kind: KindStatic, Domains: []string{"a.com"}, Root: "/srv/basalt-evil/x"}}},
+		"bad upstream":       {Routes: []Route{{ID: 1, Kind: KindReverseProxy, Domains: []string{"a.com"}, Upstream: "a.com"}}},
+		"no domains":         {Routes: []Route{{ID: 1, Kind: KindReverseProxy, Upstream: "a.com:80"}}},
+		"bad kind":           {Routes: []Route{{ID: 1, Kind: "php", Domains: []string{"a.com"}}}},
+		"bad tls":            {Routes: []Route{{ID: 1, Kind: KindReverseProxy, Domains: []string{"a.com"}, Upstream: "a.com:80", TLS: "off"}}},
+		"duplicate across routes": {Routes: []Route{
+			{ID: 1, Kind: KindReverseProxy, Domains: []string{"a.com"}, Upstream: "x.com:80"},
+			{ID: 2, Kind: KindReverseProxy, Domains: []string{"A.com"}, Upstream: "y.com:80"},
+		}},
+	}
+	for name, d := range bad {
+		if err := d.Validate("/srv/basalt"); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func TestBuildTLSPolicies(t *testing.T) {
+	cfg, id, err := Build(Desired{ACMEEmail: "ops@example.com", Routes: []Route{
+		{ID: 1, Kind: KindReverseProxy, Domains: []string{"public.example.com", "dev.localhost"}, Upstream: "127.0.0.1:1", TLS: TLSAuto},
+		{ID: 2, Kind: KindReverseProxy, Domains: []string{"private.example.com"}, Upstream: "127.0.0.1:1", TLS: TLSInternal},
+	}}, BuildOptions{Dir: "/x", HTTPPort: 80, HTTPSPort: 443})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c struct {
+		Apps struct {
+			TLS struct {
+				Automation struct {
+					Policies []struct {
+						Subjects []string         `json:"subjects"`
+						Issuers  []map[string]any `json:"issuers"`
+					} `json:"policies"`
+				} `json:"automation"`
+			} `json:"tls"`
+		} `json:"apps"`
+	}
+	json.Unmarshal(cfg, &c)
+	p := c.Apps.TLS.Automation.Policies
+	if len(p) != 2 || strings.Join(p[0].Subjects, ",") != "dev.localhost,private.example.com" || p[0].Issuers[0]["module"] != "internal" {
+		t.Fatalf("internal policy = %+v", p)
+	}
+	if len(p[1].Issuers) != 2 || p[1].Issuers[0]["email"] != "ops@example.com" || p[1].Issuers[1]["ca"] != zeroSSLDirectory {
+		t.Fatalf("public policy = %+v", p[1])
+	}
+
+	// Same input, same id; different input, different id.
+	cfg2, id2, _ := Build(Desired{ACMEEmail: "ops@example.com", Routes: []Route{
+		{ID: 1, Kind: KindReverseProxy, Domains: []string{"public.example.com", "dev.localhost"}, Upstream: "127.0.0.1:1", TLS: TLSAuto},
+		{ID: 2, Kind: KindReverseProxy, Domains: []string{"private.example.com"}, Upstream: "127.0.0.1:1", TLS: TLSInternal},
+	}}, BuildOptions{Dir: "/x", HTTPPort: 80, HTTPSPort: 443})
+	if id2 != id || string(cfg2) != string(cfg) {
+		t.Fatal("build is not deterministic")
+	}
+	if _, id3, _ := Build(Desired{}, BuildOptions{Dir: "/x", HTTPPort: 80, HTTPSPort: 443}); id3 == id {
+		t.Fatal("different config, same id")
+	}
+}

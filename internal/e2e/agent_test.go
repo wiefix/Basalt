@@ -171,7 +171,9 @@ func TestAgentLifecycle(t *testing.T) {
 
 	// 5. The agent connects, says hello and streams metrics. A large renewal
 	// window makes it rotate its certificate on connect.
-	a, err := agent.New(agentDir, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a, err := agent.New(agent.Config{
+		DataDir: agentDir, ProxyDir: t.TempDir(), SitesRoot: t.TempDir(), HTTPPort: 80, HTTPSPort: 443,
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
