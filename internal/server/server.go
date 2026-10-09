@@ -125,6 +125,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 	})
+	mux.Handle("/", uiHandler())
 
 	var h http.Handler = mux
 	h = s.authenticate(h)

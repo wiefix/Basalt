@@ -1,0 +1,256 @@
+// Typed client for the Basalt API. Types mirror the JSON views in
+// internal/server/*_handlers.go.
+
+export type Role = "owner" | "admin" | "member" | "viewer";
+
+export interface User {
+  id: number;
+  email: string;
+  name: string;
+  role: Role;
+  totp_enabled: boolean;
+  disabled: boolean;
+  created_at: string;
+}
+
+export interface Server {
+  id: number;
+  name: string;
+  status: "pending" | "online" | "offline";
+  hostname?: string;
+  os?: string;
+  arch?: string;
+  kernel?: string;
+  distro?: string;
+  agent_version?: string;
+  cpu_count?: number;
+  mem_total?: number;
+  last_seen?: string;
+  last_ip?: string;
+  cert_expires?: string;
+  enroll_expires?: string;
+  created_at: string;
+}
+
+export interface Metrics {
+  at: string;
+  cpu_pct: number;
+  mem_used: number;
+  mem_total: number;
+  disk_used: number;
+  disk_total: number;
+  load1: number;
+  load5: number;
+  load15: number;
+  uptime: number;
+}
+
+export interface Enrollment {
+  token: string;
+  expires_at: string;
+  command: string;
+}
+
+export interface Sync {
+  revision: number;
+  applied_revision: number;
+  in_sync: boolean;
+  error?: string;
+}
+
+export interface Route {
+  id: number;
+  kind: "static" | "reverse_proxy";
+  domains: string[];
+  root?: string;
+  upstream?: string;
+  site_id?: number;
+  tls: "auto" | "internal";
+  hsts: boolean;
+  created_at: string;
+}
+
+export interface Site {
+  id: number;
+  server_id: number;
+  name: string;
+  kind: "static";
+  domains: string[];
+  tls: "auto" | "internal";
+  created_at: string;
+}
+
+export interface FileEntry {
+  name: string;
+  type: "file" | "dir" | "symlink" | "other";
+  size: number;
+  mode: string;
+  mod_time: string;
+  target?: string;
+}
+
+export interface ExtractResult {
+  files: number;
+  dirs: number;
+  bytes: number;
+  skipped?: string[];
+}
+
+export interface SFTPUser {
+  id: number;
+  username: string;
+  has_password: boolean;
+  public_keys: string[];
+  created_at: string;
+}
+
+export interface SFTPConnection {
+  port: number;
+  host_key_fingerprint: string;
+}
+
+export class ApiError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+// Listeners notified when any request returns 401 (session expired).
+const unauthorizedListeners = new Set<() => void>();
+export function onUnauthorized(f: () => void) {
+  unauthorizedListeners.add(f);
+  return () => {
+    unauthorizedListeners.delete(f);
+  };
+}
+
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+  const init: RequestInit = { method, credentials: "same-origin", headers: {} };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+    (init.headers as Record<string, string>)["Content-Type"] = "application/json";
+  }
+  const res = await fetch(path, init);
+  if (res.status === 204) return undefined as T;
+  let data: any = null;
+  const text = await res.text();
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { error: text };
+    }
+  }
+  if (!res.ok) {
+    if (res.status === 401 && !path.startsWith("/api/v1/auth/")) {
+      unauthorizedListeners.forEach((f) => f());
+    }
+    throw new ApiError(res.status, data?.error ?? res.statusText);
+  }
+  return data as T;
+}
+
+const get = <T>(p: string) => request<T>("GET", p);
+const post = <T>(p: string, b: unknown = {}) => request<T>("POST", p, b);
+const put = <T>(p: string, b: unknown) => request<T>("PUT", p, b);
+const del = <T>(p: string) => request<T>("DELETE", p);
+
+const q = (path: string) => "?path=" + encodeURIComponent(path);
+
+export const api = {
+  setupStatus: () => get<{ required: boolean }>("/api/v1/setup"),
+  setup: (b: { setup_token: string; email: string; name: string; password: string }) =>
+    post<{ user: User }>("/api/v1/setup", b),
+
+  login: (email: string, password: string) =>
+    post<{ mfa_required: boolean; user?: User }>("/api/v1/auth/login", { email, password }),
+  mfa: (code: string) =>
+    post<{ user: User; recovery_codes_remaining?: number }>("/api/v1/auth/mfa", { code }),
+  logout: () => post<void>("/api/v1/auth/logout"),
+  me: () => get<{ user: User }>("/api/v1/auth/me"),
+  changePassword: (current_password: string, new_password: string) =>
+    post<void>("/api/v1/auth/password", { current_password, new_password }),
+  totpSetup: (password: string) =>
+    post<{ secret: string; uri: string }>("/api/v1/auth/totp/setup", { password }),
+  totpEnable: (code: string) => post<{ recovery_codes: string[] }>("/api/v1/auth/totp/enable", { code }),
+  totpDisable: (password: string, code: string) =>
+    post<void>("/api/v1/auth/totp/disable", { password, code }),
+
+  users: () => get<{ users: User[] }>("/api/v1/users"),
+  createUser: (b: { email: string; name: string; password: string; role: Role }) =>
+    post<{ user: User }>("/api/v1/users", b),
+
+  servers: () => get<{ servers: Server[] }>("/api/v1/servers"),
+  server: (id: number) => get<{ server: Server; metrics?: Metrics }>(`/api/v1/servers/${id}`),
+  createServer: (name: string) =>
+    post<{ server: Server; enrollment: Enrollment }>("/api/v1/servers", { name }),
+  resetEnrollToken: (id: number) =>
+    post<{ enrollment: Enrollment }>(`/api/v1/servers/${id}/enroll-token`),
+  deleteServer: (id: number) => del<void>(`/api/v1/servers/${id}`),
+  serverMetrics: (id: number, minutes: number) =>
+    get<{ metrics: Metrics[] }>(`/api/v1/servers/${id}/metrics?minutes=${minutes}`),
+  pingServer: (id: number) => post<{ rtt_ms: number; agent_time: string }>(`/api/v1/servers/${id}/ping`),
+
+  routes: (serverId: number) => get<{ routes: Route[]; sync: Sync }>(`/api/v1/servers/${serverId}/routes`),
+  createRoute: (serverId: number, b: Partial<Route>) =>
+    post<{ route: Route; sync: Sync }>(`/api/v1/servers/${serverId}/routes`, b),
+  deleteRoute: (serverId: number, routeId: number) =>
+    del<{ sync: Sync }>(`/api/v1/servers/${serverId}/routes/${routeId}`),
+
+  sites: () => get<{ sites: Site[] }>("/api/v1/sites"),
+  site: (id: number) => get<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}`),
+  createSite: (b: { server_id: number; name: string; domains: string[]; tls: string }) =>
+    post<{ site: Site; sync: Sync; provision_error?: string }>("/api/v1/sites", b),
+  setSiteDomains: (id: number, domains: string[]) =>
+    put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/domains`, { domains }),
+  deleteSite: (id: number) => del<{ sync: Sync; cleanup_error?: string }>(`/api/v1/sites/${id}`),
+
+  files: (siteId: number, path: string) =>
+    get<{ path: string; entries: FileEntry[] }>(`/api/v1/sites/${siteId}/files${q(path)}`),
+  readText: (siteId: number, path: string) =>
+    get<{ content: string; size: number }>(`/api/v1/sites/${siteId}/files/text${q(path)}`),
+  fileOp: (siteId: number, op: string, b: Record<string, unknown>) =>
+    post<{ ok: boolean; extract?: ExtractResult }>(`/api/v1/sites/${siteId}/files/${op}`, b),
+  downloadUrl: (siteId: number, path: string) => `/api/v1/sites/${siteId}/files/content${q(path)}`,
+
+  sftpUsers: (siteId: number) =>
+    get<{ users: SFTPUser[]; connection: SFTPConnection | null }>(`/api/v1/sites/${siteId}/sftp-users`),
+  createSFTPUser: (siteId: number, b: { username: string; password?: string; public_keys?: string[] }) =>
+    post<{ user: SFTPUser; password?: string; connection: SFTPConnection | null; sync_error?: string }>(
+      `/api/v1/sites/${siteId}/sftp-users`,
+      b,
+    ),
+  deleteSFTPUser: (siteId: number, id: number) => del<{ ok: boolean }>(`/api/v1/sites/${siteId}/sftp-users/${id}`),
+};
+
+// upload sends one file with progress reporting (fetch has no upload progress).
+export function upload(
+  siteId: number,
+  path: string,
+  file: Blob,
+  onProgress: (fraction: number) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", `/api/v1/sites/${siteId}/files/content${q(path)}`);
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) return resolve();
+      let msg = xhr.statusText;
+      try {
+        msg = JSON.parse(xhr.responseText).error ?? msg;
+      } catch {}
+      reject(new ApiError(xhr.status, msg));
+    };
+    xhr.onerror = () => reject(new ApiError(0, "network error"));
+    signal?.addEventListener("abort", () => xhr.abort());
+    xhr.send(file);
+  });
+}
+
+export const roleRank: Record<Role, number> = { viewer: 1, member: 2, admin: 3, owner: 4 };
+export const can = (user: User | undefined, min: Role) => !!user && roleRank[user.role] >= roleRank[min];

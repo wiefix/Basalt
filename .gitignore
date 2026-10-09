@@ -5,7 +5,8 @@ CLAUDE.md
 /bin/
 /dist/
 web/node_modules/
-web/dist/
+web/dist/*
+!web/dist/.keep
 
 # local data
 *.db

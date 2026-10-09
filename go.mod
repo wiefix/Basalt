@@ -2,6 +2,9 @@ module github.com/wiefix/basalt
 
 go 1.27.1
 
+// node_modules may contain stray .go files; keep it out of ./...
+ignore ./web/node_modules
+
 require (
 	github.com/caddyserver/caddy/v2 v2.11.7
 	github.com/pkg/sftp v1.13.11
