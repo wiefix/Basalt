@@ -18,6 +18,7 @@ type routeView struct {
 	Domains   []string        `json:"domains"`
 	Root      string          `json:"root,omitempty"`
 	Upstream  string          `json:"upstream,omitempty"`
+	SiteID    int64           `json:"site_id,omitempty"`
 	TLS       proxy.TLSMode   `json:"tls"`
 	HSTS      bool            `json:"hsts"`
 	CreatedAt time.Time       `json:"created_at"`
@@ -25,7 +26,7 @@ type routeView struct {
 
 func viewRoute(r *store.ProxyRoute) routeView {
 	return routeView{
-		ID: r.ID, Kind: r.Kind, Domains: r.Domains, Root: r.Root, Upstream: r.Upstream,
+		ID: r.ID, Kind: r.Kind, Domains: r.Domains, Root: r.Root, Upstream: r.Upstream, SiteID: r.SiteID,
 		TLS: r.TLS, HSTS: r.HSTS, CreatedAt: r.CreatedAt,
 	}
 }

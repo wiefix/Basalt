@@ -3,7 +3,9 @@ package agentproto
 import (
 	"time"
 
+	"github.com/wiefix/basalt/internal/files"
 	"github.com/wiefix/basalt/internal/proxy"
+	"github.com/wiefix/basalt/internal/sftpd"
 )
 
 // HTTP paths on the agent listener.
@@ -22,6 +24,10 @@ const (
 	// server -> agent requests
 	TypePing       = "ping"
 	TypeProxyApply = "proxy_apply"
+	TypeSiteEnsure = "site_ensure"
+	TypeSiteDelete = "site_delete"
+	TypeFiles      = "files"
+	TypeSFTPApply  = "sftp_apply"
 )
 
 // EnrollRequest is posted once, authenticated by the one-time token.
@@ -47,6 +53,10 @@ type Hello struct {
 	Distro       string `json:"distro"`
 	CPUCount     int    `json:"cpu_count"`
 	MemTotal     uint64 `json:"mem_total"`
+	// SFTP endpoint, zero port when disabled. The fingerprint (SHA256:...)
+	// lets users verify the host on first connect.
+	SFTPPort        int    `json:"sftp_port,omitempty"`
+	SFTPFingerprint string `json:"sftp_fingerprint,omitempty"`
 }
 
 type Metrics struct {
@@ -79,4 +89,55 @@ type ProxyApply = proxy.Desired
 
 type ProxyApplyResponse struct {
 	ConfigID string `json:"config_id"`
+}
+
+type SiteRequest struct {
+	SiteID int64 `json:"site_id"`
+}
+
+// File-manager operations.
+const (
+	FilesList         = "list"
+	FilesStat         = "stat"
+	FilesRead         = "read"
+	FilesWrite        = "write"
+	FilesMkdir        = "mkdir"
+	FilesRename       = "rename"
+	FilesDelete       = "delete"
+	FilesChmod        = "chmod"
+	FilesUploadBegin  = "upload_begin"
+	FilesUploadChunk  = "upload_chunk"
+	FilesUploadCommit = "upload_commit"
+	FilesUploadAbort  = "upload_abort"
+	FilesExtract      = "extract"
+	FilesCompress     = "compress"
+)
+
+type FilesRequest struct {
+	SiteID    int64    `json:"site_id"`
+	Op        string   `json:"op"`
+	Path      string   `json:"path,omitempty"`
+	To        string   `json:"to,omitempty"`
+	Paths     []string `json:"paths,omitempty"`
+	Offset    int64    `json:"offset,omitempty"`
+	Length    int      `json:"length,omitempty"`
+	Data      []byte   `json:"data,omitempty"`
+	UploadID  string   `json:"upload_id,omitempty"`
+	Mode      uint32   `json:"mode,omitempty"`
+	Overwrite bool     `json:"overwrite,omitempty"`
+}
+
+type FilesResponse struct {
+	Entries  []files.Entry        `json:"entries,omitempty"`
+	Entry    *files.Entry         `json:"entry,omitempty"`
+	Data     []byte               `json:"data,omitempty"`
+	Size     int64                `json:"size,omitempty"`
+	UploadID string               `json:"upload_id,omitempty"`
+	Extract  *files.ExtractResult `json:"extract,omitempty"`
+}
+
+// SFTPApply is the complete set of SFTP accounts for the host.
+type SFTPApply struct {
+	Revision int64        `json:"revision"`
+	Users    []sftpd.User `json:"users"`
 }

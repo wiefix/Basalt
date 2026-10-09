@@ -51,6 +51,7 @@ type Agent struct {
 	HTTPPort      int
 	HTTPSPort     int
 	ACMEDirectory string
+	SFTPListen    string
 }
 
 // Proxy configures `basalt proxy`.
@@ -142,6 +143,7 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs.IntVar(&cfg.HTTPPort, "http-port", 80, "public HTTP port of the proxy")
 	fs.IntVar(&cfg.HTTPSPort, "https-port", 443, "public HTTPS port of the proxy")
 	fs.StringVar(&cfg.ACMEDirectory, "acme-directory", env("ACME_DIRECTORY", ""), "ACME directory URL override (e.g. Let's Encrypt staging)")
+	fs.StringVar(&cfg.SFTPListen, "sftp-listen", env("SFTP_LISTEN", ":2222"), "SFTP listen address (empty disables SFTP)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}

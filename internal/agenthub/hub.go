@@ -282,6 +282,9 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 			return nil, err
 		}
 		now := h.now()
+		if err := h.db.SetServerSFTP(ctx, id, max(0, min(m.SFTPPort, 65535)), clean(m.SFTPFingerprint)); err != nil {
+			return nil, err
+		}
 		return nil, h.db.UpdateServerHello(ctx, id, store.Server{
 			Hostname: clean(m.Hostname), OS: clean(m.OS), Arch: clean(m.Arch), Kernel: clean(m.Kernel),
 			Distro: clean(m.Distro), AgentVersion: clean(m.AgentVersion),

@@ -151,7 +151,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		Agents:        hub,
 		AgentURL:      cfg.AgentURL,
 	})
-	hub.OnConnect(api.PushProxy)
+	hub.OnConnect(api.SyncSites)
 
 	// Run both listeners; the first failure stops the other.
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -195,6 +195,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		HTTPPort:      cfg.HTTPPort,
 		HTTPSPort:     cfg.HTTPSPort,
 		ACMEDirectory: cfg.ACMEDirectory,
+		SFTPListen:    cfg.SFTPListen,
 	}, log)
 	if err != nil {
 		return err

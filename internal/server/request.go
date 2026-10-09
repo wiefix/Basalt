@@ -19,12 +19,16 @@ const maxJSONBody = 64 << 10
 // Content-Type: application/json, which browsers cannot send cross-origin
 // without a CORS preflight, rejects unknown fields and bounds the body size.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	return decodeJSONLimit(w, r, dst, maxJSONBody)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) bool {
 	mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mt != "application/json" {
 		writeError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 		return false
 	}
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxJSONBody))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		var tooBig *http.MaxBytesError

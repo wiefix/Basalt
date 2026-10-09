@@ -36,13 +36,16 @@ const (
 
 // Route is one virtual host on a proxy.
 type Route struct {
-	ID       int64     `json:"id"`
-	Kind     RouteKind `json:"kind"`
-	Domains  []string  `json:"domains"`
-	Root     string    `json:"root,omitempty"`     // static
-	Upstream string    `json:"upstream,omitempty"` // reverse_proxy, host:port
-	TLS      TLSMode   `json:"tls"`
-	HSTS     bool      `json:"hsts,omitempty"`
+	ID      int64     `json:"id"`
+	Kind    RouteKind `json:"kind"`
+	Domains []string  `json:"domains"`
+	Root    string    `json:"root,omitempty"` // static
+	// SiteID marks a static route serving a managed site. The panel leaves
+	// Root empty; the agent resolves it inside its sites directory.
+	SiteID   int64   `json:"site_id,omitempty"`
+	Upstream string  `json:"upstream,omitempty"` // reverse_proxy, host:port
+	TLS      TLSMode `json:"tls"`
+	HSTS     bool    `json:"hsts,omitempty"`
 }
 
 // Desired is the complete proxy state the panel wants on one host.
@@ -159,10 +162,16 @@ func (r *Route) Validate(sitesRoot string) error {
 		if r.Upstream != "" {
 			return errors.New("static route cannot have an upstream")
 		}
+		if r.SiteID < 0 {
+			return errors.New("invalid site id")
+		}
+		if r.SiteID > 0 && r.Root == "" {
+			return nil // resolved by the agent
+		}
 		return validateRoot(r.Root, sitesRoot)
 	case KindReverseProxy:
-		if r.Root != "" {
-			return errors.New("reverse_proxy route cannot have a root")
+		if r.Root != "" || r.SiteID != 0 {
+			return errors.New("reverse_proxy route cannot have a root or site")
 		}
 		return ValidateUpstream(r.Upstream)
 	default:

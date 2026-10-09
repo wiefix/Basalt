@@ -277,3 +277,8 @@ func mustAtoi(s string) int64 {
 	}
 	return n
 }
+
+func newJar() http.CookieJar {
+	jar, _ := cookiejar.New(nil)
+	return jar
+}

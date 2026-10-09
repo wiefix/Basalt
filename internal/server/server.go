@@ -107,6 +107,21 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/servers/{id}/routes", s.requireRole(store.RoleAdmin, s.handleCreateRoute))
 	mux.Handle("DELETE /api/v1/servers/{id}/routes/{rid}", s.requireRole(store.RoleAdmin, s.handleDeleteRoute))
 
+	mux.Handle("GET /api/v1/sites", s.requireRole(store.RoleViewer, s.handleListSites))
+	mux.Handle("POST /api/v1/sites", s.requireRole(store.RoleAdmin, s.handleCreateSite))
+	mux.Handle("GET /api/v1/sites/{id}", s.requireRole(store.RoleViewer, s.handleGetSite))
+	mux.Handle("PUT /api/v1/sites/{id}/domains", s.requireRole(store.RoleAdmin, s.handleSetSiteDomains))
+	mux.Handle("DELETE /api/v1/sites/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteSite))
+	mux.Handle("GET /api/v1/sites/{id}/files", s.requireRole(store.RoleViewer, s.handleListFiles))
+	mux.Handle("GET /api/v1/sites/{id}/files/stat", s.requireRole(store.RoleViewer, s.handleStatFile))
+	mux.Handle("GET /api/v1/sites/{id}/files/text", s.requireRole(store.RoleViewer, s.handleReadText))
+	mux.Handle("GET /api/v1/sites/{id}/files/content", s.requireRole(store.RoleViewer, s.handleDownload))
+	mux.Handle("PUT /api/v1/sites/{id}/files/content", s.requireRole(store.RoleMember, s.handleUpload))
+	mux.Handle("POST /api/v1/sites/{id}/files/{op}", s.requireRole(store.RoleMember, s.handleFileOp))
+	mux.Handle("GET /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleViewer, s.handleListSFTPUsers))
+	mux.Handle("POST /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleAdmin, s.handleCreateSFTPUser))
+	mux.Handle("DELETE /api/v1/sites/{id}/sftp-users/{uid}", s.requireRole(store.RoleAdmin, s.handleDeleteSFTPUser))
+
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 	})

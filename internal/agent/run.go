@@ -41,12 +41,16 @@ type Config struct {
 	HTTPPort      int
 	HTTPSPort     int
 	ACMEDirectory string
+	// SFTPListen is the SFTP server address; empty disables SFTP.
+	SFTPListen string
 }
 
 type Agent struct {
 	dir   string
 	log   *slog.Logger
 	proxy *proxyManager
+	sites *sitesManager
+	sftp  *sftpManager
 
 	mu sync.Mutex
 	id *identity
@@ -62,9 +66,16 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	sites := newSitesManager(cfg.SitesRoot, log.With("subsystem", "sites"))
+	sftp, err := newSFTPManager(cfg, sites, log.With("subsystem", "sftp"))
+	if err != nil {
+		return nil, err
+	}
 	return &Agent{
 		dir: cfg.DataDir, log: log, id: id,
-		proxy:           newProxyManager(cfg, log.With("subsystem", "proxy")),
+		sites:           sites,
+		sftp:            sftp,
+		proxy:           newProxyManager(cfg, sites, log.With("subsystem", "proxy")),
 		MetricsInterval: metricsInterval,
 		RenewBefore:     renewBefore,
 		collector:       newCollector(),
@@ -84,6 +95,8 @@ func (a *Agent) identity() *identity {
 func (a *Agent) Run(ctx context.Context) error {
 	// The proxy is managed independently of the panel connection.
 	go a.proxy.run(ctx)
+	go a.sites.janitor(ctx)
+	go a.sftp.run(ctx)
 
 	backoff := minBackoff
 	for {
@@ -158,7 +171,9 @@ func (a *Agent) session(ctx context.Context) error {
 	go func() { runErr <- peer.Run(ctx) }()
 	a.log.Info("connected to panel", "panel", a.identity().PanelURL, "server_id", a.identity().ServerID)
 
-	if err := peer.Notify(agentproto.TypeHello, hostFacts()); err != nil {
+	hello := hostFacts()
+	hello.SFTPPort, hello.SFTPFingerprint = a.sftp.Port(), a.sftp.Fingerprint()
+	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
 		return err
 	}
 	go a.maybeRenew(ctx, peer)
@@ -181,6 +196,27 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return agentproto.ProxyApplyResponse{ConfigID: id}, nil
+	case agentproto.TypeSiteEnsure, agentproto.TypeSiteDelete:
+		var req agentproto.SiteRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		if typ == agentproto.TypeSiteEnsure {
+			return struct{}{}, publicError(a.sites.Ensure(req.SiteID))
+		}
+		return struct{}{}, publicError(a.sites.Delete(req.SiteID))
+	case agentproto.TypeSFTPApply:
+		var st agentproto.SFTPApply
+		if err := json.Unmarshal(payload, &st); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.sftp.Apply(st)
+	case agentproto.TypeFiles:
+		var req agentproto.FilesRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.sites.handleFiles(ctx, req)
 	default:
 		return nil, fmt.Errorf("unsupported request %q", typ)
 	}

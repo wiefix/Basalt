@@ -136,6 +136,10 @@ func routeHandlers(r Route) (handlers []any, fsEntry obj) {
 
 	switch r.Kind {
 	case KindStatic:
+		if r.Root == "" {
+			// Unresolved site route: serve nothing rather than guess a path.
+			return append(handlers, obj{"handler": "static_response", "status_code": 503}), nil
+		}
 		fsName := "basalt-route-" + strconv.FormatInt(r.ID, 10)
 		fsEntry = obj{
 			"name":        fsName,

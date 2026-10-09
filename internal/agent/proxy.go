@@ -29,6 +29,7 @@ type proxyManager struct {
 	sitesRoot string
 	opts      proxy.BuildOptions
 	admin     *proxy.Admin
+	sites     *sitesManager
 
 	applyMu sync.Mutex // serialises Apply calls
 
@@ -37,9 +38,10 @@ type proxyManager struct {
 	lastErr string
 }
 
-func newProxyManager(cfg Config, log *slog.Logger) *proxyManager {
+func newProxyManager(cfg Config, sites *sitesManager, log *slog.Logger) *proxyManager {
 	return &proxyManager{
 		log:       log,
+		sites:     sites,
 		stateFile: filepath.Join(cfg.DataDir, fileProxyDesired),
 		sitesRoot: cfg.SitesRoot,
 		opts: proxy.BuildOptions{
@@ -85,6 +87,7 @@ func (m *proxyManager) Apply(ctx context.Context, d proxy.Desired) (string, erro
 		return id, err
 	}
 
+	m.resolveSites(&d)
 	if err := d.Validate(m.sitesRoot); err != nil {
 		return "", err
 	}
@@ -105,6 +108,17 @@ func (m *proxyManager) Apply(ctx context.Context, d proxy.Desired) (string, erro
 	m.mu.Unlock()
 	m.log.Info("proxy configuration applied", "revision", d.Revision, "routes", len(d.Routes), "config_id", id)
 	return id, nil
+}
+
+// resolveSites fills in the served directory of site routes. A root sent by
+// the panel for a site route is ignored: only the agent decides where a
+// site lives.
+func (m *proxyManager) resolveSites(d *proxy.Desired) {
+	for i := range d.Routes {
+		if r := &d.Routes[i]; r.Kind == proxy.KindStatic && r.SiteID > 0 {
+			r.Root = m.sites.PublicDir(r.SiteID)
+		}
+	}
 }
 
 func (m *proxyManager) persist(d proxy.Desired, cfg []byte) error {

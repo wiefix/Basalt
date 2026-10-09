@@ -4,6 +4,7 @@ go 1.27.1
 
 require (
 	github.com/caddyserver/caddy/v2 v2.11.7
+	github.com/pkg/sftp v1.13.11
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.60.1
@@ -74,6 +75,7 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
+	github.com/kr/fs v0.1.0 // indirect
 	github.com/libdns/libdns v1.1.1 // indirect
 	github.com/manifoldco/promptui v0.9.0 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
