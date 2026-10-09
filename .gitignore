@@ -1,0 +1,16 @@
+CLAUDE.md
+.claude/
+
+# build
+/bin/
+/dist/
+web/node_modules/
+web/dist/
+
+# local data
+*.db
+*.db-wal
+*.db-shm
+.env
+.DS_Store
+.data/
