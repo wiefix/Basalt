@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Actions are pinned by commit; the comment is the release they come from.
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: make web
+      - run: deploy/dev/ci-restic.sh
+      - run: make lint
+      - run: make test
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: npm audit
+        run: cd web && npm audit --omit=dev --audit-level=high
+
+  docker:
+    name: Docker
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: deploy/dev/ci-restic.sh
+      - name: Apps, compose, databases and backups against Docker
+        env:
+          BASALT_DOCKER_TESTS: "1"
+          BASALT_DB_ENGINE_TESTS: "1"
+          DOCKER_SOCKET: /var/run/docker.sock
+        run: go test -count=1 -timeout 30m -run 'Live|WithDocker' ./internal/docker ./internal/e2e
+
+  linux:
+    name: Linux isolation, PHP, MariaDB
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make test-linux
+
+  install:
+    name: Installer and disaster recovery
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: make web
+      - run: make test-install

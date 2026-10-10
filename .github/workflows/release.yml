@@ -1,0 +1,60 @@
+name: Release
+
+# Pushing a tag such as v0.1.0 builds, signs and publishes a release. The
+# installer downloads basalt-linux-<arch> from the latest release and
+# refuses it unless SHA256SUMS.sig verifies with its embedded key.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: make web
+      - run: make test
+      - name: Build
+        env:
+          TAG: ${{ github.ref_name }}
+        run: make build-linux VERSION="$TAG"
+      - name: Checksums and signature
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "The RELEASE_SIGNING_KEY secret is missing: refusing to publish an unsigned release" >&2
+            exit 1
+          fi
+          cd bin
+          sha256sum basalt-linux-amd64 basalt-linux-arm64 >SHA256SUMS
+          umask 077
+          printf '%s\n' "$RELEASE_SIGNING_KEY" >"$RUNNER_TEMP/release-key"
+          ssh-keygen -q -Y sign -f "$RUNNER_TEMP/release-key" -n basalt-release SHA256SUMS
+          rm -f "$RUNNER_TEMP/release-key"
+          # The signature must verify with the key the installer trusts.
+          key=$(sed -n "s/^RELEASE_KEY='\(.*\)'$/\1/p" ../deploy/install.sh)
+          echo "basalt-release $key" >"$RUNNER_TEMP/allowed_signers"
+          ssh-keygen -Y verify -f "$RUNNER_TEMP/allowed_signers" -I basalt-release -n basalt-release \
+            -s SHA256SUMS.sig <SHA256SUMS
+          cp ../deploy/install.sh install.sh
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --title "$TAG" --generate-notes \
+            bin/basalt-linux-amd64 bin/basalt-linux-arm64 bin/SHA256SUMS bin/SHA256SUMS.sig bin/install.sh

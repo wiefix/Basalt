@@ -19,6 +19,9 @@ LIB=/var/lib/basalt
 SITES=/srv/basalt/sites
 UNITS=/etc/systemd/system
 RELEASES=https://github.com/wiefix/Basalt/releases/latest/download
+# Releases are signed: SHA256SUMS.sig is an SSH signature of SHA256SUMS
+# (namespace basalt-release) made with this key.
+RELEASE_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBUisbbyEb5bDa9jp6Y2foeJ6cqcja04cPmm/BcLGD4v basalt-release'
 
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -75,7 +78,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # ---------- packages ----------
 
-PKGS="ca-certificates curl bzip2"
+PKGS="ca-certificates curl bzip2 openssh-client"
 [ "$WITH_PHP" -eq 1 ] && PKGS="$PKGS php-fpm php-mysql php-curl php-gd php-intl php-mbstring php-xml php-zip"
 [ "$WITH_DB" -eq 1 ] && PKGS="$PKGS mariadb-server"
 export DEBIAN_FRONTEND=noninteractive
@@ -170,6 +173,11 @@ elif [ -z "$BINARY" ]; then
 	say "Downloading basalt for linux-$ARCH"
 	curl -fsSL --retry 3 "$RELEASES/basalt-linux-$ARCH" -o "$TMP/basalt"
 	curl -fsSL --retry 3 "$RELEASES/SHA256SUMS" -o "$TMP/SHA256SUMS"
+	curl -fsSL --retry 3 "$RELEASES/SHA256SUMS.sig" -o "$TMP/SHA256SUMS.sig"
+	echo "basalt-release $RELEASE_KEY" >"$TMP/allowed_signers"
+	ssh-keygen -Y verify -f "$TMP/allowed_signers" -I basalt-release -n basalt-release \
+		-s "$TMP/SHA256SUMS.sig" <"$TMP/SHA256SUMS" >/dev/null 2>&1 ||
+		die "the release is not signed by the Basalt release key; refusing to install it"
 	(cd "$TMP" && grep " basalt-linux-$ARCH\$" SHA256SUMS | sed "s/basalt-linux-$ARCH/basalt/" | sha256sum -c --quiet -) ||
 		die "checksum mismatch for the downloaded binary"
 	BINARY="$TMP/basalt"
