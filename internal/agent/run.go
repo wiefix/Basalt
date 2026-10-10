@@ -109,7 +109,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		return nil, err
 	}
 	apps := newAppsManager(cfg, log.With("subsystem", "apps"))
-	backups := newBackupManager(cfg, sites, log.With("subsystem", "backup"))
+	backups := newBackupManager(cfg, sites, apps, log.With("subsystem", "backup"))
 	proxy := newProxyManager(cfg, sites, apps, log.With("subsystem", "proxy"))
 	apps.onChange = func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

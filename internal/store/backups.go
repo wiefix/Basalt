@@ -181,9 +181,24 @@ func scanPolicy(row interface{ Scan(...any) error }) (*BackupPolicy, error) {
 	return &p, nil
 }
 
-// SiteBackupPolicy returns a site's policy, or ErrNotFound.
-func (db *DB) SiteBackupPolicy(ctx context.Context, siteID int64) (*BackupPolicy, error) {
-	return scanPolicy(db.R.QueryRowContext(ctx, policyQuery+` WHERE p.site_id = ?`, siteID))
+// BackupTarget is what a policy or run belongs to: a site or an app.
+type BackupTarget struct {
+	SiteID int64
+	AppID  int64
+}
+
+// where selects rows of the target in a table with site_id and app_id.
+func (t BackupTarget) where(alias string) (string, int64) {
+	if t.SiteID > 0 {
+		return alias + "site_id = ?", t.SiteID
+	}
+	return alias + "app_id = ?", t.AppID
+}
+
+// BackupPolicy returns the target's policy, or ErrNotFound.
+func (db *DB) BackupPolicy(ctx context.Context, t BackupTarget) (*BackupPolicy, error) {
+	cond, id := t.where("p.")
+	return scanPolicy(db.R.QueryRowContext(ctx, policyQuery+` WHERE `+cond, id))
 }
 
 // ScheduledBackupPolicies lists the policies that run on a schedule.
@@ -204,20 +219,25 @@ func (db *DB) ScheduledBackupPolicies(ctx context.Context) ([]*BackupPolicy, err
 	return out, rows.Err()
 }
 
-// SetSiteBackupPolicy creates or replaces a site's policy.
-func (db *DB) SetSiteBackupPolicy(ctx context.Context, p *BackupPolicy) error {
+// SetBackupPolicy creates or replaces the policy of p's site or app.
+func (db *DB) SetBackupPolicy(ctx context.Context, p *BackupPolicy) error {
+	key := "site_id"
+	if p.SiteID == 0 {
+		key = "app_id"
+	}
 	_, err := db.W.ExecContext(ctx,
-		`INSERT INTO backup_policies (site_id, storage_id, schedule, at_minute, keep_last, keep_daily, keep_weekly, keep_monthly)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (site_id) DO UPDATE SET storage_id = excluded.storage_id, schedule = excluded.schedule,
+		`INSERT INTO backup_policies (site_id, app_id, storage_id, schedule, at_minute, keep_last, keep_daily, keep_weekly, keep_monthly)
+		 VALUES (NULLIF(?, 0), NULLIF(?, 0), ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (`+key+`) DO UPDATE SET storage_id = excluded.storage_id, schedule = excluded.schedule,
 		 at_minute = excluded.at_minute, keep_last = excluded.keep_last, keep_daily = excluded.keep_daily,
 		 keep_weekly = excluded.keep_weekly, keep_monthly = excluded.keep_monthly, updated_at = unixepoch()`,
-		p.SiteID, p.StorageID, p.Schedule, p.AtMinute, p.KeepLast, p.KeepDaily, p.KeepWeekly, p.KeepMonthly)
+		p.SiteID, p.AppID, p.StorageID, p.Schedule, p.AtMinute, p.KeepLast, p.KeepDaily, p.KeepWeekly, p.KeepMonthly)
 	return err
 }
 
-func (db *DB) DeleteSiteBackupPolicy(ctx context.Context, siteID int64) error {
-	return db.execOne(ctx, `DELETE FROM backup_policies WHERE site_id = ?`, siteID)
+func (db *DB) DeleteBackupPolicy(ctx context.Context, t BackupTarget) error {
+	cond, id := t.where("")
+	return db.execOne(ctx, `DELETE FROM backup_policies WHERE `+cond, id)
 }
 
 // Backup is one backup or restore run.
@@ -305,9 +325,10 @@ func scanBackup(row interface{ Scan(...any) error }) (*Backup, error) {
 	return &b, nil
 }
 
-// SiteBackups returns a site's runs, newest first.
-func (db *DB) SiteBackups(ctx context.Context, siteID int64, limit int) ([]*Backup, error) {
-	rows, err := db.R.QueryContext(ctx, `SELECT `+backupColumns+` FROM backups WHERE site_id = ? ORDER BY id DESC LIMIT ?`, siteID, limit)
+// Backups returns the target's runs, newest first.
+func (db *DB) Backups(ctx context.Context, t BackupTarget, limit int) ([]*Backup, error) {
+	cond, tid := t.where("")
+	rows, err := db.R.QueryContext(ctx, `SELECT `+backupColumns+` FROM backups WHERE `+cond+` ORDER BY id DESC LIMIT ?`, tid, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -323,8 +344,9 @@ func (db *DB) SiteBackups(ctx context.Context, siteID int64, limit int) ([]*Back
 	return out, rows.Err()
 }
 
-func (db *DB) SiteBackupByID(ctx context.Context, siteID, id int64) (*Backup, error) {
-	return scanBackup(db.R.QueryRowContext(ctx, `SELECT `+backupColumns+` FROM backups WHERE site_id = ? AND id = ?`, siteID, id))
+func (db *DB) BackupByID(ctx context.Context, t BackupTarget, id int64) (*Backup, error) {
+	cond, tid := t.where("")
+	return scanBackup(db.R.QueryRowContext(ctx, `SELECT `+backupColumns+` FROM backups WHERE `+cond+` AND id = ?`, tid, id))
 }
 
 // LastPrune returns when a repository last had its space freed.

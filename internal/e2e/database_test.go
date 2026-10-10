@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wiefix/basalt/internal/docker"
 )
@@ -255,6 +257,13 @@ func TestEveryEngineWithDocker(t *testing.T) {
 		"server_id": mustAtoi(h.id), "name": "web", "source": "image", "image": "traefik/whoami:v1.10", "port": 80,
 	})["app"].(map[string]any)["id"])
 	t.Cleanup(func() { p.call(200, "DELETE", "/api/v1/apps/"+web, nil) })
+	_, haveRestic := exec.LookPath("restic")
+	var storage any
+	if haveRestic == nil {
+		eventually(t, "restic reported", func() bool { return p.server(h.id)["restic"] != "" })
+		storage = p.call(http.StatusCreated, "POST", "/api/v1/backup-storages", map[string]any{
+			"name": "local", "kind": "local", "path": filepath.Join(t.TempDir(), "backups")})["storage"].(map[string]any)["id"]
+	}
 	for _, e := range p.call(200, "GET", "/api/v1/database-engines", nil)["engines"].([]any) {
 		engine := e.(map[string]any)["id"].(string)
 		t.Run(engine, func(t *testing.T) {
@@ -293,6 +302,58 @@ func TestEveryEngineWithDocker(t *testing.T) {
 			if s := strings.TrimSpace(string(out)); err != nil || !strings.HasSuffix(s, "1") && s != "PONG" {
 				t.Fatalf("client: %v %s", err, s)
 			}
+			if storage == nil {
+				return
+			}
+			// Backup and restore: a value changed after the backup comes back.
+			query := func(q string) string {
+				t.Helper()
+				ctr := strings.TrimSpace(dockerOut(t, sock, "ps", "-q", "--filter", "label=basalt.app="+id))
+				var args []string
+				switch engine {
+				case "postgres":
+					args = []string{"psql", "-U", user, "-d", db, "-tAc", q}
+				case "mysql":
+					args = []string{"sh", "-c", `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N "$0" -e "$1"`, db, q}
+				case "mariadb":
+					args = []string{"sh", "-c", `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N "$0" -e "$1"`, db, q}
+				case "redis":
+					args = append([]string{"redis-cli"}, strings.Fields(q)...)
+				}
+				return strings.TrimSpace(dockerOut(t, sock, append([]string{"exec", ctr}, args...)...))
+			}
+			if engine == "redis" {
+				query("SET k kept")
+				time.Sleep(1500 * time.Millisecond) // appendfsync everysec
+			} else {
+				query("CREATE TABLE t (v VARCHAR(10)); INSERT INTO t VALUES ('kept')")
+			}
+			p.call(200, "PUT", base+"/backup-policy", map[string]any{"storage_id": storage, "schedule": "manual", "keep_last": 2})
+			appBackupRound(t, p, id, func() {
+				if engine == "redis" {
+					query("SET k damaged")
+				} else {
+					query("UPDATE t SET v = 'damaged'")
+				}
+			})
+			got := ""
+			eventually(t, "restored value", func() bool {
+				if engine == "redis" {
+					got = query("GET k")
+				} else {
+					got = query("SELECT v FROM t")
+				}
+				return got == "kept"
+			})
 		})
 	}
+}
+
+func dockerOut(t *testing.T, sock string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command("docker", append([]string{"--host", "unix://" + sock}, args...)...).CombinedOutput()
+	if err != nil {
+		t.Logf("docker %v: %v %s", args, err, out)
+	}
+	return string(out)
 }

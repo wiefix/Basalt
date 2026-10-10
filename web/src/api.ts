@@ -295,8 +295,10 @@ export interface BackupPolicy {
 }
 
 export interface BackupItem {
-  kind: "site_files" | "mariadb";
+  kind: "site_files" | "mariadb" | "volume" | "db_dump";
   site_id?: number;
+  app_id?: number;
+  volume?: string;
   database?: string;
 }
 
@@ -512,17 +514,16 @@ export const api = {
   backupStoragePassword: (id: number) => get<{ password: string }>(`/api/v1/backup-storages/${id}/password`),
   checkBackupStorage: (id: number, serverId: number) =>
     post<{ ok: boolean; error?: string }>(`/api/v1/backup-storages/${id}/check`, { server_id: serverId }),
-  siteBackups: (siteId: number) =>
-    get<{ policy: BackupPolicy | null; backups: BackupRun[]; restic: string }>(`/api/v1/sites/${siteId}/backups`),
-  siteBackup: (siteId: number, id: number) => get<{ backup: BackupRun }>(`/api/v1/sites/${siteId}/backups/${id}`),
-  siteBackupStreamUrl: (siteId: number, id: number) => `/api/v1/sites/${siteId}/backups/${id}/stream`,
-  setSiteBackupPolicy: (siteId: number, b: Omit<BackupPolicy, "next_run">) =>
-    put<{ policy: BackupPolicy }>(`/api/v1/sites/${siteId}/backup-policy`, b),
-  deleteSiteBackupPolicy: (siteId: number) => del<{ ok: boolean }>(`/api/v1/sites/${siteId}/backup-policy`),
-  runSiteBackup: (siteId: number) => post<{ backup: BackupRun }>(`/api/v1/sites/${siteId}/backups`),
-  siteSnapshots: (siteId: number) => get<{ snapshots: Snapshot[] }>(`/api/v1/sites/${siteId}/snapshots`),
-  restoreSite: (siteId: number, snapshots: string[]) =>
-    post<{ backup: BackupRun }>(`/api/v1/sites/${siteId}/restore`, { snapshots }),
+  // Backups of a site or app; base is "/api/v1/sites/1" or "/api/v1/apps/1".
+  backups: (base: string) =>
+    get<{ policy: BackupPolicy | null; backups: BackupRun[]; restic: string; items: BackupItem[] }>(`${base}/backups`),
+  backup: (base: string, id: number) => get<{ backup: BackupRun }>(`${base}/backups/${id}`),
+  backupStreamUrl: (base: string, id: number) => `${base}/backups/${id}/stream`,
+  setBackupPolicy: (base: string, b: Omit<BackupPolicy, "next_run">) => put<{ policy: BackupPolicy }>(`${base}/backup-policy`, b),
+  deleteBackupPolicy: (base: string) => del<{ ok: boolean }>(`${base}/backup-policy`),
+  runBackup: (base: string) => post<{ backup: BackupRun }>(`${base}/backups`),
+  snapshots: (base: string) => get<{ snapshots: Snapshot[] }>(`${base}/snapshots`),
+  restore: (base: string, snapshots: string[]) => post<{ backup: BackupRun }>(`${base}/restore`, { snapshots }),
 
   sftpUsers: (siteId: number) =>
     get<{ users: SFTPUser[]; connection: SFTPConnection | null }>(`/api/v1/sites/${siteId}/sftp-users`),

@@ -1,10 +1,10 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
-import { api, can, type BackupPolicy, type BackupRun, type Site, type Snapshot, type User } from "../api";
+import { api, can, type BackupItem, type BackupPolicy, type BackupRun, type Snapshot, type User } from "../api";
 import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useConfirm, useToast } from "../components/ui";
 import { useEventStream } from "../components/stream";
-import { LogView } from "./App";
+import { LogView } from "../components/LogView";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const minuteText = (m: number) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
@@ -18,29 +18,43 @@ function RunBadge({ run }: { run: BackupRun }) {
   return <span className={`badge ${cls}`}>{run.status === "running" ? (run.kind === "restore" ? "restoring" : "running") : run.status}</span>;
 }
 
-const itemLabel = (it: { kind: string; database?: string }) => (it.kind === "site_files" ? "files" : `database ${it.database}`);
+const itemLabel = (it: Pick<BackupItem, "kind" | "database" | "volume">) =>
+  it.kind === "site_files" ? "files" : it.kind === "volume" ? `volume ${it.volume}` : `database ${it.database}`;
 
-export function SiteBackupsTab({ site, user }: { site: Site; user: User }) {
+// What a backup holds, in a sentence.
+function contents(items: BackupItem[]) {
+  if (items.length === 0) return "Nothing to back up: it keeps no data (no volumes).";
+  return `Holds ${items.map(itemLabel).join(", ")}${items.some((i) => i.kind === "mariadb" || i.kind === "db_dump") ? " (consistent dumps)" : ""}.`;
+}
+
+// BackupTarget is the site or app a Backups tab is about.
+export interface BackupTarget {
+  base: string; // API path, e.g. /api/v1/sites/1
+  name: string;
+}
+
+export function BackupsTab({ target, user }: { target: BackupTarget; user: User }) {
   const qc = useQueryClient();
   const toast = useToast();
   const [shown, setShown] = useState<number | null>(null);
   const [restoring, setRestoring] = useState(false);
-  const data = useQuery({ queryKey: ["site-backups", site.id], queryFn: () => api.siteBackups(site.id), refetchInterval: 15_000 });
+  const key = ["backups", target.base];
+  const data = useQuery({ queryKey: key, queryFn: () => api.backups(target.base), refetchInterval: 15_000 });
   const running = data.data?.backups.find((b) => b.status === "running");
-  useEventStream(running ? api.siteBackupStreamUrl(site.id, running.id) : null, {
-    end: () => qc.invalidateQueries({ queryKey: ["site-backups", site.id] }),
+  useEventStream(running ? api.backupStreamUrl(target.base, running.id) : null, {
+    end: () => qc.invalidateQueries({ queryKey: key }),
   });
   const run = useMutation({
-    mutationFn: () => api.runSiteBackup(site.id),
+    mutationFn: () => api.runBackup(target.base),
     onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: ["site-backups", site.id] });
+      qc.invalidateQueries({ queryKey: key });
       setShown(r.backup.id);
     },
     onError: (e) => toast(errorMessage(e), true),
   });
   if (data.isPending) return <Loading />;
   if (data.error) return <ErrorBox error={data.error} />;
-  const { policy, backups, restic } = data.data;
+  const { policy, backups, restic, items } = data.data;
 
   return (
     <div className="stack">
@@ -60,12 +74,12 @@ export function SiteBackupsTab({ site, user }: { site: Site; user: User }) {
                   ? "Only when started by hand."
                   : `${policy.schedule === "daily" ? "Every day" : "Every hour"}; next ${policy.next_run ? formatDate(policy.next_run) : "—"}.`
                 : "Not backed up yet: choose a storage below."}{" "}
-              Files and a dump of each database.
+              {contents(items)}
             </p>
           </div>
           <div className="row">
             {policy && can(user, "member") && (
-              <button className="btn primary" onClick={() => run.mutate()} disabled={run.isPending || !!running || !restic}>
+              <button className="btn primary" onClick={() => run.mutate()} disabled={run.isPending || !!running || !restic || items.length === 0}>
                 <Icon name="archive" /> {running ? "Running…" : "Back up now"}
               </button>
             )}
@@ -78,7 +92,7 @@ export function SiteBackupsTab({ site, user }: { site: Site; user: User }) {
         </div>
       </div>
 
-      {can(user, "admin") && <PolicyCard site={site} policy={policy} />}
+      {can(user, "admin") && <PolicyCard target={target} policy={policy} />}
 
       <div className="card">
         <div className="card-head">
@@ -120,14 +134,14 @@ export function SiteBackupsTab({ site, user }: { site: Site; user: User }) {
           </div>
         )}
       </div>
-      {shown !== null && <RunModal siteId={site.id} id={shown} onClose={() => setShown(null)} />}
+      {shown !== null && <RunModal target={target} id={shown} onClose={() => setShown(null)} />}
       {restoring && (
         <RestoreModal
-          site={site}
+          target={target}
           onClose={() => setRestoring(false)}
           onStarted={(id) => {
             setRestoring(false);
-            qc.invalidateQueries({ queryKey: ["site-backups", site.id] });
+            qc.invalidateQueries({ queryKey: key });
             setShown(id);
           }}
         />
@@ -136,7 +150,7 @@ export function SiteBackupsTab({ site, user }: { site: Site; user: User }) {
   );
 }
 
-function PolicyCard({ site, policy }: { site: Site; policy: BackupPolicy | null }) {
+function PolicyCard({ target, policy }: { target: BackupTarget; policy: BackupPolicy | null }) {
   const qc = useQueryClient();
   const toast = useToast();
   const confirm = useConfirm();
@@ -155,7 +169,7 @@ function PolicyCard({ site, policy }: { site: Site; policy: BackupPolicy | null 
   }, [storages.data, storageId]);
   const save = useMutation({
     mutationFn: () =>
-      api.setSiteBackupPolicy(site.id, {
+      api.setBackupPolicy(target.base, {
         storage_id: Number(storageId),
         schedule,
         at_minute: schedule === "hourly" ? parseMinute(time) % 60 : parseMinute(time),
@@ -165,21 +179,21 @@ function PolicyCard({ site, policy }: { site: Site; policy: BackupPolicy | null 
         keep_monthly: keep.monthly,
       }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["site-backups", site.id] });
+      qc.invalidateQueries({ queryKey: ["backups", target.base] });
       toast("Backup settings saved");
     },
   });
   const off = async () => {
     const ok = await confirm({
-      title: "Stop backing up this site?",
+      title: `Stop backing up ${target.name}?`,
       body: <p>Existing backups stay in the storage; the schedule stops.</p>,
       confirm: "Stop",
       danger: true,
     });
     if (!ok) return;
     try {
-      await api.deleteSiteBackupPolicy(site.id);
-      qc.invalidateQueries({ queryKey: ["site-backups", site.id] });
+      await api.deleteBackupPolicy(target.base);
+      qc.invalidateQueries({ queryKey: ["backups", target.base] });
     } catch (e) {
       toast(errorMessage(e), true);
     }
@@ -281,18 +295,18 @@ function PolicyCard({ site, policy }: { site: Site; policy: BackupPolicy | null 
   );
 }
 
-function RunModal({ siteId, id, onClose }: { siteId: number; id: number; onClose: () => void }) {
+function RunModal({ target, id, onClose }: { target: BackupTarget; id: number; onClose: () => void }) {
   const qc = useQueryClient();
-  const d = useQuery({ queryKey: ["site-backup", siteId, id], queryFn: () => api.siteBackup(siteId, id) });
+  const d = useQuery({ queryKey: ["backup", target.base, id], queryFn: () => api.backup(target.base, id) });
   const run = d.data?.backup;
   const following = run?.status === "running";
   const [live, setLive] = useState("");
-  useEventStream(following ? api.siteBackupStreamUrl(siteId, id) : null, {
+  useEventStream(following ? api.backupStreamUrl(target.base, id) : null, {
     open: () => setLive(""),
     log: (c: { text: string }) => setLive((t) => t + c.text),
     end: () => {
-      qc.invalidateQueries({ queryKey: ["site-backup", siteId, id] });
-      qc.invalidateQueries({ queryKey: ["site-backups", siteId] });
+      qc.invalidateQueries({ queryKey: ["backup", target.base, id] });
+      qc.invalidateQueries({ queryKey: ["backups", target.base] });
     },
   });
   const text = following ? live : run?.log;
@@ -320,12 +334,12 @@ function RunModal({ siteId, id, onClose }: { siteId: number; id: number; onClose
   );
 }
 
-function RestoreModal({ site, onClose, onStarted }: { site: Site; onClose: () => void; onStarted: (id: number) => void }) {
-  const snaps = useQuery({ queryKey: ["site-snapshots", site.id], queryFn: () => api.siteSnapshots(site.id), gcTime: 0 });
+function RestoreModal({ target, onClose, onStarted }: { target: BackupTarget; onClose: () => void; onStarted: (id: number) => void }) {
+  const snaps = useQuery({ queryKey: ["snapshots", target.base], queryFn: () => api.snapshots(target.base), gcTime: 0 });
   const [chosen, setChosen] = useState<Record<string, string>>({}); // part -> snapshot id
   const [confirmText, setConfirmText] = useState("");
   const restore = useMutation({
-    mutationFn: () => api.restoreSite(site.id, Object.values(chosen)),
+    mutationFn: () => api.restore(target.base, Object.values(chosen)),
     onSuccess: (r) => onStarted(r.backup.id),
   });
   const parts = new Map<string, Snapshot[]>();
@@ -344,7 +358,7 @@ function RestoreModal({ site, onClose, onStarted }: { site: Site; onClose: () =>
           <button className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button className="btn danger solid" disabled={count === 0 || confirmText !== site.name || restore.isPending} onClick={() => restore.mutate()}>
+          <button className="btn danger solid" disabled={count === 0 || confirmText !== target.name || restore.isPending} onClick={() => restore.mutate()}>
             {count ? `Restore ${count} part${count === 1 ? "" : "s"}` : "Restore"}
           </button>
         </>
@@ -360,8 +374,8 @@ function RestoreModal({ site, onClose, onStarted }: { site: Site; onClose: () =>
         <div className="form">
           <ErrorBox error={restore.error} />
           <div className="alert warn small">
-            Restored files replace the site's files exactly: files created since are deleted. A restored database replaces its
-            tables with those of the dump.
+            Restored files and volumes replace the current ones exactly: files created since are deleted, and containers using
+            a volume stop while it is restored. A restored database replaces the tables of the dump.
           </div>
           {[...parts.entries()].map(([part, list]) => (
             <Field key={part} label={part[0].toUpperCase() + part.slice(1)}>
@@ -375,7 +389,7 @@ function RestoreModal({ site, onClose, onStarted }: { site: Site; onClose: () =>
               </select>
             </Field>
           ))}
-          <Field label={`Type ${site.name} to confirm`}>
+          <Field label={`Type ${target.name} to confirm`}>
             <input className="input" value={confirmText} onChange={(e) => setConfirmText(e.target.value)} />
           </Field>
         </div>

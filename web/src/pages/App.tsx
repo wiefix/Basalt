@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
 import { api, appPath, can, sourceLabel, type App, type AppVolume, type Deployment, type ServiceStatus, type User } from "../api";
@@ -19,6 +19,8 @@ import {
 import { useEventStream, type StreamState } from "../components/stream";
 import { Stat, SyncBadge } from "./Server";
 import { Chart } from "../components/Chart";
+import { BackupsTab } from "./BackupsTab";
+import { LogView } from "../components/LogView";
 
 export function AppPage({ user }: { user: User }) {
   const id = Number(useParams().id);
@@ -72,11 +74,13 @@ export function AppPage({ user }: { user: User }) {
         {!isDB && tab(`${base}/domains`, "Domains")}
         {a.source === "git" && can(user, "admin") && tab(`${base}/source`, "Source")}
         {a.source === "compose" && can(user, "admin") && tab(`${base}/compose`, "Compose")}
+        {tab(`${base}/backups`, "Backups")}
         {can(user, "admin") && tab(`${base}/settings`, "Settings")}
       </div>
       <Routes>
         <Route index element={<Overview app={a} user={user} />} />
         <Route path="connection" element={<ConnectionTab app={a} />} />
+        <Route path="backups" element={<BackupsTab target={{ base: `/api/v1/apps/${a.id}`, name: a.name }} user={user} />} />
         <Route path="logs" element={<LogsTab app={a} />} />
         <Route path="env" element={<EnvTab app={a} />} />
         <Route path="domains" element={<DomainsTab app={a} user={user} />} />
@@ -340,29 +344,6 @@ function DeploymentModal({ appId, id, onClose }: { appId: number; id: number; on
         </div>
       )}
     </Modal>
-  );
-}
-
-// LogView shows log text and keeps it scrolled to the end unless the user
-// scrolled up to read.
-export function LogView({ text, tall }: { text: string; tall?: boolean }) {
-  const ref = useRef<HTMLPreElement>(null);
-  const stick = useRef(true);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
-  }, [text]);
-  return (
-    <pre
-      ref={ref}
-      className={tall ? "logbox tall" : "logbox"}
-      onScroll={(e) => {
-        const el = e.currentTarget;
-        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-      }}
-    >
-      {text}
-    </pre>
   );
 }
 

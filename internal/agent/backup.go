@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -34,14 +33,15 @@ type backupManager struct {
 	dataDir string
 	sites   *sitesManager
 	mysql   string // MariaDB socket
+	apps    *appsManager
 
 	slots chan struct{}
 	lmu   sync.Mutex
 	locks map[string]*sync.Mutex // by resource
 }
 
-func newBackupManager(cfg Config, sites *sitesManager, log *slog.Logger) *backupManager {
-	return &backupManager{log: log, binary: cfg.Restic, dataDir: cfg.DataDir, sites: sites, mysql: cfg.MySQLSocket,
+func newBackupManager(cfg Config, sites *sitesManager, apps *appsManager, log *slog.Logger) *backupManager {
+	return &backupManager{log: log, binary: cfg.Restic, dataDir: cfg.DataDir, sites: sites, apps: apps, mysql: cfg.MySQLSocket,
 		slots: make(chan struct{}, maxConcurrentBackups), locks: map[string]*sync.Mutex{}}
 }
 
@@ -185,8 +185,13 @@ func (b *backupManager) Check(ctx context.Context, spec agentproto.BackupRepo) e
 
 func itemTags(resource string, it agentproto.BackupItem) []string {
 	part := "files"
-	if it.Kind == agentproto.ItemMariaDB {
+	switch it.Kind {
+	case agentproto.ItemMariaDB:
 		part = "mariadb-" + it.Database
+	case agentproto.ItemVolume:
+		part = "volume-" + it.Volume
+	case agentproto.ItemDBDump:
+		part = "dump-" + it.Database
 	}
 	return []string{"res=" + resource, "part=" + part}
 }
@@ -242,6 +247,12 @@ func (b *backupManager) Run(ctx context.Context, req agentproto.BackupRequest, s
 			}
 			lg.printf("Dumping database %s", it.Database)
 			o.StdinCommand, o.StdinFilename = cmd, dumpFile(it.Database)
+		default:
+			cmd, file, err := b.appBackupOptions(ctx, it, &lg)
+			if err != nil {
+				return fail(err)
+			}
+			o.StdinCommand, o.StdinFilename = cmd, file
 		}
 		s, err := r.Backup(ctx, repo, o)
 		if err != nil {
@@ -320,6 +331,10 @@ func (b *backupManager) Snapshots(ctx context.Context, req agentproto.SnapshotsR
 				info.Item.Kind = agentproto.ItemSiteFiles
 			case strings.HasPrefix(part, "mariadb-"):
 				info.Item.Kind, info.Item.Database = agentproto.ItemMariaDB, strings.TrimPrefix(part, "mariadb-")
+			case strings.HasPrefix(part, "volume-"):
+				info.Item.Kind, info.Item.Volume = agentproto.ItemVolume, strings.TrimPrefix(part, "volume-")
+			case strings.HasPrefix(part, "dump-"):
+				info.Item.Kind, info.Item.Database = agentproto.ItemDBDump, strings.TrimPrefix(part, "dump-")
 			}
 		}
 		if s.Summary != nil {
@@ -361,7 +376,11 @@ func (b *backupManager) Restore(ctx context.Context, req agentproto.RestoreReque
 			}
 		case agentproto.ItemMariaDB:
 			lg.printf("Restoring database %s from snapshot %s", it.Item.Database, it.Snapshot[:8])
-			if err := b.restoreDatabase(ctx, r, repo, req.Resource, it); err != nil {
+			if err := b.restoreDatabase(ctx, r, repo, it); err != nil {
+				return fail(err)
+			}
+		default:
+			if err := b.restoreAppItem(ctx, r, repo, it, &lg); err != nil {
 				return fail(err)
 			}
 		}
@@ -371,7 +390,7 @@ func (b *backupManager) Restore(ctx context.Context, req agentproto.RestoreReque
 }
 
 // restoreDatabase feeds a dump from the repository to the MariaDB client.
-func (b *backupManager) restoreDatabase(ctx context.Context, r *restic.Runner, repo restic.Repo, resource string, it agentproto.RestoreItem) error {
+func (b *backupManager) restoreDatabase(ctx context.Context, r *restic.Runner, repo restic.Repo, it agentproto.RestoreItem) error {
 	if b.mysql == "" || !mariadb.Available(b.mysql) {
 		return errors.New("MariaDB is not available on this server")
 	}
@@ -379,29 +398,10 @@ func (b *backupManager) restoreDatabase(ctx context.Context, r *restic.Runner, r
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	pr, pw := io.Pipe()
-	client := exec.CommandContext(ctx, bin, "--socket="+b.mysql, "--user=root", "--default-character-set=utf8mb4",
+	cmd := exec.CommandContext(ctx, bin, "--socket="+b.mysql, "--user=root", "--default-character-set=utf8mb4",
 		"--binary-mode", it.Item.Database)
-	client.Stdin = pr
-	var out strings.Builder
-	client.Stdout, client.Stderr = &out, &out
-	if err := client.Start(); err != nil {
-		return err
-	}
-	dumpErr := r.Dump(ctx, repo, it.Snapshot, "/"+dumpFile(it.Item.Database), pw)
-	pw.CloseWithError(dumpErr)
-	clientErr := client.Wait()
-	if dumpErr != nil {
-		return fmt.Errorf("read the dump: %w", dumpErr)
-	}
-	if clientErr != nil {
-		msg := strings.TrimSpace(out.String())
-		if len(msg) > 500 {
-			msg = msg[:500]
-		}
-		return fmt.Errorf("load the dump: %v: %s", clientErr, msg)
+	if err := pipeSnapshot(ctx, r, repo, it.Snapshot, "/"+dumpFile(it.Item.Database), cmd); err != nil {
+		return fmt.Errorf("load the dump: %w", err)
 	}
 	return nil
 }

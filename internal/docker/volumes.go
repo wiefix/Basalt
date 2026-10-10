@@ -40,3 +40,12 @@ func (c *Client) VolumeRemove(ctx context.Context, name string) error {
 	}
 	return err
 }
+
+// VolumeInspect returns a volume; ErrNotFound if it does not exist.
+func (c *Client) VolumeInspect(ctx context.Context, name string) (*Volume, error) {
+	var v Volume
+	if err := c.call(ctx, http.MethodGet, "/volumes/"+url.PathEscape(name), nil, nil, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}

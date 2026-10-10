@@ -61,6 +61,7 @@ var (
 	resourceRE  = regexp.MustCompile(`^(site|app)-[1-9][0-9]{0,18}$`)
 	snapshotRE  = regexp.MustCompile(`^[0-9a-f]{8,64}$`)
 	dbNameRE    = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+	sqlNameRE   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 	errBadValue = errors.New("invalid value")
 )
 
@@ -135,16 +136,34 @@ func (r *BackupRepo) Validate() error {
 const (
 	ItemSiteFiles = "site_files" // a site's directory
 	ItemMariaDB   = "mariadb"    // a database of the server's MariaDB
+	ItemVolume    = "volume"     // a named volume of an app
+	ItemDBDump    = "db_dump"    // a logical dump of a database app's service
 )
+
+// Engines a db_dump item can dump.
+var dumpEngines = map[string]bool{"postgres": true, "mysql": true, "mariadb": true}
 
 // BackupItem is one part of a resource; each becomes a snapshot.
 type BackupItem struct {
 	Kind     string `json:"kind"`
 	SiteID   int64  `json:"site_id,omitempty"`
-	Database string `json:"database,omitempty"`
+	AppID    int64  `json:"app_id,omitempty"`
+	Volume   string `json:"volume,omitempty"`   // volume: the app's name for it
+	Service  string `json:"service,omitempty"`  // db_dump: the service running the database
+	Engine   string `json:"engine,omitempty"`   // db_dump: postgres, mysql or mariadb
+	Database string `json:"database,omitempty"` // mariadb, db_dump
+	User     string `json:"user,omitempty"`     // db_dump (PostgreSQL connects as it)
 }
 
-func (it BackupItem) validate() error {
+// validate checks an item and that it belongs to resource.
+func (it BackupItem) validate(resource string) error {
+	owner := fmt.Sprintf("site-%d", it.SiteID)
+	if it.Kind == ItemVolume || it.Kind == ItemDBDump {
+		owner = fmt.Sprintf("app-%d", it.AppID)
+	}
+	if it.Kind != ItemMariaDB && owner != resource {
+		return errors.New("backup item of another resource")
+	}
 	switch it.Kind {
 	case ItemSiteFiles:
 		if it.SiteID <= 0 {
@@ -153,6 +172,15 @@ func (it BackupItem) validate() error {
 	case ItemMariaDB:
 		if !dbNameRE.MatchString(it.Database) {
 			return fmt.Errorf("invalid database name %q", it.Database)
+		}
+	case ItemVolume:
+		if it.AppID <= 0 || !ServiceNameRE.MatchString(it.Volume) {
+			return fmt.Errorf("invalid volume %q", it.Volume)
+		}
+	case ItemDBDump:
+		if it.AppID <= 0 || !ServiceNameRE.MatchString(it.Service) || !dumpEngines[it.Engine] ||
+			!sqlNameRE.MatchString(it.Database) || !sqlNameRE.MatchString(it.User) {
+			return errors.New("invalid database dump")
 		}
 	default:
 		return fmt.Errorf("unknown backup item %q", it.Kind)
@@ -203,7 +231,7 @@ func (r *BackupRequest) Validate() error {
 		return errors.New("nothing to back up")
 	}
 	for _, it := range r.Items {
-		if err := it.validate(); err != nil {
+		if err := it.validate(r.Resource); err != nil {
 			return err
 		}
 	}
@@ -278,7 +306,7 @@ func (r *RestoreRequest) Validate() error {
 		return errors.New("nothing to restore")
 	}
 	for _, it := range r.Items {
-		if err := it.Item.validate(); err != nil {
+		if err := it.Item.validate(r.Resource); err != nil {
 			return err
 		}
 		if !snapshotRE.MatchString(it.Snapshot) {

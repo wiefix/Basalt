@@ -192,3 +192,146 @@ func TestSiteBackups(t *testing.T) {
 		t.Fatal("deleting the storage removed the repository")
 	}
 }
+
+// waitAppBackup is waitBackup for an app's runs.
+func waitAppBackup(t *testing.T, p *panel, aid, bid string) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Minute)
+	for {
+		b := p.call(200, "GET", "/api/v1/apps/"+aid+"/backups/"+bid, nil)["backup"].(map[string]any)
+		if b["status"] != "running" {
+			return b
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("run %s still running", bid)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// appBackupRound backs an app up, lets damage happen, restores every part
+// of that backup and returns the restore's log.
+func appBackupRound(t *testing.T, p *panel, aid string, damage func()) string {
+	t.Helper()
+	base := "/api/v1/apps/" + aid
+	b := p.call(http.StatusAccepted, "POST", base+"/backups", map[string]any{})["backup"].(map[string]any)
+	done := waitAppBackup(t, p, aid, jsonID(b["id"]))
+	if done["status"] != "succeeded" {
+		t.Fatalf("backup: %v\n%v", done, done["log"])
+	}
+	t.Logf("backup log:\n%s", done["log"])
+	damage()
+	var ids []string
+	for _, sn := range done["snapshots"].([]any) {
+		ids = append(ids, sn.(map[string]any)["id"].(string))
+	}
+	rs := p.call(http.StatusAccepted, "POST", base+"/restore", map[string]any{"snapshots": ids})["backup"].(map[string]any)
+	r := waitAppBackup(t, p, aid, jsonID(rs["id"]))
+	if r["status"] != "succeeded" {
+		t.Fatalf("restore: %v\n%v", r, r["log"])
+	}
+	return r["log"].(string)
+}
+
+// TestAppBackupsWithDocker backs up a volume and a PostgreSQL database and
+// restores them. Needs Docker and restic; opt-in.
+func TestAppBackupsWithDocker(t *testing.T) {
+	if os.Getenv("BASALT_DOCKER_TESTS") != "1" {
+		t.Skip("set BASALT_DOCKER_TESTS=1 to run against the local Docker daemon")
+	}
+	if _, err := exec.LookPath("restic"); err != nil {
+		t.Skip("restic is not installed")
+	}
+	sock := os.Getenv("DOCKER_SOCKET")
+	if sock == "" {
+		sock = "/var/run/docker.sock"
+	}
+	p := startPanel(t)
+	h := startHostWith(t, p, sock)
+	eventually(t, "restic reported", func() bool { return p.server(h.id)["restic"] != "" })
+	sid := mustAtoi(h.id)
+	docker := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command("docker", append([]string{"--host", "unix://" + sock}, args...)...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("docker %v: %v %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	st := p.call(http.StatusCreated, "POST", "/api/v1/backup-storages", map[string]any{
+		"name": "local", "kind": "local", "path": filepath.Join(t.TempDir(), "backups")})["storage"].(map[string]any)
+	policy := map[string]any{"storage_id": st["id"], "schedule": "manual", "keep_last": 3}
+	deploy := func(aid string) {
+		t.Helper()
+		dep := p.call(http.StatusAccepted, "POST", "/api/v1/apps/"+aid+"/deploy", map[string]any{})["deployment"].(map[string]any)
+		if d, log := followDeployment(t, p, "/api/v1/apps/"+aid, jsonID(dep["id"])); d["status"] != "succeeded" {
+			t.Fatalf("deployment: %v\n%s", d, log)
+		}
+	}
+	cleanup := func(aid string) {
+		t.Cleanup(func() { p.call(200, "DELETE", "/api/v1/apps/"+aid+"?volumes=1", nil) })
+	}
+
+	// An app without volumes has nothing to back up.
+	plain := jsonID(p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{"server_id": sid, "name": "plain",
+		"image": "traefik/whoami:v1.10", "port": 80})["app"].(map[string]any)["id"])
+	cleanup(plain)
+	p.call(200, "PUT", "/api/v1/apps/"+plain+"/backup-policy", policy)
+	p.call(http.StatusUnprocessableEntity, "POST", "/api/v1/apps/"+plain+"/backups", map[string]any{})
+
+	// A volume: nginx serves its content.
+	web := jsonID(p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{"server_id": sid, "name": "site",
+		"image": "nginx:1.27-alpine", "port": 80, "domains": []string{"vol.localhost"}, "tls": "internal",
+		"volumes": []map[string]string{{"name": "html", "path": "/usr/share/nginx/html"}}})["app"].(map[string]any)["id"])
+	cleanup(web)
+	deploy(web)
+	vol := "basalt-app-" + web + "-html"
+	inVolume := func(script string) string {
+		return docker("run", "--rm", "-v", vol+":/d", "busybox:1.37", "sh", "-c", script)
+	}
+	inVolume("rm -f /d/*; echo version-one > /d/index.html; chown 1234:1234 /d/index.html")
+	eventually(t, "volume served", func() bool { _, b := h.get("vol.localhost", "/"); return strings.Contains(b, "version-one") })
+	p.call(200, "PUT", "/api/v1/apps/"+web+"/backup-policy", policy)
+	log := appBackupRound(t, p, web, func() {
+		inVolume("echo damaged > /d/index.html; echo extra > /d/extra.html")
+	})
+	if !strings.Contains(log, "Stopping") || !strings.Contains(log, "Started 1 container(s) again") {
+		t.Fatalf("restore log:\n%s", log)
+	}
+	eventually(t, "restored volume served", func() bool { _, b := h.get("vol.localhost", "/"); return strings.Contains(b, "version-one") })
+	if got := inVolume("ls /d; stat -c %u /d/index.html"); got != "index.html\n1234" {
+		t.Fatalf("volume after restore: %q", got)
+	}
+
+	// PostgreSQL: a logical dump, restored over changed data.
+	pg := jsonID(p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{"server_id": sid, "name": "pg",
+		"source": "database", "engine": "postgres"})["app"].(map[string]any)["id"])
+	cleanup(pg)
+	deploy(pg)
+	pgContainer := func() string {
+		return docker("ps", "-q", "--filter", "label=basalt.app="+pg)
+	}
+	psql := func(sql string) string {
+		return docker("exec", pgContainer(), "psql", "-U", "pg", "-d", "pg", "-tAc", sql)
+	}
+	psql("CREATE TABLE t (v text); INSERT INTO t VALUES ('kept')")
+	p.call(200, "PUT", "/api/v1/apps/"+pg+"/backup-policy", policy)
+	if items := p.call(200, "GET", "/api/v1/apps/"+pg+"/backups", nil)["items"].([]any); len(items) != 1 ||
+		items[0].(map[string]any)["kind"] != "db_dump" {
+		t.Fatalf("items = %v", items)
+	}
+	appBackupRound(t, p, pg, func() {
+		psql("UPDATE t SET v = 'damaged'; CREATE TABLE extra (x int)")
+	})
+	if v := psql("SELECT v FROM t"); v != "kept" {
+		t.Fatalf("table after restore: %q", v)
+	}
+	if v := psql("SELECT count(*) FROM pg_tables WHERE tablename = 'extra'"); v != "1" {
+		// --clean drops and recreates what the dump holds; other tables stay.
+		t.Fatalf("unrelated table: %q", v)
+	}
+	snaps := p.call(200, "GET", "/api/v1/apps/"+pg+"/snapshots", nil)["snapshots"].([]any)
+	if len(snaps) != 1 || snaps[0].(map[string]any)["item"].(map[string]any)["kind"] != "db_dump" {
+		t.Fatalf("snapshots = %v", snaps)
+	}
+}
