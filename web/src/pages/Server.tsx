@@ -269,6 +269,8 @@ function RoutesCard({ serverId, user }: { serverId: number; user: User }) {
                   <td className="muted">
                     {r.site_id ? (
                       <Link to={`/sites/${r.site_id}`}>site #{r.site_id}</Link>
+                    ) : r.app_id ? (
+                      <Link to={`/apps/${r.app_id}`}>app #{r.app_id}</Link>
                     ) : r.kind === "reverse_proxy" ? (
                       <span className="mono">→ {r.upstream}</span>
                     ) : (
@@ -279,7 +281,7 @@ function RoutesCard({ serverId, user }: { serverId: number; user: User }) {
                     <span className="badge plain">{r.tls === "auto" ? "Let's Encrypt" : "internal CA"}</span>
                   </td>
                   <td className="num">
-                    {can(user, "admin") && !r.site_id && (
+                    {can(user, "admin") && !r.site_id && !r.app_id && (
                       <button className="btn sm icon ghost" onClick={() => remove(r)} title="Remove">
                         <Icon name="trash" size={14} />
                       </button>

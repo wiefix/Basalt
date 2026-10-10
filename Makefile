@@ -19,9 +19,9 @@ build-linux:
 test:
 	CGO_ENABLED=1 go test -race ./...
 
-# Against the local Docker daemon (pulls a small image).
+# Against the local Docker daemon (pulls small images).
 test-docker:
-	BASALT_DOCKER_TESTS=1 go test -count=1 -run Live -v ./internal/docker
+	BASALT_DOCKER_TESTS=1 go test -count=1 -run 'Live|WithDocker' ./internal/docker ./internal/e2e
 
 # Real system users, PHP-FPM and MariaDB in a Debian container (needs Docker).
 test-linux:

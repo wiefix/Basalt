@@ -124,6 +124,11 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if n, err := db.FailUnfinishedDeployments(ctx); err != nil {
+		return err
+	} else if n > 0 {
+		log.Warn("deployments interrupted by the restart were marked as failed", "count", n)
+	}
 
 	var setupToken string
 	setupFile := filepath.Join(cfg.DataDir, "setup-token")

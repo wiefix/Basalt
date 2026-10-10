@@ -144,8 +144,8 @@ func (m *proxyManager) withPanel(d proxy.Desired) proxy.Desired {
 }
 
 // resolve fills in what only the agent knows: the served directory of site
-// routes and the current container of app routes. Values sent by the panel
-// for these are ignored: only the agent decides where a site or app lives.
+// routes. Values sent by the panel for these are ignored: only the agent
+// decides where a site lives. App routes never carry an upstream.
 func (m *proxyManager) resolve(d *proxy.Desired) {
 	for i := range d.Routes {
 		r := &d.Routes[i]
@@ -157,7 +157,7 @@ func (m *proxyManager) resolve(d *proxy.Desired) {
 				r.PHPSocket = m.sites.php.Socket(r.SiteID)
 			}
 		case r.Kind == proxy.KindReverseProxy && r.AppID > 0:
-			r.Upstream = m.apps.Upstream(r.AppID)
+			r.Upstream = "" // looked up by the proxy, see pushAppUpstreams
 		}
 	}
 }
@@ -201,6 +201,8 @@ func (m *proxyManager) reconcile(ctx context.Context) {
 		m.report(err)
 		return
 	}
+	// Re-sent on every pass so a restarted proxy catches up; cheap.
+	m.pushAppUpstreams(ctx)
 	running, err := m.admin.Running(ctx, id)
 	if err != nil {
 		m.report(err)
@@ -214,6 +216,18 @@ func (m *proxyManager) reconcile(ctx context.Context) {
 		return
 	}
 	m.log.Info("proxy configuration restored", "config_id", id)
+}
+
+// pushAppUpstreams sends the current container of every app to the proxy.
+// This never reloads the proxy configuration, so deployments switch
+// traffic without dropping connections.
+func (m *proxyManager) pushAppUpstreams(ctx context.Context) {
+	if m.apps == nil || m.apps.dc == nil {
+		return
+	}
+	if err := m.admin.SetAppUpstreams(ctx, m.apps.Upstreams()); err != nil {
+		m.report(err)
+	}
 }
 
 // report logs an error once until it changes, so a stopped proxy does not

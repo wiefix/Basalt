@@ -132,6 +132,19 @@ const paths: Record<string, ReactNode> = {
     </>
   ),
   up: <path d="M12 19V5M5 12l7-7 7 7" />,
+  box: (
+    <>
+      <path d="M21 8l-9-5-9 5v8l9 5 9-5z" />
+      <path d="M3 8l9 5 9-5M12 13v8" />
+    </>
+  ),
+  rocket: (
+    <>
+      <path d="M5 15c-1.5 1.5-2 4-2 6 2 0 4.5-.5 6-2" />
+      <path d="M9 15l-3-3c1-4 4-8 9-9 2-.3 4 0 6 0 0 2 .3 4 0 6-1 5-5 8-9 9z" />
+      <circle cx="15" cy="9" r="1.5" />
+    </>
+  ),
 };
 
 export function Icon({ name, size = 16, className }: { name: keyof typeof paths | string; size?: number; className?: string }) {

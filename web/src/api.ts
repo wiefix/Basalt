@@ -69,6 +69,7 @@ export interface Route {
   root?: string;
   upstream?: string;
   site_id?: number;
+  app_id?: number;
   tls: "auto" | "internal";
   hsts: boolean;
   created_at: string;
@@ -126,6 +127,55 @@ export interface DatabaseCredentials {
   database: string;
   username: string;
   password: string;
+}
+
+export interface AppVolume {
+  name: string;
+  path: string;
+}
+
+export interface App {
+  id: number;
+  server_id: number;
+  name: string;
+  image: string;
+  port: number;
+  domains: string[];
+  tls: "auto" | "internal";
+  volumes: AppVolume[];
+  memory_mb: number;
+  cpus: number;
+  created_at: string;
+}
+
+export interface AppSettings {
+  image: string;
+  port: number;
+  volumes: AppVolume[];
+  memory_mb: number;
+  cpus: number;
+}
+
+export interface Deployment {
+  id: number;
+  image: string;
+  status: "running" | "succeeded" | "failed";
+  error?: string;
+  image_digest?: string;
+  created_at: string;
+  finished_at?: string;
+  log?: string;
+}
+
+export interface AppStatus {
+  state: string;
+  health?: string;
+  deployment_id?: number;
+  started_at?: string;
+  restart_count?: number;
+  exit_code?: number;
+  oom_killed?: boolean;
+  error?: string;
 }
 
 export class ApiError extends Error {
@@ -242,6 +292,24 @@ export const api = {
   resetDatabasePassword: (siteId: number, id: number) =>
     post<{ credentials: DatabaseCredentials }>(`/api/v1/sites/${siteId}/databases/${id}/password`),
   deleteDatabase: (siteId: number, id: number) => del<void>(`/api/v1/sites/${siteId}/databases/${id}`),
+
+  apps: () => get<{ apps: App[] }>("/api/v1/apps"),
+  app: (id: number) => get<{ app: App; sync: Sync }>(`/api/v1/apps/${id}`),
+  createApp: (b: AppSettings & { server_id: number; name: string; domains: string[]; tls: string }) =>
+    post<{ app: App; sync: Sync }>("/api/v1/apps", b),
+  updateApp: (id: number, b: AppSettings) => put<{ app: App }>(`/api/v1/apps/${id}`, b),
+  deleteApp: (id: number, volumes: boolean) =>
+    del<{ sync: Sync; cleanup_error?: string }>(`/api/v1/apps/${id}${volumes ? "?volumes=1" : ""}`),
+  setAppDomains: (id: number, domains: string[]) =>
+    put<{ app: App; sync: Sync }>(`/api/v1/apps/${id}/domains`, { domains }),
+  appEnv: (id: number) => get<{ env: Record<string, string> }>(`/api/v1/apps/${id}/env`),
+  setAppEnv: (id: number, env: Record<string, string>) => put<{ ok: boolean }>(`/api/v1/apps/${id}/env`, { env }),
+  deployApp: (id: number, rollbackTo?: number) =>
+    post<{ deployment: Deployment }>(`/api/v1/apps/${id}/deploy`, rollbackTo ? { rollback_to: rollbackTo } : {}),
+  deployments: (id: number) => get<{ deployments: Deployment[] }>(`/api/v1/apps/${id}/deployments`),
+  deployment: (id: number, did: number) => get<{ deployment: Deployment }>(`/api/v1/apps/${id}/deployments/${did}`),
+  appStatus: (id: number) => get<{ status: AppStatus }>(`/api/v1/apps/${id}/status`),
+  appLogs: (id: number, tail: number) => get<{ log: string }>(`/api/v1/apps/${id}/logs?tail=${tail}`),
 
   sftpUsers: (siteId: number) =>
     get<{ users: SFTPUser[]; connection: SFTPConnection | null }>(`/api/v1/sites/${siteId}/sftp-users`),

@@ -3,10 +3,12 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -61,4 +63,32 @@ func (a *Admin) Running(ctx context.Context, id string) (bool, error) {
 	defer resp.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
 	return resp.StatusCode == http.StatusOK, nil
+}
+
+// SetAppUpstreams replaces the proxy's table of app containers (app ID to
+// ip:port). It takes effect without reloading the configuration.
+func (a *Admin) SetAppUpstreams(ctx context.Context, m map[int64]string) error {
+	in := make(map[string]string, len(m))
+	for k, v := range m {
+		in[strconv.FormatInt(k, 10)] = v
+	}
+	b, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://localhost"+AppUpstreamsPath, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := a.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("proxy admin: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("proxy rejected app upstreams (%s): %s", resp.Status, strings.TrimSpace(string(msg)))
+	}
+	return nil
 }

@@ -22,6 +22,13 @@ type BuildOptions struct {
 
 const zeroSSLDirectory = "https://acme.zerossl.com/v2/DV90"
 
+// App routes take their upstream from a table the agent maintains through
+// the admin API (see caddyrun), not from the configuration.
+const (
+	AppUpstreamSource = "basalt_app"
+	AppUpstreamsPath  = "/basalt/app-upstreams"
+)
+
 // Files inside the proxy data directory.
 func AdminSocket(dir string) string { return filepath.Join(dir, "admin.sock") }
 func ConfigPath(dir string) string  { return filepath.Join(dir, "config.json") }
@@ -167,14 +174,18 @@ func routeHandlers(r Route) (handlers []any, fsEntry obj) {
 		}
 		return append(handlers, obj{"handler": "subroute", "routes": phpRoutes(r, fsName, static)}), fsEntry
 	case KindReverseProxy:
-		if r.Upstream == "" {
-			// An app with no running container.
-			return append(handlers, obj{"handler": "static_response", "status_code": 502}), nil
+		rp := obj{
+			"handler": "reverse_proxy",
+			// Retry failed connections briefly (an upstream restarting)
+			// instead of answering 502 at once.
+			"load_balancing": obj{"try_duration": "2s", "try_interval": "250ms"},
 		}
-		handlers = append(handlers, obj{
-			"handler":   "reverse_proxy",
-			"upstreams": []any{obj{"dial": r.Upstream}},
-		})
+		if r.AppID > 0 {
+			rp["dynamic_upstreams"] = obj{"source": AppUpstreamSource, "app_id": r.AppID}
+		} else {
+			rp["upstreams"] = []any{obj{"dial": r.Upstream}}
+		}
+		handlers = append(handlers, rp)
 	}
 	return handlers, fsEntry
 }

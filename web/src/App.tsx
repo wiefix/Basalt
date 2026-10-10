@@ -8,6 +8,8 @@ import { ServersPage } from "./pages/Servers";
 import { ServerPage } from "./pages/Server";
 import { SitesPage } from "./pages/Sites";
 import { SitePage } from "./pages/Site";
+import { AppsPage } from "./pages/Apps";
+import { AppPage } from "./pages/App";
 import { UsersPage } from "./pages/Users";
 import { AccountPage } from "./pages/Account";
 
@@ -69,6 +71,9 @@ function Shell({ user }: { user: User }) {
         <NavLink className="nav-link" to="/sites">
           <Icon name="globe" /> Sites
         </NavLink>
+        <NavLink className="nav-link" to="/apps">
+          <Icon name="box" /> Apps
+        </NavLink>
         {can(user, "admin") && (
           <NavLink className="nav-link" to="/users">
             <Icon name="users" /> Users
@@ -96,6 +101,8 @@ function Shell({ user }: { user: User }) {
           <Route path="/servers/:id" element={<ServerPage user={user} />} />
           <Route path="/sites" element={<SitesPage user={user} />} />
           <Route path="/sites/:id/*" element={<SitePage user={user} />} />
+          <Route path="/apps" element={<AppsPage user={user} />} />
+          <Route path="/apps/:id/*" element={<AppPage user={user} />} />
           <Route path="/users" element={<UsersPage user={user} />} />
           <Route path="/account" element={<AccountPage user={user} />} />
           <Route path="*" element={<div className="empty"><h3>Page not found</h3></div>} />

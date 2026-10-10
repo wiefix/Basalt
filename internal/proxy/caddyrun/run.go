@@ -28,6 +28,9 @@ func Run(ctx context.Context, dir string, log *slog.Logger) error {
 		return fmt.Errorf("remove stale admin socket: %w", err)
 	}
 
+	if err := loadTable(dir); err != nil {
+		log.Warn("saved app upstreams ignored", "err", err)
+	}
 	cfg, err := os.ReadFile(proxy.ConfigPath(dir))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -52,7 +55,7 @@ func Run(ctx context.Context, dir string, log *slog.Logger) error {
 	log.Info("stopping proxy")
 	// caddy.Stop leaves the admin endpoint running; replacing the config with
 	// one that disables it shuts down the sites and the admin socket together.
-	if err := caddy.Load([]byte(`{"admin":{"disabled":true}}`), true); err != nil {
+	if err := caddy.Load([]byte(`{"admin":{"disabled":true,"config":{"persist":false}}}`), true); err != nil {
 		log.Warn("shutdown", "err", err)
 	}
 	return caddy.Stop()

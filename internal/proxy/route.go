@@ -48,9 +48,10 @@ type Route struct {
 	PHP       bool   `json:"php,omitempty"`
 	PHPSocket string `json:"php_socket,omitempty"`
 	Upstream  string `json:"upstream,omitempty"` // reverse_proxy, host:port
-	// AppID marks a reverse_proxy route serving a managed app. The agent
-	// resolves Upstream to the app's current container; a value from the
-	// panel is ignored, and an app without a running container gets 502.
+	// AppID marks a reverse_proxy route serving a managed app. Its
+	// upstream is the app's current container, looked up by the proxy in a
+	// table the agent keeps up to date (no config reload on deploy), so
+	// Upstream stays empty. Without a running container the app gets 503.
 	AppID int64   `json:"app_id,omitempty"`
 	TLS   TLSMode `json:"tls"`
 	HSTS  bool    `json:"hsts,omitempty"`
@@ -193,8 +194,11 @@ func (r *Route) Validate(sitesRoot string) error {
 		if r.AppID < 0 {
 			return errors.New("invalid app id")
 		}
-		if r.AppID > 0 && r.Upstream == "" {
-			return nil // resolved by the agent
+		if r.AppID > 0 {
+			if r.Upstream != "" {
+				return errors.New("an app route has no fixed upstream")
+			}
+			return nil
 		}
 		return ValidateUpstream(r.Upstream)
 	default:

@@ -58,9 +58,9 @@ func (db *DB) DeleteRoute(ctx context.Context, serverID, routeID int64) error {
 		return err
 	}
 	defer tx.Rollback()
-	// Site routes are removed together with their site.
+	// Site and app routes are removed together with their site or app.
 	res, err := tx.ExecContext(ctx,
-		`DELETE FROM proxy_routes WHERE id = ? AND server_id = ? AND site_id IS NULL`, routeID, serverID)
+		`DELETE FROM proxy_routes WHERE id = ? AND server_id = ? AND site_id IS NULL AND app_id IS NULL`, routeID, serverID)
 	if err != nil {
 		return err
 	}
@@ -81,7 +81,7 @@ func bumpProxyRevision(ctx context.Context, tx *sql.Tx, serverID int64) error {
 // Routes returns a server's routes, ordered by ID, with sorted domains.
 func (db *DB) Routes(ctx context.Context, serverID int64) ([]*ProxyRoute, error) {
 	rows, err := db.R.QueryContext(ctx,
-		`SELECT r.id, r.kind, r.root, r.upstream, r.tls, r.hsts, r.created_at, COALESCE(r.site_id, 0),
+		`SELECT r.id, r.kind, r.root, r.upstream, r.tls, r.hsts, r.created_at, COALESCE(r.site_id, 0), COALESCE(r.app_id, 0),
 		        COALESCE(s.php_version, '') != '', d.domain
 		 FROM proxy_routes r JOIN proxy_route_domains d ON d.route_id = r.id
 		 LEFT JOIN sites s ON s.id = r.site_id
@@ -95,7 +95,7 @@ func (db *DB) Routes(ctx context.Context, serverID int64) ([]*ProxyRoute, error)
 		var r ProxyRoute
 		var created int64
 		var domain string
-		if err := rows.Scan(&r.ID, &r.Kind, &r.Root, &r.Upstream, &r.TLS, &r.HSTS, &created, &r.SiteID, &r.PHP, &domain); err != nil {
+		if err := rows.Scan(&r.ID, &r.Kind, &r.Root, &r.Upstream, &r.TLS, &r.HSTS, &created, &r.SiteID, &r.AppID, &r.PHP, &domain); err != nil {
 			return nil, err
 		}
 		if n := len(out); n > 0 && out[n-1].ID == r.ID {

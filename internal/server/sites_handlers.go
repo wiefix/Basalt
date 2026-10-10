@@ -58,7 +58,8 @@ func normalizeDomains(domains []string, tls proxy.TLSMode) ([]string, proxy.TLSM
 }
 
 // SyncSites makes sure every site of the server exists on its agent, then
-// pushes the proxy state. Called when an agent connects.
+// pushes the proxy state, SFTP accounts and the list of apps. Called when
+// an agent connects.
 func (s *Server) SyncSites(ctx context.Context, serverID int64) {
 	sites, err := s.db.SitesOnServer(ctx, serverID)
 	if err != nil {
@@ -73,6 +74,9 @@ func (s *Server) SyncSites(ctx context.Context, serverID int64) {
 	s.PushProxy(ctx, serverID)
 	if err := s.PushSFTP(ctx, serverID); err != nil {
 		s.log.Warn("push sftp accounts", "server_id", serverID, "err", err)
+	}
+	if err := s.SyncApps(ctx, serverID); err != nil {
+		s.log.Warn("sync apps", "server_id", serverID, "err", err)
 	}
 }
 

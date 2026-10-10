@@ -98,3 +98,24 @@ func TestBuildTLSPolicies(t *testing.T) {
 		t.Fatal("different config, same id")
 	}
 }
+
+func TestAppRoute(t *testing.T) {
+	bad := Desired{Routes: []Route{{ID: 1, Kind: KindReverseProxy, AppID: 3, Domains: []string{"a.com"}, Upstream: "10.0.0.1:80"}}}
+	if err := bad.Validate(""); err == nil {
+		t.Fatal("app route with a fixed upstream accepted")
+	}
+	if err := (&Route{Kind: KindStatic, AppID: 3, Domains: []string{"a.com"}, Root: "/srv/x"}).Validate(""); err == nil {
+		t.Fatal("static app route accepted")
+	}
+	d := Desired{Routes: []Route{{ID: 1, Kind: KindReverseProxy, AppID: 3, Domains: []string{"a.com"}}}}
+	if err := d.Validate(""); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Build(d, BuildOptions{Dir: "/x", HTTPPort: 80, HTTPSPort: 443})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(cfg), `"dynamic_upstreams":{"app_id":3,"source":"basalt_app"}`) || strings.Contains(string(cfg), `"upstreams":`) {
+		t.Fatalf("app route config: %s", cfg)
+	}
+}

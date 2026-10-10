@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"maps"
 	"net"
+	"net/http"
 	"runtime"
 	"slices"
 	"strconv"
@@ -32,10 +33,13 @@ const (
 const (
 	appReadyTimeout = 2 * time.Minute
 	appStopTimeout  = 10 * time.Second
-	appRefreshGap   = 10 * time.Second
-	maxDeployLog    = 64 << 10
-	maxAppLogs      = 1 << 20
-	maxLogTail      = 5000
+	// appDrainDelay lets requests the proxy sent to the previous container
+	// just before the switch finish before that container is stopped.
+	appDrainDelay = 2 * time.Second
+	appRefreshGap = 10 * time.Second
+	maxDeployLog  = 64 << 10
+	maxAppLogs    = 1 << 20
+	maxLogTail    = 5000
 )
 
 // Capabilities dropped from Docker's default set: none are needed by web
@@ -54,7 +58,8 @@ type appsManager struct {
 	// IPs, for development hosts (Docker Desktop) whose container networks
 	// are not routable from the host.
 	publish bool
-	// onChange is called when the upstream of any app changes.
+	// onChange is called when the upstream of any app changes; it must
+	// deliver Upstreams to the proxy.
 	onChange func()
 
 	lmu   sync.Mutex
@@ -104,11 +109,11 @@ func (m *appsManager) lock(appID int64) func() {
 	return l.Unlock
 }
 
-// Upstream is the dial address of the app's current container ("" if none).
-func (m *appsManager) Upstream(appID int64) string {
+// Upstreams returns the dial address of every app's current container.
+func (m *appsManager) Upstreams() map[int64]string {
 	m.umu.Lock()
 	defer m.umu.Unlock()
-	return m.upstreams[appID]
+	return maps.Clone(m.upstreams)
 }
 
 // deployLog collects the messages shown to the user, bounded in size.
@@ -178,6 +183,10 @@ func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec) agent
 	// upstream; the proxy switches before the old one stops.
 	m.refresh(ctx)
 	lg.printf("Traffic switched to the new container")
+	select {
+	case <-ctx.Done():
+	case <-time.After(appDrainDelay):
+	}
 	m.removeOlder(ctx, dc, spec.AppID, spec.DeploymentID, &lg)
 	lg.printf("Deployment succeeded")
 	return agentproto.AppDeployResponse{OK: true, Log: lg.String(), ContainerID: id, ImageDigest: digest}
@@ -279,8 +288,10 @@ func (m *appsManager) containerConfig(spec agentproto.AppSpec) docker.ContainerC
 }
 
 // waitReady waits until the container is healthy (when the image defines a
-// health check), accepts TCP connections on its port, or, without a port,
-// keeps running for a few seconds.
+// health check), answers HTTP on its port (any status: the app is up), or,
+// without a port, keeps running for a few seconds. An HTTP answer rather
+// than an open TCP port: port forwarders accept connections before the app
+// listens.
 func (m *appsManager) waitReady(ctx context.Context, dc *docker.Client, spec agentproto.AppSpec, id string, lg *deployLog) error {
 	ctx, cancel := context.WithTimeout(ctx, appReadyTimeout)
 	defer cancel()
@@ -309,15 +320,12 @@ func (m *appsManager) waitReady(ctx context.Context, dc *docker.Client, spec age
 			}
 		case spec.Port > 0:
 			if !logged {
-				lg.printf("Waiting for port %d to accept connections", spec.Port)
+				lg.printf("Waiting for HTTP on port %d", spec.Port)
 				logged = true
 			}
-			if addr := m.upstreamOf(info, spec.AppID, spec.Port); addr != "" {
-				if c, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", addr); err == nil {
-					c.Close()
-					lg.printf("Port %d is ready", spec.Port)
-					return nil
-				}
+			if addr := m.upstreamOf(info, spec.AppID, spec.Port); addr != "" && answersHTTP(ctx, addr) {
+				lg.printf("Port %d is serving", spec.Port)
+				return nil
 			}
 		case time.Since(start) > 3*time.Second:
 			lg.printf("Container is running")
@@ -329,6 +337,28 @@ func (m *appsManager) waitReady(ctx context.Context, dc *docker.Client, spec age
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
+}
+
+// answersHTTP reports whether something answers an HTTP request at addr.
+func answersHTTP(ctx context.Context, addr string) bool {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("User-Agent", "basalt-readiness")
+	resp, err := readinessClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
+}
+
+var readinessClient = &http.Client{
+	Transport:     &http.Transport{DisableKeepAlives: true, Proxy: nil},
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
 // upstreamOf returns where the proxy reaches port of a container.

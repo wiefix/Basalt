@@ -137,6 +137,20 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleAdmin, s.handleCreateSFTPUser))
 	mux.Handle("DELETE /api/v1/sites/{id}/sftp-users/{uid}", s.requireRole(store.RoleAdmin, s.handleDeleteSFTPUser))
 
+	mux.Handle("GET /api/v1/apps", s.requireRole(store.RoleViewer, s.handleListApps))
+	mux.Handle("POST /api/v1/apps", s.requireRole(store.RoleAdmin, s.handleCreateApp))
+	mux.Handle("GET /api/v1/apps/{id}", s.requireRole(store.RoleViewer, s.handleGetApp))
+	mux.Handle("PUT /api/v1/apps/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateApp))
+	mux.Handle("DELETE /api/v1/apps/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteApp))
+	mux.Handle("PUT /api/v1/apps/{id}/domains", s.requireRole(store.RoleAdmin, s.handleSetAppDomains))
+	mux.Handle("GET /api/v1/apps/{id}/env", s.requireRole(store.RoleAdmin, s.handleGetAppEnv))
+	mux.Handle("PUT /api/v1/apps/{id}/env", s.requireRole(store.RoleAdmin, s.handleSetAppEnv))
+	mux.Handle("POST /api/v1/apps/{id}/deploy", s.requireRole(store.RoleMember, s.handleDeployApp))
+	mux.Handle("GET /api/v1/apps/{id}/deployments", s.requireRole(store.RoleViewer, s.handleListDeployments))
+	mux.Handle("GET /api/v1/apps/{id}/deployments/{did}", s.requireRole(store.RoleViewer, s.handleGetDeployment))
+	mux.Handle("GET /api/v1/apps/{id}/status", s.requireRole(store.RoleViewer, s.handleAppStatus))
+	mux.Handle("GET /api/v1/apps/{id}/logs", s.requireRole(store.RoleMember, s.handleAppLogs))
+
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")
 	})

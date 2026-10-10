@@ -32,7 +32,11 @@ type host struct {
 	get       func(host, path string) (int, string)
 }
 
-func startHost(t *testing.T, p *panel) *host {
+func startHost(t *testing.T, p *panel) *host { return startHostWith(t, p, "") }
+
+// startHostWith runs a host whose agent uses the Docker daemon at
+// dockerSocket ("" disables apps).
+func startHostWith(t *testing.T, p *panel, dockerSocket string) *host {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -53,7 +57,7 @@ func startHost(t *testing.T, p *panel) *host {
 	httpsPort := freePort(t)
 	a, err := agent.New(agent.Config{
 		DataDir: agentDir, ProxyDir: proxyDir, SitesRoot: sitesRoot,
-		HTTPPort: freePort(t), HTTPSPort: httpsPort, SFTPListen: "127.0.0.1:0",
+		HTTPPort: freePort(t), HTTPSPort: httpsPort, SFTPListen: "127.0.0.1:0", DockerSocket: dockerSocket,
 	}, quiet)
 	if err != nil {
 		t.Fatal(err)

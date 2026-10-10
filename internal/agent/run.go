@@ -104,7 +104,11 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	}
 	apps := newAppsManager(cfg, log.With("subsystem", "apps"))
 	proxy := newProxyManager(cfg, sites, apps, log.With("subsystem", "proxy"))
-	apps.onChange = func() { proxy.reconcile(context.Background()) }
+	apps.onChange = func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		proxy.pushAppUpstreams(ctx)
+	}
 	return &Agent{
 		dir: cfg.DataDir, log: log, id: id,
 		sites:           sites,
