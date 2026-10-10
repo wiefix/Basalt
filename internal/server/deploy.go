@@ -64,7 +64,24 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		AppID: app.ID, Port: app.Port, Env: env, Volumes: app.Volumes, MemoryMB: app.MemoryMB, CPUs: app.CPUs,
 		PruneImages: imagesToPrune(previous, s.imagesKept),
 	}
-	if app.Source == store.SourceGit {
+	var composeContent []byte // compose apps: the file this deployment runs
+	var warnings []string
+	switch app.Source {
+	case store.SourceCompose:
+		var pinned map[string]string
+		if prev != nil {
+			if composeContent, err = s.box.Open(prev.ComposeSealed, deploymentComposeAD(prev.ID)); err != nil {
+				return nil, &deployError{status: http.StatusUnprocessableEntity, msg: "this deployment has no recorded compose file", cause: err}
+			}
+			pinned = prev.Digests
+		} else if composeContent, err = s.appCompose(app); err != nil {
+			return nil, fmt.Errorf("decrypt compose file: %w", err)
+		}
+		spec = agentproto.AppSpec{AppID: app.ID}
+		if warnings, err = s.composeSpec(ctx, app, composeContent, pinned, &spec); err != nil {
+			return nil, err
+		}
+	case store.SourceGit:
 		if spec.Git, err = s.gitSource(ctx, app); err != nil {
 			return nil, err
 		}
@@ -76,7 +93,7 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		if prev != nil {
 			spec.Git.Commit, spec.Git.ReuseImage = prev.CommitSHA, prev.Image
 		}
-	} else {
+	default:
 		spec.Image = app.Image
 		if prev != nil {
 			spec.Image = prev.Image
@@ -109,8 +126,21 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		keepMessage = prev.CommitMessage
 	}
 	live := s.live.start(dep.ID)
-	go s.runDeployment(app.ServerID, dep.ID, spec, live, keepMessage)
+	notes := ""
+	for _, w := range warnings {
+		notes += "Warning: " + w + "\n"
+	}
+	live.append(notes)
+	go s.runDeployment(app.ServerID, dep.ID, spec, live, deploymentExtras{
+		commitMessage: keepMessage, compose: composeContent, notes: notes})
 	return dep, nil
+}
+
+// deploymentExtras is what the panel adds to an agent's report.
+type deploymentExtras struct {
+	commitMessage string // of the commit a rollback rebuilds
+	compose       []byte // the compose file deployed, kept for rollbacks
+	notes         string // shown before the agent's log
 }
 
 // gitSource prepares what the agent needs to build a git app: the
@@ -140,7 +170,7 @@ func (s *Server) gitSource(ctx context.Context, app *store.App) (*agentproto.Git
 	return g, nil
 }
 
-func (s *Server) runDeployment(serverID, depID int64, spec agentproto.AppSpec, live *liveLog, commitMessage string) {
+func (s *Server) runDeployment(serverID, depID int64, spec agentproto.AppSpec, live *liveLog, x deploymentExtras) {
 	ctx, cancel := context.WithTimeout(context.Background(), deployTimeout)
 	defer cancel()
 	var resp agentproto.AppDeployResponse
@@ -155,18 +185,23 @@ func (s *Server) runDeployment(serverID, depID int64, spec agentproto.AppSpec, l
 		resp = agentproto.AppDeployResponse{Error: "server unreachable: " + err.Error()}
 	}
 	if resp.CommitMessage == "" {
-		resp.CommitMessage = commitMessage
+		resp.CommitMessage = x.commitMessage
 	}
 	if resp.Commit != "" && !agentproto.ValidCommit(resp.Commit) {
 		resp.Commit = ""
 	}
+	result := store.DeploymentResult{
+		OK: resp.OK, Error: resp.Error, Log: x.notes + resp.Log, ImageDigest: resp.ImageDigest,
+		CommitSHA: resp.Commit, CommitMessage: truncate(resp.CommitMessage, 400),
+	}
+	if x.compose != nil {
+		result.ComposeSealed = s.box.Seal(x.compose, deploymentComposeAD(depID))
+		result.Digests = cleanDigests(resp.Digests)
+	}
 	// Under pendMu: a push that arrives meanwhile either sees this
 	// deployment finished or is queued and started below.
 	s.pendMu.Lock()
-	if err := s.db.FinishDeployment(context.Background(), depID, store.DeploymentResult{
-		OK: resp.OK, Error: resp.Error, Log: resp.Log, ImageDigest: resp.ImageDigest,
-		CommitSHA: resp.Commit, CommitMessage: truncate(resp.CommitMessage, 400),
-	}); err != nil {
+	if err := s.db.FinishDeployment(context.Background(), depID, result); err != nil {
 		s.log.Error("record deployment", "err", err, "deployment_id", depID)
 	}
 	queued, hasQueued := s.pending[spec.AppID]

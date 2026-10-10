@@ -21,6 +21,7 @@ import (
 	"github.com/wiefix/basalt/internal/agenthub"
 	"github.com/wiefix/basalt/internal/auth"
 	"github.com/wiefix/basalt/internal/buildinfo"
+	"github.com/wiefix/basalt/internal/compose"
 	"github.com/wiefix/basalt/internal/config"
 	"github.com/wiefix/basalt/internal/logging"
 	"github.com/wiefix/basalt/internal/proxy/caddyrun"
@@ -98,6 +99,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	baseLog := log
 	log = log.With("component", "server")
+	compose.SilenceLibraryLogs()
 
 	db, err := store.Open(ctx, filepath.Join(cfg.DataDir, "basalt.db"))
 	if err != nil {

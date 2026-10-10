@@ -28,6 +28,10 @@ const (
 	labelDeployment = "basalt.deployment"
 	labelPort       = "basalt.port"
 	labelVolume     = "basalt.volume"
+	// Compose apps: the service a container runs and a hash of its
+	// settings, which tells whether a deployment must replace it.
+	labelService = "basalt.service"
+	labelConfig  = "basalt.config"
 )
 
 const (
@@ -169,6 +173,15 @@ func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec, strea
 		return fail(err)
 	}
 	defer m.lock(spec.AppID)()
+
+	if len(spec.Services) > 0 {
+		digests, err := m.deployCompose(ctx, dc, spec, &lg)
+		if err != nil {
+			return fail(err)
+		}
+		lg.printf("Deployment succeeded")
+		return agentproto.AppDeployResponse{OK: true, Log: lg.String(), Digests: digests}
+	}
 
 	var digest, imageID, commit, subject string
 	if spec.Git != nil {
@@ -381,10 +394,23 @@ func (m *appsManager) containerConfig(spec agentproto.AppSpec) docker.ContainerC
 // than an open TCP port: port forwarders accept connections before the app
 // listens.
 func (m *appsManager) waitReady(ctx context.Context, dc *docker.Client, spec agentproto.AppSpec, id string, lg *deployLog) error {
+	return m.waitContainer(ctx, dc, spec.AppID, spec.Port, id, "", lg)
+}
+
+// waitContainer is waitReady for any container of an app; prefix (e.g.
+// "Service db: ") starts its log lines.
+func (m *appsManager) waitContainer(ctx context.Context, dc *docker.Client, appID int64, port int, id, prefix string, lg *deployLog) error {
 	ctx, cancel := context.WithTimeout(ctx, appReadyTimeout)
 	defer cancel()
 	start := time.Now()
 	logged := false
+	say := func(format string, a ...any) {
+		msg := fmt.Sprintf(format, a...)
+		if prefix != "" {
+			msg = prefix + strings.ToLower(msg[:1]) + msg[1:]
+		}
+		lg.printf("%s", msg)
+	}
 	for {
 		info, err := dc.ContainerInspect(ctx, id)
 		if err != nil {
@@ -392,36 +418,38 @@ func (m *appsManager) waitReady(ctx context.Context, dc *docker.Client, spec age
 		}
 		st := info.State
 		switch {
-		case st.Restarting || info.RestartCount > 0 || st.Status == "exited" || st.Status == "dead":
-			return fmt.Errorf("the container stopped (exit code %d)", st.ExitCode)
+		case st.Restarting || info.RestartCount > 0:
+			return fmt.Errorf("%sthe container keeps stopping and restarting", prefix)
+		case st.Status == "exited" || st.Status == "dead":
+			return fmt.Errorf("%sthe container stopped (exit code %d)", prefix, st.ExitCode)
 		case st.Health != nil:
 			if !logged {
-				lg.printf("Waiting for the image's health check")
+				say("Waiting for the health check")
 				logged = true
 			}
 			if st.Health.Status == "healthy" {
-				lg.printf("Container is healthy")
+				say("Container is healthy")
 				return nil
 			}
 			if st.Health.Status == "unhealthy" {
-				return errors.New("the container's health check failed")
+				return fmt.Errorf("%sthe container's health check failed", prefix)
 			}
-		case spec.Port > 0:
+		case port > 0:
 			if !logged {
-				lg.printf("Waiting for HTTP on port %d", spec.Port)
+				say("Waiting for HTTP on port %d", port)
 				logged = true
 			}
-			if addr := m.upstreamOf(info, spec.AppID, spec.Port); addr != "" && answersHTTP(ctx, addr) {
-				lg.printf("Port %d is serving", spec.Port)
+			if addr := m.upstreamOf(info, appID, port); addr != "" && answersHTTP(ctx, addr) {
+				say("Port %d is serving", port)
 				return nil
 			}
 		case time.Since(start) > 3*time.Second:
-			lg.printf("Container is running")
+			say("Container is running")
 			return nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("the container did not become ready within %s", appReadyTimeout)
+			return fmt.Errorf("%sthe container did not become ready within %s", prefix, appReadyTimeout)
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
@@ -581,12 +609,18 @@ func (m *appsManager) run(ctx context.Context) {
 	}
 }
 
-// current is the container serving the app: the newest running one, or
-// the newest of any state.
-func (m *appsManager) current(ctx context.Context, dc *docker.Client, appID int64) (*docker.ContainerSummary, error) {
+// current is the container serving the app (or one service of a compose
+// app): the newest running one, or the newest of any state.
+func (m *appsManager) current(ctx context.Context, dc *docker.Client, appID int64, service string) (*docker.ContainerSummary, error) {
 	list, err := m.containers(ctx, dc, appID)
-	if err != nil || len(list) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if service != "" {
+		list = slices.DeleteFunc(list, func(c docker.ContainerSummary) bool { return c.Labels[labelService] != service })
+	}
+	if len(list) == 0 {
+		return nil, nil
 	}
 	for i := range list {
 		if list[i].State == "running" {
@@ -596,12 +630,19 @@ func (m *appsManager) current(ctx context.Context, dc *docker.Client, appID int6
 	return &list[0], nil
 }
 
-func (m *appsManager) Status(ctx context.Context, appID int64) (agentproto.AppStatus, error) {
+func (m *appsManager) Status(ctx context.Context, appID int64, service string) (agentproto.AppStatus, error) {
 	dc, err := m.client()
 	if err != nil {
 		return agentproto.AppStatus{}, err
 	}
-	c, err := m.current(ctx, dc, appID)
+	list, err := m.containers(ctx, dc, appID)
+	if err != nil {
+		return agentproto.AppStatus{}, err
+	}
+	if slices.ContainsFunc(list, func(c docker.ContainerSummary) bool { return c.Labels[labelService] != "" }) {
+		return m.composeStatus(ctx, dc, list, service)
+	}
+	c, err := m.current(ctx, dc, appID, "")
 	if err != nil {
 		return agentproto.AppStatus{}, err
 	}
@@ -626,14 +667,14 @@ func (m *appsManager) Status(ctx context.Context, appID int64) (agentproto.AppSt
 	return st, nil
 }
 
-// Logs returns the last lines of the current container's output, stdout
-// and stderr interleaved.
-func (m *appsManager) Logs(ctx context.Context, appID int64, tail int) (string, error) {
+// Logs returns the last lines of the current container's output (of one
+// service for a compose app), stdout and stderr interleaved.
+func (m *appsManager) Logs(ctx context.Context, appID int64, service string, tail int) (string, error) {
 	dc, err := m.client()
 	if err != nil {
 		return "", err
 	}
-	c, err := m.current(ctx, dc, appID)
+	c, err := m.current(ctx, dc, appID, service)
 	if err != nil || c == nil {
 		return "", err
 	}

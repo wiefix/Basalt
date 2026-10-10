@@ -52,7 +52,10 @@ func loadMigrations() ([]migration, error) {
 	return out, nil
 }
 
-func (db *DB) migrate(ctx context.Context) error {
+func (db *DB) migrate(ctx context.Context) error { return db.migrateTo(ctx, 0) }
+
+// migrateTo applies pending migrations up to version upTo (0: all).
+func (db *DB) migrateTo(ctx context.Context, upTo int) error {
 	migrations, err := loadMigrations()
 	if err != nil {
 		return err
@@ -76,7 +79,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	}
 
 	for _, m := range migrations {
-		if m.version <= current {
+		if m.version <= current || upTo > 0 && m.version > upTo {
 			continue
 		}
 		if err := db.apply(ctx, m); err != nil {
@@ -86,14 +89,44 @@ func (db *DB) migrate(ctx context.Context) error {
 	return nil
 }
 
+// noForeignKeys marks a migration that rebuilds a table: foreign keys are
+// switched off around it (SQLite ignores the pragma inside a transaction)
+// and checked before it commits.
+const noForeignKeys = "-- basalt:foreign-keys-off"
+
 func (db *DB) apply(ctx context.Context, m migration) error {
-	tx, err := db.W.BeginTx(ctx, nil)
+	// The write pool has one connection; pin it so the pragma and the
+	// transaction share it.
+	conn, err := db.W.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	fkOff := strings.HasPrefix(m.sql, noForeignKeys)
+	if fkOff {
+		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+			return err
+		}
+		defer conn.ExecContext(context.WithoutCancel(ctx), `PRAGMA foreign_keys = ON`)
+	}
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 		return err
+	}
+	if fkOff {
+		rows, err := tx.QueryContext(ctx, `PRAGMA foreign_key_check`)
+		if err != nil {
+			return err
+		}
+		broken := rows.Next()
+		rows.Close()
+		if broken {
+			return fmt.Errorf("foreign key violations after migration")
+		}
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO schema_migrations (version, name) VALUES (?, ?)`, m.version, m.name); err != nil {

@@ -32,6 +32,10 @@ type appView struct {
 	// DeployKey is the public key to grant read access to the repository.
 	DeployKey  string `json:"deploy_key,omitempty"`
 	AutoDeploy bool   `json:"auto_deploy"`
+	// Compose apps: the published service (Port is its port) and what the
+	// compose file contains, without its secrets.
+	Service string                `json:"service,omitempty"`
+	Compose *store.ComposeSummary `json:"compose,omitempty"`
 
 	Port      int                    `json:"port"`
 	Domains   []string               `json:"domains"`
@@ -49,9 +53,19 @@ func viewApp(a *store.App) appView {
 	}
 	v := appView{ID: a.ID, ServerID: a.ServerID, Name: a.Name, Source: a.Source, Image: a.Image, Port: a.Port,
 		Domains: a.Domains, TLS: a.TLS, Volumes: vols, MemoryMB: a.MemoryMB, CPUs: a.CPUs, CreatedAt: a.CreatedAt}
-	if a.Source == store.SourceGit {
+	switch a.Source {
+	case store.SourceGit:
 		v.Git = &gitView{URL: a.Git.URL, Branch: a.Git.Branch, Dockerfile: a.Git.Dockerfile, Context: a.Git.Context}
 		v.DeployKey, v.AutoDeploy = a.DeployKeyPublic, a.AutoDeploy
+	case store.SourceCompose:
+		sum := a.Summary
+		if sum.Services == nil {
+			sum.Services = []store.ComposeService{}
+		}
+		if sum.Volumes == nil {
+			sum.Volumes = []string{}
+		}
+		v.Service, v.Compose = a.Service, &sum
 	}
 	return v
 }
@@ -64,20 +78,21 @@ type gitView struct {
 }
 
 type deploymentView struct {
-	ID            int64      `json:"id"`
-	Image         string     `json:"image"`
-	Commit        string     `json:"commit,omitempty"`
-	CommitMessage string     `json:"commit_message,omitempty"`
-	Status        string     `json:"status"`
-	Error         string     `json:"error,omitempty"`
-	ImageDigest   string     `json:"image_digest,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	FinishedAt    *time.Time `json:"finished_at,omitempty"`
-	Log           *string    `json:"log,omitempty"`
+	ID            int64             `json:"id"`
+	Image         string            `json:"image"`
+	Digests       map[string]string `json:"digests,omitempty"` // compose: image per service
+	Commit        string            `json:"commit,omitempty"`
+	CommitMessage string            `json:"commit_message,omitempty"`
+	Status        string            `json:"status"`
+	Error         string            `json:"error,omitempty"`
+	ImageDigest   string            `json:"image_digest,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+	FinishedAt    *time.Time        `json:"finished_at,omitempty"`
+	Log           *string           `json:"log,omitempty"`
 }
 
 func viewDeployment(d *store.Deployment, withLog bool) deploymentView {
-	v := deploymentView{ID: d.ID, Image: d.Image, Commit: d.CommitSHA, CommitMessage: d.CommitMessage,
+	v := deploymentView{ID: d.ID, Image: d.Image, Digests: d.Digests, Commit: d.CommitSHA, CommitMessage: d.CommitMessage,
 		Status: d.Status, Error: d.Error, ImageDigest: d.ImageDigest,
 		CreatedAt: d.CreatedAt, FinishedAt: d.FinishedAt}
 	if withLog {
@@ -156,8 +171,12 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 			return st, err
 		}
 		st.Git = store.GitSettings{URL: g.URL, Branch: g.Branch, Dockerfile: g.Dockerfile, Context: g.Context}
+	case store.SourceCompose:
+		// Everything else comes from the compose file.
+		st.Volumes, st.MemoryMB, st.CPUs = nil, 0, 0
+		return st, nil
 	default:
-		return st, errors.New(`source must be "image" or "git"`)
+		return st, errors.New(`source must be "image", "git" or "compose"`)
 	}
 	switch {
 	case st.Port < 0 || st.Port > 65535:
@@ -172,6 +191,10 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 
 type createAppRequest struct {
 	appSettingsRequest
+	// Compose apps: the compose file and the service to publish (by
+	// default the first one that mentions a port).
+	Compose  string        `json:"compose"`
+	Service  string        `json:"service"`
 	Source   string        `json:"source"`
 	ServerID int64         `json:"server_id"`
 	Name     string        `json:"name"`
@@ -218,6 +241,15 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	var cf *composeFile
+	if req.Source == store.SourceCompose {
+		// No environment yet: unset variables are only warnings.
+		if cf, err = s.parseCompose(r.Context(), []byte(req.Compose), nil, req.Service, req.Port); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		st.Port = cf.port
+	}
 	domains, tls, err := normalizeAppDomains(req.Domains, req.TLS, st.Port)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
@@ -260,9 +292,19 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 			return
 		}
 	}
-	s.audit(r, &p.user.ID, "app.created", map[string]any{"app_id": app.ID, "name": app.Name, "image": app.Image, "git": app.Git.URL})
+	var warnings []string
+	if cf != nil {
+		if err := s.saveCompose(r.Context(), app, cf); err != nil {
+			s.internalError(w, r, "store compose file", err)
+			return
+		}
+		warnings = cf.project.Warnings
+	}
+	s.audit(r, &p.user.ID, "app.created", map[string]any{"app_id": app.ID, "name": app.Name, "image": app.Image,
+		"git": app.Git.URL, "source": app.Source})
 	s.PushProxy(r.Context(), app.ServerID)
-	writeJSON(w, http.StatusCreated, map[string]any{"app": viewApp(app), "sync": s.proxySync(r.Context(), app.ServerID)})
+	writeJSON(w, http.StatusCreated, map[string]any{"app": viewApp(app), "sync": s.proxySync(r.Context(), app.ServerID),
+		"warnings": nonNil(warnings)})
 }
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -293,6 +335,10 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *prin
 	}
 	var req appSettingsRequest
 	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if app.Source == store.SourceCompose {
+		writeError(w, http.StatusUnprocessableEntity, "a compose app is configured by its compose file")
 		return
 	}
 	st, err := req.settings(app.Source)
@@ -471,10 +517,14 @@ func (s *Server) handleAppStatus(w http.ResponseWriter, r *http.Request, p *prin
 	if !ok {
 		return
 	}
+	service, ok := s.pathService(w, r, app)
+	if !ok {
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), appCallTimeout)
 	defer cancel()
 	var st agentproto.AppStatus
-	if err := s.agents.Call(ctx, app.ServerID, agentproto.TypeAppStatus, agentproto.AppRequest{AppID: app.ID}, &st); err != nil {
+	if err := s.agents.Call(ctx, app.ServerID, agentproto.TypeAppStatus, agentproto.AppRequest{AppID: app.ID, Service: service}, &st); err != nil {
 		writeAgentError(w, err)
 		return
 	}
@@ -497,10 +547,14 @@ func (s *Server) handleAppLogs(w http.ResponseWriter, r *http.Request, p *princi
 		}
 		tail = n
 	}
+	service, ok := s.logService(w, r, app)
+	if !ok {
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), appCallTimeout)
 	defer cancel()
 	var resp agentproto.AppLogsResponse
-	if err := s.agents.Call(ctx, app.ServerID, agentproto.TypeAppLogs, agentproto.AppRequest{AppID: app.ID, Tail: tail}, &resp); err != nil {
+	if err := s.agents.Call(ctx, app.ServerID, agentproto.TypeAppLogs, agentproto.AppRequest{AppID: app.ID, Tail: tail, Service: service}, &resp); err != nil {
 		writeAgentError(w, err)
 		return
 	}
@@ -523,6 +577,10 @@ func (s *Server) handleAppLogsStream(w http.ResponseWriter, r *http.Request, p *
 		}
 		tail = n
 	}
+	service, ok := s.logService(w, r, app)
+	if !ok {
+		return
+	}
 	if !s.agents.Connected(app.ServerID) {
 		writeError(w, http.StatusConflict, "the server is offline")
 		return
@@ -540,7 +598,7 @@ func (s *Server) handleAppLogsStream(w http.ResponseWriter, r *http.Request, p *
 	stop := ev.keepAlive(ctx)
 	defer stop()
 	err = s.agents.Stream(ctx, app.ServerID, agentproto.TypeAppLogsFollow,
-		agentproto.AppRequest{AppID: app.ID, Tail: tail}, nil, func(raw json.RawMessage) error {
+		agentproto.AppRequest{AppID: app.ID, Tail: tail, Service: service}, nil, func(raw json.RawMessage) error {
 			var c agentproto.LogChunk
 			if err := json.Unmarshal(raw, &c); err != nil {
 				return err
@@ -607,6 +665,42 @@ func (s *Server) handleDeploymentStream(w http.ResponseWriter, r *http.Request, 
 		sendLog(d.Log)
 	}
 	ev.send("end", viewDeployment(d, false))
+}
+
+// pathService reads the optional ?service= of a compose app.
+func (s *Server) pathService(w http.ResponseWriter, r *http.Request, app *store.App) (string, bool) {
+	service := r.URL.Query().Get("service")
+	if service == "" {
+		return "", true
+	}
+	if app.Source != store.SourceCompose || !agentproto.ServiceNameRE.MatchString(service) {
+		writeError(w, http.StatusUnprocessableEntity, "unknown service")
+		return "", false
+	}
+	return service, true
+}
+
+// logService is the service whose logs are shown: the one asked for, or by
+// default the published service (or the first one) of a compose app.
+func (s *Server) logService(w http.ResponseWriter, r *http.Request, app *store.App) (string, bool) {
+	service, ok := s.pathService(w, r, app)
+	if !ok || service != "" || app.Source != store.SourceCompose {
+		return service, ok
+	}
+	if app.Service != "" {
+		return app.Service, true
+	}
+	if len(app.Summary.Services) > 0 {
+		return app.Summary.Services[0].Name, true
+	}
+	return "", true
+}
+
+func nonNil[T any](s []T) []T {
+	if s == nil {
+		return []T{}
+	}
+	return s
 }
 
 // agentErrorText is the message shown for a failed agent call.

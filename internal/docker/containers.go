@@ -21,6 +21,10 @@ type ContainerConfig struct {
 	Env              []string            `json:"Env,omitempty"`
 	User             string              `json:"User,omitempty"`
 	WorkingDir       string              `json:"WorkingDir,omitempty"`
+	Hostname         string              `json:"Hostname,omitempty"`
+	Tty              bool                `json:"Tty,omitempty"`
+	OpenStdin        bool                `json:"OpenStdin,omitempty"`
+	StopSignal       string              `json:"StopSignal,omitempty"`
 	Labels           map[string]string   `json:"Labels,omitempty"`
 	ExposedPorts     map[string]struct{} `json:"ExposedPorts,omitempty"`
 	Healthcheck      *HealthConfig       `json:"Healthcheck,omitempty"`
@@ -35,7 +39,9 @@ type HealthConfig struct {
 	Interval    time.Duration `json:"Interval,omitempty"`
 	Timeout     time.Duration `json:"Timeout,omitempty"`
 	StartPeriod time.Duration `json:"StartPeriod,omitempty"`
-	Retries     int           `json:"Retries,omitempty"`
+	// StartInterval is the probe interval during StartPeriod.
+	StartInterval time.Duration `json:"StartInterval,omitempty"`
+	Retries       int           `json:"Retries,omitempty"`
 }
 
 type HostConfig struct {
@@ -50,6 +56,8 @@ type HostConfig struct {
 	NanoCPUs       int64             `json:"NanoCpus,omitempty"` // 1e9 = one CPU
 	PidsLimit      *int64            `json:"PidsLimit,omitempty"`
 	Tmpfs          map[string]string `json:"Tmpfs,omitempty"`
+	ShmSize        int64             `json:"ShmSize,omitempty"` // bytes
+	ExtraHosts     []string          `json:"ExtraHosts,omitempty"`
 	Mounts         []Mount           `json:"Mounts,omitempty"`
 	LogConfig      *LogConfig        `json:"LogConfig,omitempty"`
 	// PortBindings maps "port/proto" to host addresses. Basalt publishes

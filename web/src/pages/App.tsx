@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
-import { api, can, type App, type AppVolume, type Deployment, type User } from "../api";
+import { api, can, sourceLabel, type App, type AppVolume, type Deployment, type ServiceStatus, type User } from "../api";
 import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
 import { useEventStream, type StreamState } from "../components/stream";
 import { SyncBadge } from "./Server";
@@ -30,7 +30,7 @@ export function AppPage({ user }: { user: User }) {
             <SyncBadge sync={app.data.sync} />
           </div>
           <div className="sub row wrap">
-            <span className="mono">{a.source === "git" ? `${a.git?.url} · ${a.git?.branch}` : a.image}</span>
+            <span className="mono">{sourceLabel(a)}</span>
             {a.domains.map((d) => (
               <a key={d} href={`https://${d}`} target="_blank" rel="noreferrer noopener">
                 {d} ↗
@@ -54,6 +54,7 @@ export function AppPage({ user }: { user: User }) {
         {can(user, "admin") && tab(`/apps/${id}/env`, "Environment")}
         {tab(`/apps/${id}/domains`, "Domains")}
         {a.source === "git" && can(user, "admin") && tab(`/apps/${id}/source`, "Source")}
+        {a.source === "compose" && can(user, "admin") && tab(`/apps/${id}/compose`, "Compose")}
         {can(user, "admin") && tab(`/apps/${id}/settings`, "Settings")}
       </div>
       <Routes>
@@ -62,6 +63,7 @@ export function AppPage({ user }: { user: User }) {
         <Route path="env" element={<EnvTab app={a} />} />
         <Route path="domains" element={<DomainsTab app={a} user={user} />} />
         <Route path="source" element={<SourceTab app={a} />} />
+        <Route path="compose" element={<ComposeTab app={a} />} />
         <Route path="settings" element={<SettingsTab app={a} />} />
       </Routes>
     </>
@@ -138,7 +140,13 @@ function Overview({ app, user }: { app: App; user: User }) {
           )}
         </div>
         <p className="faint small" style={{ marginBottom: 0 }}>
-          {app.source === "git" ? (
+          {app.source === "compose" ? (
+            <>
+              A deployment pulls the images of the compose file and starts the services in dependency order. Unchanged
+              services keep running; a changed service without volumes gets its new container before the old one stops,
+              one with volumes is restarted. If any service fails, the previous containers are restored.
+            </>
+          ) : app.source === "git" ? (
             <>
               A deployment builds branch <span className="mono">{app.git?.branch}</span> with{" "}
               <span className="mono">{app.git?.dockerfile}</span>
@@ -149,10 +157,12 @@ function Overview({ app, user }: { app: App; user: User }) {
               A deployment pulls <span className="mono">{app.image}</span>,
             </>
           )}{" "}
-          starts a new container and switches traffic once it is ready. If the new container fails, the current one keeps
-          serving.
+          {app.source !== "compose" &&
+            " starts a new container and switches traffic once it is ready. If the new container fails, the current one keeps serving."}
         </p>
       </div>
+
+      {app.source === "compose" && <ServicesCard app={app} services={st?.services} />}
 
       <div className="card">
         <div className="card-head">
@@ -173,7 +183,7 @@ function Overview({ app, user }: { app: App; user: User }) {
                 <tr>
                   <th>#</th>
                   <th>Status</th>
-                  <th>{app.source === "git" ? "Commit" : "Image"}</th>
+                  <th>{app.source === "git" ? "Commit" : app.source === "compose" ? "Services" : "Image"}</th>
                   <th>Started</th>
                   <th />
                 </tr>
@@ -192,7 +202,9 @@ function Overview({ app, user }: { app: App; user: User }) {
                     <td>
                       <DeployBadge status={d.status} />
                     </td>
-                    {app.source === "git" ? (
+                    {app.source === "compose" ? (
+                      <td className="muted small">{d.digests ? Object.keys(d.digests).sort().join(", ") : "—"}</td>
+                    ) : app.source === "git" ? (
                       <td className="muted small" title={d.commit}>
                         {d.commit ? (
                           <>
@@ -216,7 +228,12 @@ function Overview({ app, user }: { app: App; user: User }) {
                           onClick={async () => {
                             const ok = await confirm({
                               title: `Roll back to #${d.id}?`,
-                              body: <p>The image of deployment #{d.id} is deployed again with the app's current settings and environment.</p>,
+                              body:
+                                app.source === "compose" ? (
+                                  <p>The compose file and images of deployment #{d.id} are deployed again with the app's current environment.</p>
+                                ) : (
+                                  <p>The image of deployment #{d.id} is deployed again with the app's current settings and environment.</p>
+                                ),
                               confirm: "Roll back",
                             });
                             if (ok) deploy.mutate(d.id);
@@ -273,6 +290,18 @@ function DeploymentModal({ appId, id, onClose }: { appId: number; id: number; on
           {dep?.error && <div className="alert err small">{dep.error}</div>}
           <LogView text={text || (following ? "Waiting for the server…" : "(no output)")} />
           {dep?.image_digest && <div className="faint small mono">{dep.image_digest}</div>}
+          {dep?.digests && (
+            <dl className="kv small">
+              {Object.keys(dep.digests)
+                .sort()
+                .map((k) => (
+                  <div key={k} style={{ display: "contents" }}>
+                    <dt>{k}</dt>
+                    <dd className="mono faint">{dep.digests![k]}</dd>
+                  </div>
+                ))}
+            </dl>
+          )}
         </div>
       )}
     </Modal>
@@ -319,17 +348,19 @@ function StreamBadge({ state, ended }: { state: StreamState; ended: string | nul
 }
 
 function LogsTab({ app }: { app: App }) {
+  const services = app.compose?.services ?? [];
+  const [service, setService] = useState(app.service || services[0]?.name || "");
   const [tail, setTail] = useState(200);
   const [live, setLive] = useState(true);
   const [text, setText] = useState("");
   const [ended, setEnded] = useState<string | null>(null);
   const snapshot = useQuery({
-    queryKey: ["app-logs", app.id, tail],
-    queryFn: () => api.appLogs(app.id, tail),
+    queryKey: ["app-logs", app.id, tail, service],
+    queryFn: () => api.appLogs(app.id, tail, service),
     enabled: !live,
     retry: false,
   });
-  const state = useEventStream(live ? api.appLogsStreamUrl(app.id, tail) : null, {
+  const state = useEventStream(live ? api.appLogsStreamUrl(app.id, tail, service) : null, {
     open: () => {
       setText(""); // a (re)connected stream starts with the last lines again
       setEnded(null);
@@ -345,6 +376,15 @@ function LogsTab({ app }: { app: App }) {
           {live && <StreamBadge state={state} ended={ended} />}
         </div>
         <div className="row">
+          {services.length > 0 && (
+            <select className="input" style={{ width: "auto", height: 28 }} value={service} onChange={(e) => setService(e.target.value)}>
+              {services.map((s) => (
+                <option key={s.name} value={s.name}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+          )}
           <select className="input" style={{ width: "auto", height: 28 }} value={tail} onChange={(e) => setTail(Number(e.target.value))}>
             {[100, 200, 1000, 5000].map((n) => (
               <option key={n} value={n}>
@@ -428,7 +468,19 @@ function EnvTab({ app }: { app: App }) {
       <h2>Environment variables</h2>
       <ErrorBox error={save.error} />
       {parsed.error && <div className="alert err small">{parsed.error}</div>}
-      <Field label="One per line, KEY=value" help="Stored encrypted. Changes take effect on the next deployment.">
+      <Field
+        label="One per line, KEY=value"
+        help={
+          app.source === "compose" ? (
+            <>
+              Stored encrypted. The compose file uses them as <code>${"{"}NAME{"}"}</code>; containers get only what the file
+              passes them. Changes take effect on the next deployment.
+            </>
+          ) : (
+            "Stored encrypted. Changes take effect on the next deployment."
+          )
+        }
+      >
         <textarea
           className="input mono"
           rows={14}
@@ -470,7 +522,18 @@ function DomainsTab({ app, user }: { app: App; user: User }) {
       >
         <h2>Domains</h2>
         <ErrorBox error={save.error} />
-        <Field label="One per line" help={app.port ? `Requests are proxied to port ${app.port} of the container.` : "Set an HTTP port in Settings first."}>
+        <Field
+          label="One per line"
+          help={
+            app.source === "compose"
+              ? app.service
+                ? `Requests are proxied to port ${app.port} of service ${app.service}.`
+                : "Choose the published service under Compose first."
+              : app.port
+                ? `Requests are proxied to port ${app.port} of the container.`
+                : "Set an HTTP port in Settings first."
+          }
+        >
           <textarea className="input mono" rows={6} value={text} onChange={(e) => setText(e.target.value)} disabled={!can(user, "admin")} />
         </Field>
         {can(user, "admin") && (
@@ -532,6 +595,13 @@ function SettingsTab({ app }: { app: App }) {
       toast("Saved. Deploy to apply.");
     },
   });
+  if (app.source === "compose") {
+    return (
+      <div className="stack" style={{ maxWidth: 680 }}>
+        <DeleteCard app={app} />
+      </div>
+    );
+  }
   return (
     <div className="stack" style={{ maxWidth: 680 }}>
       <form
@@ -580,6 +650,7 @@ function DeleteCard({ app }: { app: App }) {
   const [open, setOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
   const [volumes, setVolumes] = useState(false);
+  const volumeNames = app.source === "compose" ? (app.compose?.volumes ?? []) : app.volumes.map((v) => v.name);
   const del = useMutation({
     mutationFn: () => api.deleteApp(app.id, volumes),
     onSuccess: (r) => {
@@ -617,10 +688,10 @@ function DeleteCard({ app }: { app: App }) {
         >
           <div className="form">
             <ErrorBox error={del.error} />
-            {app.volumes.length > 0 && (
+            {volumeNames.length > 0 && (
               <label className="check">
                 <input type="checkbox" checked={volumes} onChange={(e) => setVolumes(e.target.checked)} /> Also delete its data
-                volumes ({app.volumes.map((v) => v.name).join(", ")}) — this cannot be undone
+                volumes ({volumeNames.join(", ")}) — this cannot be undone
               </label>
             )}
             <Field label={`Type ${app.name} to confirm`}>
@@ -791,5 +862,148 @@ function WebhookCard({ app }: { app: App }) {
         </button>
       </div>
     </div>
+  );
+}
+
+function ServicesCard({ app, services }: { app: App; services?: ServiceStatus[] }) {
+  const byName = new Map((services ?? []).map((s) => [s.name, s]));
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Services</h2>
+      </div>
+      <div className="table-wrap">
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Service</th>
+              <th>Image</th>
+              <th>State</th>
+              <th className="hide-sm">Deployment</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(app.compose?.services ?? []).map((svc) => {
+              const st = byName.get(svc.name);
+              const done = st?.state === "exited" && !st.exit_code;
+              return (
+                <tr key={svc.name}>
+                  <td>
+                    <strong>{svc.name}</strong>
+                    {svc.name === app.service && <span className="faint small"> · port {app.port}, domains</span>}
+                    {svc.job && <span className="faint small"> · runs once per deployment</span>}
+                  </td>
+                  <td className="mono muted small">{st?.image ?? svc.image}</td>
+                  <td>
+                    {!st ? (
+                      <span className="badge">not deployed</span>
+                    ) : (
+                      <span className="row wrap" style={{ gap: 4 }}>
+                        <span className={`badge ${st.state === "running" || done ? "ok" : "err"}`}>
+                          {done ? "finished" : st.state}
+                        </span>
+                        {st.health && <span className={`badge ${st.health === "healthy" ? "ok" : "warn"}`}>{st.health}</span>}
+                        {!!st.restart_count && <span className="badge warn">{st.restart_count} restarts</span>}
+                        {st.oom_killed && <span className="badge err">out of memory</span>}
+                      </span>
+                    )}
+                  </td>
+                  <td className="mono muted hide-sm">{st?.deployment_id ? `#${st.deployment_id}` : ""}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function ComposeTab({ app }: { app: App }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const file = useQuery({ queryKey: ["app-compose", app.id], queryFn: () => api.appCompose(app.id), gcTime: 0 });
+  const [text, setText] = useState<string | null>(null);
+  const [service, setService] = useState(app.service ?? "");
+  const [port, setPort] = useState(app.port ? String(app.port) : "");
+  const [warnings, setWarnings] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (file.data && text === null) {
+      setText(file.data.compose);
+      setWarnings(file.data.warnings);
+    }
+  }, [file.data, text]);
+  const save = useMutation({
+    mutationFn: () => api.setAppCompose(app.id, { compose: text ?? "", service: service.trim(), port: Number(port) || 0 }),
+    onSuccess: (r) => {
+      qc.setQueryData(["app", app.id], (old: { app: App } | undefined) => (old ? { ...old, app: r.app } : old));
+      qc.invalidateQueries({ queryKey: ["apps"] });
+      setWarnings(r.warnings);
+      setPort(r.app.port ? String(r.app.port) : "");
+      setService(r.app.service ?? "");
+      toast("Saved. Deploy to apply.");
+    },
+  });
+  if (file.isPending) return <Loading />;
+  if (file.error) return <ErrorBox error={file.error} />;
+  const names = app.compose?.services.filter((s) => !s.job).map((s) => s.name) ?? [];
+  return (
+    <form
+      className="stack"
+      onSubmit={(e: FormEvent) => {
+        e.preventDefault();
+        save.mutate();
+      }}
+    >
+      <div className="card card-body form">
+        <h2>Compose file</h2>
+        {file.data.error && !save.isSuccess && <div className="alert err small">{file.data.error}</div>}
+        {warnings && warnings.length > 0 && (
+          <div className="alert warn small">
+            <ul className="steps">
+              {warnings.map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <Field
+          label="docker-compose.yml"
+          help="Stored encrypted. Bind mounts, host networking, privileges and builds are refused; ports are not published on the server."
+        >
+          <textarea className="input mono" rows={22} value={text ?? ""} onChange={(e) => setText(e.target.value)} spellCheck={false} />
+        </Field>
+      </div>
+      <div className="card card-body form">
+        <h2>Published service</h2>
+        <div className="grid-2">
+          <Field label="Service" help="The app's domains point to it. Empty: the first service with a port.">
+            <input
+              className="input mono"
+              list="compose-services"
+              value={service}
+              onChange={(e) => {
+                setService(e.target.value);
+                setPort("");
+              }}
+            />
+            <datalist id="compose-services">
+              {names.map((n) => (
+                <option key={n} value={n} />
+              ))}
+            </datalist>
+          </Field>
+          <Field label="Port" help="Inside the container; empty uses the one in the file.">
+            <input className="input mono" type="number" min={0} max={65535} value={port} onChange={(e) => setPort(e.target.value)} />
+          </Field>
+        </div>
+        <ErrorBox error={save.error} />
+        <div>
+          <button className="btn primary" disabled={save.isPending}>
+            Save
+          </button>
+        </div>
+      </div>
+    </form>
   );
 }

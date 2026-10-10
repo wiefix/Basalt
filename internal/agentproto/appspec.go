@@ -70,6 +70,9 @@ func (s *AppSpec) Validate() error {
 	if s.AppID <= 0 || s.DeploymentID <= 0 {
 		return errors.New("invalid app or deployment id")
 	}
+	if len(s.Services) > 0 {
+		return s.ValidateCompose()
+	}
 	if !docker.ValidRef(s.Image) {
 		return fmt.Errorf("invalid image reference %q", s.Image)
 	}

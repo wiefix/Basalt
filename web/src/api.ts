@@ -141,15 +141,30 @@ export interface GitSettings {
   context: string;
 }
 
+export interface ComposeService {
+  name: string;
+  image: string;
+  ports?: number[];
+  job?: boolean;
+}
+
+export interface ComposeSummary {
+  services: ComposeService[];
+  volumes: string[];
+}
+
 export interface App {
   id: number;
   server_id: number;
   name: string;
-  source: "image" | "git";
+  source: "image" | "git" | "compose";
   image: string;
   git?: GitSettings;
   deploy_key?: string;
   auto_deploy: boolean;
+  // Compose apps: the published service (port is its port) and the file's contents without secrets.
+  service?: string;
+  compose?: ComposeSummary;
   port: number;
   domains: string[];
   tls: "auto" | "internal";
@@ -171,6 +186,7 @@ export interface AppSettings {
 export interface Deployment {
   id: number;
   image: string;
+  digests?: Record<string, string>;
   commit?: string;
   commit_message?: string;
   status: "running" | "succeeded" | "failed";
@@ -189,6 +205,27 @@ export interface AppStatus {
   restart_count?: number;
   exit_code?: number;
   oom_killed?: boolean;
+  error?: string;
+  services?: ServiceStatus[];
+}
+
+export interface ServiceStatus {
+  name: string;
+  image: string;
+  state: string;
+  health?: string;
+  deployment_id?: number;
+  started_at?: string;
+  restart_count?: number;
+  exit_code?: number;
+  oom_killed?: boolean;
+}
+
+export interface ComposeFile {
+  compose: string;
+  service: string;
+  port: number;
+  warnings: string[];
   error?: string;
 }
 
@@ -330,8 +367,12 @@ export const api = {
 
   apps: () => get<{ apps: App[] }>("/api/v1/apps"),
   app: (id: number) => get<{ app: App; sync: Sync }>(`/api/v1/apps/${id}`),
-  createApp: (b: AppSettings & { source: string; server_id: number; name: string; domains: string[]; tls: string }) =>
-    post<{ app: App; sync: Sync }>("/api/v1/apps", b),
+  createApp: (
+    b: AppSettings & { source: string; server_id: number; name: string; domains: string[]; tls: string; compose?: string; service?: string },
+  ) => post<{ app: App; sync: Sync; warnings: string[] }>("/api/v1/apps", b),
+  appCompose: (id: number) => get<ComposeFile>(`/api/v1/apps/${id}/compose`),
+  setAppCompose: (id: number, b: { compose: string; service: string; port: number }) =>
+    put<{ app: App; warnings: string[] }>(`/api/v1/apps/${id}/compose`, b),
   updateApp: (id: number, b: AppSettings) => put<{ app: App }>(`/api/v1/apps/${id}`, b),
   deleteApp: (id: number, volumes: boolean) =>
     del<{ sync: Sync; cleanup_error?: string }>(`/api/v1/apps/${id}${volumes ? "?volumes=1" : ""}`),
@@ -348,9 +389,11 @@ export const api = {
   deployments: (id: number) => get<{ deployments: Deployment[] }>(`/api/v1/apps/${id}/deployments`),
   deployment: (id: number, did: number) => get<{ deployment: Deployment }>(`/api/v1/apps/${id}/deployments/${did}`),
   appStatus: (id: number) => get<{ status: AppStatus }>(`/api/v1/apps/${id}/status`),
-  appLogs: (id: number, tail: number) => get<{ log: string }>(`/api/v1/apps/${id}/logs?tail=${tail}`),
+  appLogs: (id: number, tail: number, service = "") =>
+    get<{ log: string }>(`/api/v1/apps/${id}/logs?tail=${tail}${service ? `&service=${encodeURIComponent(service)}` : ""}`),
   // Server-sent event streams (see useEventStream).
-  appLogsStreamUrl: (id: number, tail: number) => `/api/v1/apps/${id}/logs/stream?tail=${tail}`,
+  appLogsStreamUrl: (id: number, tail: number, service = "") =>
+    `/api/v1/apps/${id}/logs/stream?tail=${tail}${service ? `&service=${encodeURIComponent(service)}` : ""}`,
   deploymentStreamUrl: (id: number, did: number) => `/api/v1/apps/${id}/deployments/${did}/stream`,
 
   sftpUsers: (siteId: number) =>
@@ -388,6 +431,14 @@ export function upload(
     xhr.send(file);
   });
 }
+
+// sourceLabel describes where an app comes from, for lists and headers.
+export const sourceLabel = (a: App) =>
+  a.source === "git"
+    ? `${a.git?.url} · ${a.git?.branch}`
+    : a.source === "compose"
+      ? `compose · ${(a.compose?.services ?? []).map((s) => s.name).join(", ")}`
+      : a.image;
 
 export const roleRank: Record<Role, number> = { viewer: 1, member: 2, admin: 3, owner: 4 };
 export const can = (user: User | undefined, min: Role) => !!user && roleRank[user.role] >= roleRank[min];

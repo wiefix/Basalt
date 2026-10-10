@@ -196,6 +196,16 @@ type AppSpec struct {
 	PruneImages []ImageRef `json:"prune_images,omitempty"`
 	// Git, when set, builds Image from a repository instead of pulling it.
 	Git *GitSource `json:"git,omitempty"`
+
+	// Services, when set, deploys a compose app: one container per
+	// service on the app's network. Image, Port, Env, Volumes, MemoryMB,
+	// CPUs, RegistryAuth, PruneImages and Git are not used then.
+	Services []ServiceSpec `json:"services,omitempty"`
+	// ComposeVolumes are the named volumes the services mount.
+	ComposeVolumes []string `json:"compose_volumes,omitempty"`
+	// RegistryAuths are credentials for the registries of service images,
+	// matched by ServerAddress.
+	RegistryAuths []docker.AuthConfig `json:"registry_auths,omitempty"`
 }
 
 // ImageRef is an image an app was deployed from: the reference used and
@@ -222,6 +232,9 @@ type AppDeployResponse struct {
 	// The commit a git deployment was built from.
 	Commit        string `json:"commit,omitempty"`
 	CommitMessage string `json:"commit_message,omitempty"`
+	// Digests are the images each service of a compose app runs, pinned
+	// by repository digest when the registry gave one.
+	Digests map[string]string `json:"digests,omitempty"`
 }
 
 type AppRequest struct {
@@ -232,6 +245,8 @@ type AppRequest struct {
 	Tail int `json:"tail,omitempty"`
 	// PruneImages are the app's images to remove with it (app_delete).
 	PruneImages []ImageRef `json:"prune_images,omitempty"`
+	// Service selects a service of a compose app (status, logs).
+	Service string `json:"service,omitempty"`
 }
 
 // AppStatus describes the container currently serving an app.
@@ -244,6 +259,22 @@ type AppStatus struct {
 	ExitCode     int       `json:"exit_code,omitempty"`
 	OOMKilled    bool      `json:"oom_killed,omitempty"`
 	Error        string    `json:"error,omitempty"`
+	// Services of a compose app, by name; the fields above then describe
+	// the requested (or published) service.
+	Services []ServiceStatus `json:"services,omitempty"`
+}
+
+// ServiceStatus describes the current container of one compose service.
+type ServiceStatus struct {
+	Name         string    `json:"name"`
+	Image        string    `json:"image"`
+	State        string    `json:"state"`
+	Health       string    `json:"health,omitempty"`
+	DeploymentID int64     `json:"deployment_id,omitempty"`
+	StartedAt    time.Time `json:"started_at,omitzero"`
+	RestartCount int       `json:"restart_count,omitempty"`
+	ExitCode     int       `json:"exit_code,omitempty"`
+	OOMKilled    bool      `json:"oom_killed,omitempty"`
 }
 
 type AppLogsResponse struct {

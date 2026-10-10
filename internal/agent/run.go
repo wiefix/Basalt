@@ -280,7 +280,7 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		if send == nil {
 			return nil, errors.New("following logs needs a streaming request")
 		}
-		return struct{}{}, a.apps.FollowLogs(ctx, req.AppID, req.Tail, func(s string) error {
+		return struct{}{}, a.apps.FollowLogs(ctx, req.AppID, req.Service, req.Tail, func(s string) error {
 			return send(agentproto.LogChunk{Text: s})
 		})
 	case agentproto.TypeAppDelete, agentproto.TypeAppStatus, agentproto.TypeAppLogs:
@@ -292,9 +292,9 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		case agentproto.TypeAppDelete:
 			return struct{}{}, a.apps.Delete(ctx, req.AppID, req.DeleteVolumes, req.PruneImages)
 		case agentproto.TypeAppStatus:
-			return a.apps.Status(ctx, req.AppID)
+			return a.apps.Status(ctx, req.AppID, req.Service)
 		}
-		log, err := a.apps.Logs(ctx, req.AppID, req.Tail)
+		log, err := a.apps.Logs(ctx, req.AppID, req.Service, req.Tail)
 		return agentproto.AppLogsResponse{Log: log}, err
 	case agentproto.TypeAppsSync:
 		var req agentproto.AppsSync

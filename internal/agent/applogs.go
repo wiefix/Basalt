@@ -16,11 +16,11 @@ const (
 	logBatchBytes    = 32 << 10
 )
 
-// FollowLogs streams the output of the app's current container to send,
-// first the last tail lines, then live. When a deployment replaces the
-// container, or the container restarts, it follows the new one. It returns
-// when ctx ends or send fails.
-func (m *appsManager) FollowLogs(ctx context.Context, appID int64, tail int, send func(string) error) error {
+// FollowLogs streams the output of the app's current container (of service,
+// for a compose app) to send, first the last tail lines, then live. When a
+// deployment replaces the container, or the container restarts, it follows
+// the new one. It returns when ctx ends or send fails.
+func (m *appsManager) FollowLogs(ctx context.Context, appID int64, service string, tail int, send func(string) error) error {
 	if appID <= 0 {
 		return fmt.Errorf("invalid app id")
 	}
@@ -41,7 +41,7 @@ func (m *appsManager) FollowLogs(ctx context.Context, appID int64, tail int, sen
 	}
 
 	for ctx.Err() == nil {
-		c, err := m.current(ctx, dc, appID)
+		c, err := m.current(ctx, dc, appID, service)
 		if err != nil {
 			if ctx.Err() != nil {
 				break

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -94,5 +95,60 @@ func TestSettingNotFound(t *testing.T) {
 	db, _ := openTemp(t)
 	if _, err := db.Setting(context.Background(), "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v; want ErrNotFound", err)
+	}
+}
+
+// TestComposeMigrationKeepsData rebuilds the apps table under existing
+// deployments and routes: nothing may be lost to ON DELETE CASCADE.
+func TestComposeMigrationKeepsData(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "basalt.db")
+	f, _ := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	f.Close()
+	w, _ := sql.Open("sqlite", dsn(path, false))
+	w.SetMaxOpenConns(1)
+	r, _ := sql.Open("sqlite", dsn(path, true))
+	db := &DB{W: w, R: r}
+	defer db.Close()
+	if err := db.migrateTo(ctx, 12); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO servers (id, name) VALUES (1, 's')`,
+		`INSERT INTO apps (id, server_id, name, image, port, source, git_url, auto_deploy) VALUES (7, 1, 'web', '', 80, 'git', 'https://x/y.git', 1)`,
+		`INSERT INTO deployments (app_id, image, status) VALUES (7, 'basalt/app-7:build-1', 'succeeded')`,
+		`INSERT INTO proxy_routes (id, server_id, kind, tls, app_id) VALUES (3, 1, 'reverse_proxy', 'auto', 7)`,
+		`INSERT INTO proxy_route_domains (server_id, domain, route_id) VALUES (1, 'web.example.com', 3)`,
+	} {
+		if _, err := db.W.ExecContext(ctx, q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	if err := db.migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a, err := db.AppByID(ctx, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Source != "git" || a.Git.URL != "https://x/y.git" || !a.AutoDeploy || a.Port != 80 || len(a.Domains) != 1 {
+		t.Fatalf("app after migration = %+v", a)
+	}
+	if list, _ := db.Deployments(ctx, 7, 10); len(list) != 1 {
+		t.Fatal("deployments lost in the migration")
+	}
+	var fk int
+	db.W.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk)
+	if fk != 1 {
+		t.Fatal("foreign keys left off")
+	}
+	// Cascades work against the rebuilt table.
+	if err := db.DeleteApp(ctx, 7); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	db.R.QueryRowContext(ctx, `SELECT COUNT(*) FROM deployments`).Scan(&n)
+	if n != 0 {
+		t.Fatal("deployments not removed with their app after the rebuild")
 	}
 }

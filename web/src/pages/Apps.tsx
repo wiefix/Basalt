@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router";
-import { api, can, type User } from "../api";
+import { api, can, sourceLabel, type User } from "../api";
 import { ErrorBox, Field, Icon, Loading, Modal, formatDate } from "../components/ui";
 
 export function AppsPage({ user }: { user: User }) {
@@ -15,7 +15,7 @@ export function AppsPage({ user }: { user: User }) {
       <div className="page-head">
         <div>
           <h1>Apps</h1>
-          <div className="sub">Containers deployed from images, with zero-downtime updates.</div>
+          <div className="sub">Containers from images, git repositories or compose files, with zero-downtime updates.</div>
         </div>
         {can(user, "admin") && (
           <button className="btn primary" onClick={() => setAdding(true)}>
@@ -57,7 +57,7 @@ export function AppsPage({ user }: { user: User }) {
                       <strong>{a.name}</strong>
                     </Link>
                   </td>
-                  <td className="mono muted">{a.source === "git" ? `${a.git?.url} · ${a.git?.branch}` : a.image}</td>
+                  <td className="mono muted">{sourceLabel(a)}</td>
                   <td>
                     {a.domains.length === 0 ? (
                       <span className="faint">—</span>
@@ -97,13 +97,17 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
   const withDocker = servers.data?.servers.filter((s) => s.docker) ?? [];
   const [serverId, setServerId] = useState<number | "">("");
-  const [source, setSource] = useState<"image" | "git">("image");
+  const [source, setSource] = useState<"image" | "git" | "compose">("image");
+  const [compose, setCompose] = useState("");
+  const [service, setService] = useState("");
   const [name, setName] = useState("");
   const [image, setImage] = useState("");
   const [repo, setRepo] = useState("");
   const [branch, setBranch] = useState("main");
   const [dockerfile, setDockerfile] = useState("Dockerfile");
   const [port, setPort] = useState("80");
+  const [warnings, setWarnings] = useState<string[] | null>(null);
+  const [createdId, setCreatedId] = useState<number | null>(null);
   const [domains, setDomains] = useState("");
   const [tls, setTls] = useState("auto");
   const create = useMutation({
@@ -114,7 +118,10 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
         source,
         image: source === "image" ? image.trim() : "",
         git: source === "git" ? { url: repo.trim(), branch: branch.trim(), dockerfile: dockerfile.trim() } : undefined,
-        port: Number(port) || 0,
+        compose: source === "compose" ? compose : undefined,
+        service: source === "compose" ? service.trim() : undefined,
+        // A compose app's port defaults to the one its file mentions for the service.
+        port: source === "compose" && !service.trim() ? 0 : Number(port) || 0,
         domains: domains.split(/[\s,]+/).filter(Boolean),
         tls,
         volumes: [],
@@ -122,27 +129,60 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
         cpus: 0,
       });
       const waitForKey = source === "git" && isSSH(repo);
-      // Start the first deployment right away; it runs in the background.
-      if (!waitForKey) await api.deployApp(r.app.id).catch(() => {});
+      // Compose files usually need variables first: they are deployed from the app page.
+      const deployNow = !waitForKey && source !== "compose";
+      if (deployNow) await api.deployApp(r.app.id).catch(() => {});
       return { ...r, waitForKey };
     },
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["apps"] });
-      navigate(r.waitForKey ? `/apps/${r.app.id}/source` : `/apps/${r.app.id}`);
+      if (r.warnings.length > 0) {
+        // Shown once here; the Compose tab lists them again.
+        setWarnings(r.warnings);
+        setCreatedId(r.app.id);
+        return;
+      }
+      navigate(r.waitForKey ? `/apps/${r.app.id}/source` : source === "compose" ? `/apps/${r.app.id}/env` : `/apps/${r.app.id}`);
     },
   });
+
+  if (warnings && createdId !== null) {
+    return (
+      <Modal
+        title="App created"
+        onClose={onClose}
+        footer={
+          <button className="btn primary" onClick={() => navigate(`/apps/${createdId}/env`)}>
+            Continue
+          </button>
+        }
+      >
+        <div className="stack">
+          <p className="muted" style={{ margin: 0 }}>
+            The compose file is valid. Before deploying, check these points; set the variables it uses under Environment.
+          </p>
+          <ul className="steps small">
+            {warnings.map((w) => (
+              <li key={w}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal
       title="New app"
       onClose={onClose}
+      wide={source === "compose"}
       footer={
         <>
           <button className="btn" onClick={onClose}>
             Cancel
           </button>
           <button className="btn primary" form="new-app" disabled={create.isPending || withDocker.length === 0}>
-            {source === "git" && isSSH(repo) && repo ? "Create" : "Create and deploy"}
+            {(source === "git" && isSSH(repo) && repo) || source === "compose" ? "Create" : "Create and deploy"}
           </button>
         </>
       }
@@ -174,8 +214,49 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
             <button type="button" className={source === "git" ? "active" : ""} onClick={() => setSource("git")}>
               Git repository
             </button>
+            <button type="button" className={source === "compose" ? "active" : ""} onClick={() => setSource("compose")}>
+              Docker Compose
+            </button>
           </div>
-          {source === "image" ? (
+          {source === "compose" ? (
+            <>
+              <Field
+                label="Compose file"
+                help={
+                  <>
+                    Paste a docker-compose.yml. Services run ready images on a private network; named volumes keep
+                    their data. Use <code>${"{"}NAME{"}"}</code> for secrets and set them under Environment.
+                  </>
+                }
+              >
+                <textarea
+                  className="input mono"
+                  rows={14}
+                  value={compose}
+                  onChange={(e) => setCompose(e.target.value)}
+                  spellCheck={false}
+                  required
+                  placeholder={"services:\n  web:\n    image: ghost:5\n    ports: [\"2368\"]\n    volumes: [content:/var/lib/ghost/content]\nvolumes:\n  content:"}
+                />
+              </Field>
+              <div className="grid-2">
+                <Field label="Published service" help="Its port gets the app's domains. Empty: the first service with a port.">
+                  <input className="input mono" value={service} onChange={(e) => setService(e.target.value)} placeholder="web" />
+                </Field>
+                <Field label="Port" help="Inside the container; empty uses the one in the file.">
+                  <input
+                    className="input mono"
+                    type="number"
+                    min={0}
+                    max={65535}
+                    value={service.trim() ? port : ""}
+                    disabled={!service.trim()}
+                    onChange={(e) => setPort(e.target.value)}
+                  />
+                </Field>
+              </div>
+            </>
+          ) : source === "image" ? (
             <Field
               label="Image"
               help={
@@ -205,9 +286,11 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
               </div>
             </>
           )}
-          <Field label="HTTP port" help="The port the app listens on inside the container. 0 for background workers.">
-            <input className="input mono" type="number" min={0} max={65535} value={port} onChange={(e) => setPort(e.target.value)} />
-          </Field>
+          {source !== "compose" && (
+            <Field label="HTTP port" help="The port the app listens on inside the container. 0 for background workers.">
+              <input className="input mono" type="number" min={0} max={65535} value={port} onChange={(e) => setPort(e.target.value)} />
+            </Field>
+          )}
           <Field label="Domains" help="Optional. Separate several with spaces; point their DNS at the server.">
             <input className="input" value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="api.example.com" />
           </Field>
