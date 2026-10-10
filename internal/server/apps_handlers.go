@@ -369,6 +369,16 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request, p *prin
 		s.internalError(w, r, "decrypt app env", err)
 		return
 	}
+	auth, err := s.registryAuth(r.Context(), image)
+	if err != nil {
+		s.internalError(w, r, "load registry credentials", err)
+		return
+	}
+	previous, err := s.db.SucceededImages(r.Context(), app.ID)
+	if err != nil {
+		s.internalError(w, r, "list deployed images", err)
+		return
+	}
 	dep, err := s.db.CreateDeployment(r.Context(), app.ID, image, &p.user.ID)
 	if errors.Is(err, store.ErrDeployInProgress) {
 		writeError(w, http.StatusConflict, err.Error())
@@ -382,6 +392,7 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request, p *prin
 	spec := agentproto.AppSpec{
 		AppID: app.ID, DeploymentID: dep.ID, Image: image, Port: app.Port, Env: env,
 		Volumes: app.Volumes, MemoryMB: app.MemoryMB, CPUs: app.CPUs,
+		RegistryAuth: auth, PruneImages: imagesToPrune(previous, s.imagesKept),
 	}
 	// The deployment outlives the request; a panel restart marks it failed.
 	// Its output can be followed live from now on.
@@ -618,6 +629,11 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request, p *prin
 		return
 	}
 	volumes := r.URL.Query().Get("volumes") == "1"
+	images, err := s.db.SucceededImages(r.Context(), app.ID)
+	if err != nil {
+		s.internalError(w, r, "list deployed images", err)
+		return
+	}
 	if err := s.db.DeleteApp(r.Context(), app.ID); err != nil {
 		s.internalError(w, r, "delete app", err)
 		return
@@ -629,7 +645,7 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request, p *prin
 	if s.agents.Connected(app.ServerID) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 		defer cancel()
-		req := agentproto.AppRequest{AppID: app.ID, DeleteVolumes: volumes}
+		req := agentproto.AppRequest{AppID: app.ID, DeleteVolumes: volumes, PruneImages: imagesToPrune(images, 0)}
 		if err := s.agents.Call(ctx, app.ServerID, agentproto.TypeAppDelete, req, nil); err != nil {
 			resp["cleanup_error"] = err.Error()
 		}

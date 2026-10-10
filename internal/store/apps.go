@@ -326,3 +326,23 @@ func (db *DB) DeploymentByID(ctx context.Context, appID, id int64) (*Deployment,
 	return scanDeployment(db.R.QueryRowContext(ctx,
 		`SELECT `+deploymentColumns+` FROM deployments WHERE app_id = ? AND id = ?`, appID, id))
 }
+
+// SucceededImages lists the images of an app's successful deployments,
+// newest first.
+func (db *DB) SucceededImages(ctx context.Context, appID int64) ([]agentproto.ImageRef, error) {
+	rows, err := db.R.QueryContext(ctx,
+		`SELECT image, image_digest FROM deployments WHERE app_id = ? AND status = 'succeeded' ORDER BY id DESC`, appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []agentproto.ImageRef
+	for rows.Next() {
+		var r agentproto.ImageRef
+		if err := rows.Scan(&r.Ref, &r.Digest); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

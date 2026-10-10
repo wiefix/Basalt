@@ -157,7 +157,7 @@ func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec, strea
 	}
 	defer m.lock(spec.AppID)()
 
-	digest, err := m.pull(ctx, dc, spec.Image, &lg)
+	digest, imageID, err := m.pull(ctx, dc, spec.Image, spec.RegistryAuth, &lg)
 	if err != nil {
 		return fail(err)
 	}
@@ -201,13 +201,16 @@ func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec, strea
 	case <-time.After(appDrainDelay):
 	}
 	m.removeOlder(ctx, dc, spec.AppID, spec.DeploymentID, &lg)
+	if n := m.pruneImages(ctx, dc, spec.PruneImages, imageID); n > 0 {
+		lg.printf("Removed %d image(s) of older deployments", n)
+	}
 	lg.printf("Deployment succeeded")
 	return agentproto.AppDeployResponse{OK: true, Log: lg.String(), ContainerID: id, ImageDigest: digest}
 }
 
 // pull fetches the image unless it is pinned by digest and already present.
-// It returns the repository digest of the image.
-func (m *appsManager) pull(ctx context.Context, dc *docker.Client, ref string, lg *deployLog) (string, error) {
+// It returns the repository digest of the image and its local ID.
+func (m *appsManager) pull(ctx context.Context, dc *docker.Client, ref string, auth *docker.AuthConfig, lg *deployLog) (digest, id string, err error) {
 	present := false
 	if strings.Contains(ref, "@sha256:") {
 		_, err := dc.ImageInspect(ctx, ref)
@@ -216,9 +219,13 @@ func (m *appsManager) pull(ctx context.Context, dc *docker.Client, ref string, l
 	if present {
 		lg.printf("Image %s is already present", ref)
 	} else {
-		lg.printf("Pulling %s", ref)
+		if auth != nil {
+			lg.printf("Pulling %s (signed in to %s as %s)", ref, docker.RegistryHost(ref), auth.Username)
+		} else {
+			lg.printf("Pulling %s", ref)
+		}
 		layers := 0
-		err := dc.Pull(ctx, ref, func(p docker.PullProgress) {
+		err := dc.Pull(ctx, ref, auth, func(p docker.PullProgress) {
 			switch {
 			case p.Status == "Pull complete":
 				layers++
@@ -227,7 +234,10 @@ func (m *appsManager) pull(ctx context.Context, dc *docker.Client, ref string, l
 			}
 		})
 		if err != nil {
-			return "", fmt.Errorf("pull %s: %w", ref, err)
+			if auth == nil && docker.RegistryHost(ref) != docker.DockerHub {
+				return "", "", fmt.Errorf("pull %s: %w (a private image needs credentials for %s under Registries)", ref, err, docker.RegistryHost(ref))
+			}
+			return "", "", fmt.Errorf("pull %s: %w", ref, err)
 		}
 		if layers > 0 {
 			lg.printf("Downloaded %d layers", layers)
@@ -235,12 +245,54 @@ func (m *appsManager) pull(ctx context.Context, dc *docker.Client, ref string, l
 	}
 	info, err := dc.ImageInspect(ctx, ref)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if len(info.RepoDigests) > 0 {
-		return info.RepoDigests[0], nil
+		return info.RepoDigests[0], info.ID, nil
 	}
-	return info.ID, nil
+	return info.ID, info.ID, nil
+}
+
+// pruneImages removes the references to images of earlier deployments and
+// returns how many it removed. Docker deletes an image once no reference to
+// it is left, and refuses while a container uses it, so images still
+// running or shared with other references stay. A tag is removed only while
+// it still points at the pruned image, never the image of keepID.
+func (m *appsManager) pruneImages(ctx context.Context, dc *docker.Client, refs []agentproto.ImageRef, keepID string) int {
+	removed := 0
+	for _, r := range refs {
+		target := r.Digest
+		if target == "" {
+			target = r.Ref
+		}
+		info, err := dc.ImageInspect(ctx, target)
+		if err != nil || info.ID == keepID {
+			continue // already gone, or what now runs
+		}
+		gone := false
+		if r.Ref != target {
+			if t, err := dc.ImageInspect(ctx, r.Ref); err == nil && t.ID == info.ID {
+				// Removing a repository's last tag drops its digest too.
+				gone = m.removeImageRef(ctx, dc, r.Ref)
+			}
+		}
+		if m.removeImageRef(ctx, dc, target) || gone {
+			removed++
+		}
+	}
+	return removed
+}
+
+func (m *appsManager) removeImageRef(ctx context.Context, dc *docker.Client, ref string) bool {
+	err := dc.ImageRemove(ctx, ref)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, docker.ErrNotFound), errors.Is(err, docker.ErrConflict):
+		return false // gone, or still in use
+	}
+	m.log.Warn("remove old image", "image", ref, "err", err)
+	return false
 }
 
 func (m *appsManager) ensureNetwork(ctx context.Context, dc *docker.Client, appID int64) error {
@@ -592,9 +644,9 @@ func (l *limitedWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Delete removes the app's containers and network, and its volumes when
-// asked to.
-func (m *appsManager) Delete(ctx context.Context, appID int64, volumes bool) error {
+// Delete removes the app's containers, network and the given images, and
+// its volumes when asked to.
+func (m *appsManager) Delete(ctx context.Context, appID int64, volumes bool, images []agentproto.ImageRef) error {
 	if appID <= 0 {
 		return errors.New("invalid app id")
 	}
@@ -615,6 +667,10 @@ func (m *appsManager) Delete(ctx context.Context, appID int64, volumes bool) err
 	if err := dc.NetworkRemove(ctx, appNetwork(appID)); err != nil {
 		return err
 	}
+	if err := agentproto.ValidateImageRefs(images); err != nil {
+		return err
+	}
+	m.pruneImages(ctx, dc, images, "")
 	if volumes {
 		vols, err := dc.VolumeList(ctx, map[string]string{labelApp: strconv.FormatInt(appID, 10)})
 		if err != nil {
@@ -650,7 +706,7 @@ func (m *appsManager) Sync(ctx context.Context, known []int64) error {
 	}
 	for app := range orphans {
 		m.log.Warn("removing containers of an app deleted from the panel", "app_id", app)
-		if err := m.Delete(ctx, app, false); err != nil {
+		if err := m.Delete(ctx, app, false, nil); err != nil {
 			return err
 		}
 	}

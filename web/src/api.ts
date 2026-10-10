@@ -178,6 +178,14 @@ export interface AppStatus {
   error?: string;
 }
 
+export interface Registry {
+  id: number;
+  host: string;
+  username: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -292,6 +300,13 @@ export const api = {
   resetDatabasePassword: (siteId: number, id: number) =>
     post<{ credentials: DatabaseCredentials }>(`/api/v1/sites/${siteId}/databases/${id}/password`),
   deleteDatabase: (siteId: number, id: number) => del<void>(`/api/v1/sites/${siteId}/databases/${id}`),
+
+  registries: () => get<{ registries: Registry[] }>("/api/v1/registries"),
+  createRegistry: (b: { host: string; username: string; password: string }) =>
+    post<{ registry: Registry }>("/api/v1/registries", b),
+  updateRegistry: (id: number, b: { username: string; password: string }) =>
+    put<{ registry: Registry }>(`/api/v1/registries/${id}`, b),
+  deleteRegistry: (id: number) => del<void>(`/api/v1/registries/${id}`),
 
   apps: () => get<{ apps: App[] }>("/api/v1/apps"),
   app: (id: number) => get<{ app: App; sync: Sync }>(`/api/v1/apps/${id}`),

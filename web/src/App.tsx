@@ -11,6 +11,7 @@ import { SitePage } from "./pages/Site";
 import { AppsPage } from "./pages/Apps";
 import { AppPage } from "./pages/App";
 import { UsersPage } from "./pages/Users";
+import { RegistriesPage } from "./pages/Registries";
 import { AccountPage } from "./pages/Account";
 
 // The signed-in user, or null when signed out. A 401 is a normal answer
@@ -83,6 +84,11 @@ function Shell({ user }: { user: User }) {
           <Icon name="box" /> Apps
         </NavLink>
         {can(user, "admin") && (
+          <NavLink className="nav-link" to="/registries">
+            <Icon name="key" /> Registries
+          </NavLink>
+        )}
+        {can(user, "admin") && (
           <NavLink className="nav-link" to="/users">
             <Icon name="users" /> Users
           </NavLink>
@@ -111,6 +117,7 @@ function Shell({ user }: { user: User }) {
           <Route path="/sites/:id/*" element={<SitePage user={user} />} />
           <Route path="/apps" element={<AppsPage user={user} />} />
           <Route path="/apps/:id/*" element={<AppPage user={user} />} />
+          <Route path="/registries" element={<RegistriesPage user={user} />} />
           <Route path="/users" element={<UsersPage user={user} />} />
           <Route path="/account" element={<AccountPage user={user} />} />
           <Route path="*" element={<div className="empty"><h3>Page not found</h3></div>} />

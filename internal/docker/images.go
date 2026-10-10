@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -33,18 +34,98 @@ func SplitRef(ref string) (repo, tagOrDigest string) {
 	return ref, "latest"
 }
 
-// Pull downloads an image. progress (may be nil) receives status lines as
-// the daemon reports them. Errors the daemon reports mid-stream are
-// returned, so a failed pull never looks like a success.
-func (c *Client) Pull(ctx context.Context, ref string, progress func(PullProgress)) error {
+// AuthConfig holds registry credentials for one pull or push. They are sent
+// to the daemon with the request only; the daemon does not store them.
+type AuthConfig struct {
+	Username      string `json:"username"`
+	Password      string `json:"password"`
+	ServerAddress string `json:"serveraddress"`
+}
+
+func authHeader(auth *AuthConfig) (http.Header, error) {
+	if auth == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(auth)
+	if err != nil {
+		return nil, err
+	}
+	return http.Header{"X-Registry-Auth": {base64.URLEncoding.EncodeToString(b)}}, nil
+}
+
+// DockerHub is the registry of references without a registry host.
+const DockerHub = "docker.io"
+
+// RegistryHost returns the registry an image reference points to:
+// "ghcr.io/org/app:1" -> "ghcr.io", "localhost:5000/app" -> "localhost:5000",
+// "nginx" and "library/nginx" -> "docker.io".
+func RegistryHost(ref string) string {
+	first, _, ok := strings.Cut(ref, "/")
+	if ok && (strings.ContainsAny(first, ".:") || first == "localhost") {
+		first = strings.ToLower(first)
+		if first == "index.docker.io" || first == "registry-1.docker.io" {
+			return DockerHub
+		}
+		return first
+	}
+	return DockerHub
+}
+
+// ServerAddress is the address credentials for host are presented with.
+func ServerAddress(host string) string {
+	if host == DockerHub {
+		return "https://index.docker.io/v1/"
+	}
+	return host
+}
+
+// Pull downloads an image, with registry credentials when auth is not nil.
+// progress (may be nil) receives status lines as the daemon reports them.
+// Errors the daemon reports mid-stream are returned, so a failed pull never
+// looks like a success.
+func (c *Client) Pull(ctx context.Context, ref string, auth *AuthConfig, progress func(PullProgress)) error {
 	repo, tag := SplitRef(ref)
 	q := url.Values{"fromImage": {repo}, "tag": {tag}}
-	resp, err := c.do(ctx, http.MethodPost, "/images/create", q, nil)
+	h, err := authHeader(auth)
+	if err != nil {
+		return err
+	}
+	resp, err := c.doHeader(ctx, http.MethodPost, "/images/create", q, nil, h)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	dec := json.NewDecoder(resp.Body)
+	return readProgress(resp.Body, progress)
+}
+
+// Push uploads a local image (tag included in ref) to its registry.
+func (c *Client) Push(ctx context.Context, ref string, auth *AuthConfig, progress func(PullProgress)) error {
+	repo, tag := SplitRef(ref)
+	h, err := authHeader(auth)
+	if err != nil {
+		return err
+	}
+	if h == nil {
+		// The daemon requires the header even for anonymous pushes.
+		h = http.Header{"X-Registry-Auth": {base64.URLEncoding.EncodeToString([]byte("{}"))}}
+	}
+	resp, err := c.doHeader(ctx, http.MethodPost, "/images/"+escapeRef(repo)+"/push", url.Values{"tag": {tag}}, nil, h)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return readProgress(resp.Body, progress)
+}
+
+// Tag adds the reference ref (repository and tag) to a local image.
+func (c *Client) Tag(ctx context.Context, image, ref string) error {
+	repo, tag := SplitRef(ref)
+	return c.call(ctx, http.MethodPost, "/images/"+escapeRef(image)+"/tag", url.Values{"repo": {repo}, "tag": {tag}}, nil, nil)
+}
+
+// readProgress decodes the JSON status stream of a pull or push.
+func readProgress(r io.Reader, progress func(PullProgress)) error {
+	dec := json.NewDecoder(r)
 	for {
 		var m struct {
 			PullProgress
@@ -93,8 +174,9 @@ func (c *Client) ImageInspect(ctx context.Context, ref string) (*ImageInfo, erro
 	return &info, nil
 }
 
-// ImageRemove deletes a local image. An image still used by a container is
-// a conflict, which callers pruning old images can ignore.
+// ImageRemove removes a reference (tag or digest) to a local image, and the
+// image itself once nothing else refers to it. An image still used by a
+// container is a conflict, which callers pruning old images can ignore.
 func (c *Client) ImageRemove(ctx context.Context, ref string) error {
 	return c.call(ctx, http.MethodDelete, "/images/"+escapeRef(ref), nil, nil, nil)
 }

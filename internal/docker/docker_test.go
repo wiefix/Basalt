@@ -3,6 +3,7 @@ package docker
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -114,7 +115,7 @@ func TestPullReportsStreamErrors(t *testing.T) {
 		io.WriteString(w, `{"errorDetail":{"message":"manifest unknown"},"error":"manifest unknown"}`+"\n")
 	})
 	var lines []string
-	err := c.Pull(context.Background(), "registry.example.com:5000/nope:2", func(p PullProgress) { lines = append(lines, p.Status) })
+	err := c.Pull(context.Background(), "registry.example.com:5000/nope:2", nil, func(p PullProgress) { lines = append(lines, p.Status) })
 	if err == nil || !strings.Contains(err.Error(), "manifest unknown") {
 		t.Fatalf("pull error lost: %v", err)
 	}
@@ -189,5 +190,36 @@ func TestValidRef(t *testing.T) {
 		if ValidRef(bad) {
 			t.Errorf("ValidRef(%q) = true", bad)
 		}
+	}
+}
+
+func TestRegistryHost(t *testing.T) {
+	for ref, want := range map[string]string{
+		"nginx": "docker.io", "library/nginx:1": "docker.io", "n8nio/n8n": "docker.io",
+		"ghcr.io/org/app:v1": "ghcr.io", "GHCR.io/org/app": "ghcr.io", "localhost:5000/app": "localhost:5000",
+		"localhost/app": "localhost", "127.0.0.1:5000/a/b@sha256:00": "127.0.0.1:5000",
+		"index.docker.io/library/nginx": "docker.io", "registry.example.com/x": "registry.example.com",
+	} {
+		if got := RegistryHost(ref); got != want {
+			t.Errorf("RegistryHost(%q) = %q; want %q", ref, got, want)
+		}
+	}
+}
+
+func TestPullSendsCredentials(t *testing.T) {
+	var got AuthConfig
+	c := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		b, err := base64.URLEncoding.DecodeString(r.Header.Get("X-Registry-Auth"))
+		if err == nil {
+			json.Unmarshal(b, &got)
+		}
+		io.WriteString(w, `{"status":"Status: Downloaded newer image"}`+"\n")
+	})
+	auth := &AuthConfig{Username: "bot", Password: "s3cr3t+/=", ServerAddress: "ghcr.io"}
+	if err := c.Pull(context.Background(), "ghcr.io/org/private:1", auth, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got != *auth {
+		t.Fatalf("daemon received %+v", got)
 	}
 }

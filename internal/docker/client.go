@@ -77,6 +77,11 @@ func Available(socket string) bool {
 // do sends a request to /v<APIVersion><path>. body, if not nil, is sent as
 // JSON. Non-2xx responses (other than 304) become *Error.
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body any) (*http.Response, error) {
+	return c.doHeader(ctx, method, path, query, body, nil)
+}
+
+// doHeader is do with extra request headers (e.g. registry credentials).
+func (c *Client) doHeader(ctx context.Context, method, path string, query url.Values, body any, header http.Header) (*http.Response, error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -95,6 +100,9 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	for k, v := range header {
+		req.Header[k] = v
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {

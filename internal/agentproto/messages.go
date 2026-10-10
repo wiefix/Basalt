@@ -3,6 +3,7 @@ package agentproto
 import (
 	"time"
 
+	"github.com/wiefix/basalt/internal/docker"
 	"github.com/wiefix/basalt/internal/files"
 	"github.com/wiefix/basalt/internal/proxy"
 	"github.com/wiefix/basalt/internal/sftpd"
@@ -187,6 +188,19 @@ type AppSpec struct {
 	Volumes      []AppVolume       `json:"volumes,omitempty"`
 	MemoryMB     int               `json:"memory_mb,omitempty"`
 	CPUs         float64           `json:"cpus,omitempty"`
+	// RegistryAuth holds credentials for the image's registry (private
+	// images). Used for the pull only; the agent does not keep them.
+	RegistryAuth *docker.AuthConfig `json:"registry_auth,omitempty"`
+	// PruneImages are images of earlier deployments to remove once this
+	// one has succeeded.
+	PruneImages []ImageRef `json:"prune_images,omitempty"`
+}
+
+// ImageRef is an image an app was deployed from: the reference used and
+// the repository digest it resolved to.
+type ImageRef struct {
+	Ref    string `json:"ref"`
+	Digest string `json:"digest,omitempty"`
 }
 
 // AppVolume is a persistent named volume mounted at Path.
@@ -211,6 +225,8 @@ type AppRequest struct {
 	DeleteVolumes bool `json:"delete_volumes,omitempty"`
 	// Tail is the number of log lines to return (app_logs).
 	Tail int `json:"tail,omitempty"`
+	// PruneImages are the app's images to remove with it (app_delete).
+	PruneImages []ImageRef `json:"prune_images,omitempty"`
 }
 
 // AppStatus describes the container currently serving an app.

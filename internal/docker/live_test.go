@@ -32,13 +32,13 @@ func TestLiveDaemon(t *testing.T) {
 
 	const image = "busybox:1.37"
 	pulls := 0
-	if err := c.Pull(ctx, image, func(PullProgress) { pulls++ }); err != nil {
+	if err := c.Pull(ctx, image, nil, func(PullProgress) { pulls++ }); err != nil {
 		t.Fatal(err)
 	}
 	if pulls == 0 {
 		t.Error("no pull progress reported")
 	}
-	if err := c.Pull(ctx, "busybox:this-tag-does-not-exist", nil); err == nil {
+	if err := c.Pull(ctx, "busybox:this-tag-does-not-exist", nil, nil); err == nil {
 		t.Fatal("pull of a missing tag succeeded")
 	}
 	if _, err := c.ImageInspect(ctx, image); err != nil {

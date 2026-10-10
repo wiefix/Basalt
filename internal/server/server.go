@@ -41,6 +41,9 @@ type Options struct {
 	SetupTokenFile string
 	// Now is the clock; defaults to time.Now.
 	Now func() time.Time
+	// ImagesKept is how many images of recent deployments each app keeps
+	// on its server (default 3).
+	ImagesKept int
 }
 
 type Server struct {
@@ -54,6 +57,7 @@ type Server struct {
 	agents        AgentHub
 	agentURL      string
 	now           func() time.Time
+	imagesKept    int
 
 	setupMu    sync.Mutex
 	setupToken string
@@ -71,6 +75,9 @@ func New(o Options) *Server {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	if o.ImagesKept <= 0 {
+		o.ImagesKept = defaultImagesKept
+	}
 	return &Server{
 		log:           o.Log,
 		db:            o.DB,
@@ -82,6 +89,7 @@ func New(o Options) *Server {
 		agents:        o.Agents,
 		agentURL:      o.AgentURL,
 		now:           o.Now,
+		imagesKept:    o.ImagesKept,
 		setupToken:    o.SetupToken,
 		ipLimiter:     auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
 		emailLimiter:  auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
@@ -142,6 +150,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleViewer, s.handleListSFTPUsers))
 	mux.Handle("POST /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleAdmin, s.handleCreateSFTPUser))
 	mux.Handle("DELETE /api/v1/sites/{id}/sftp-users/{uid}", s.requireRole(store.RoleAdmin, s.handleDeleteSFTPUser))
+
+	mux.Handle("GET /api/v1/registries", s.requireRole(store.RoleAdmin, s.handleListRegistries))
+	mux.Handle("POST /api/v1/registries", s.requireRole(store.RoleAdmin, s.handleCreateRegistry))
+	mux.Handle("PUT /api/v1/registries/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateRegistry))
+	mux.Handle("DELETE /api/v1/registries/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteRegistry))
 
 	mux.Handle("GET /api/v1/apps", s.requireRole(store.RoleViewer, s.handleListApps))
 	mux.Handle("POST /api/v1/apps", s.requireRole(store.RoleAdmin, s.handleCreateApp))

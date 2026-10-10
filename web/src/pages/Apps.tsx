@@ -157,7 +157,15 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
           <Field label="Name">
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-api" required autoFocus />
           </Field>
-          <Field label="Image" help="Any public image, e.g. nginx:1.27 or ghcr.io/org/app:v1. Pin a version rather than latest.">
+          <Field
+            label="Image"
+            help={
+              <>
+                e.g. nginx:1.27 or ghcr.io/org/app:v1. Pin a version rather than latest. Private images need credentials
+                under <Link to="/registries">Registries</Link>.
+              </>
+            }
+          >
             <input className="input mono" value={image} onChange={(e) => setImage(e.target.value)} placeholder="traefik/whoami:v1.10" required />
           </Field>
           <Field label="HTTP port" help="The port the app listens on inside the container. 0 for background workers.">

@@ -38,7 +38,10 @@ type panel struct {
 	hc       *http.Client
 }
 
-func startPanel(t *testing.T) *panel {
+func startPanel(t *testing.T) *panel { return startPanelWith(t, server.Options{}) }
+
+// startPanelWith starts a panel; o supplies options other than the wiring.
+func startPanelWith(t *testing.T, o server.Options) *panel {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -69,11 +72,10 @@ func startPanel(t *testing.T) *panel {
 	go hub.ServeListener(ctx, ln)
 	agentURL := "https://" + ln.Addr().String()
 
-	api := httptest.NewServer(server.New(server.Options{
-		Log: log, DB: db, Box: box,
-		Hasher:     auth.NewHasher(auth.Argon2Params{Memory: 1024, Time: 1, Threads: 1}, 4),
-		SetupToken: "setup", Agents: hub, AgentURL: agentURL,
-	}).Handler())
+	o.Log, o.DB, o.Box = log, db, box
+	o.Hasher = auth.NewHasher(auth.Argon2Params{Memory: 1024, Time: 1, Threads: 1}, 4)
+	o.SetupToken, o.Agents, o.AgentURL = "setup", hub, agentURL
+	api := httptest.NewServer(server.New(o).Handler())
 	t.Cleanup(api.Close)
 
 	jar, _ := cookiejar.New(nil)

@@ -287,7 +287,7 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		}
 		switch typ {
 		case agentproto.TypeAppDelete:
-			return struct{}{}, a.apps.Delete(ctx, req.AppID, req.DeleteVolumes)
+			return struct{}{}, a.apps.Delete(ctx, req.AppID, req.DeleteVolumes, req.PruneImages)
 		case agentproto.TypeAppStatus:
 			return a.apps.Status(ctx, req.AppID)
 		}

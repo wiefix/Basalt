@@ -16,6 +16,7 @@ const (
 	MaxEnvVars      = 200
 	MaxEnvValueSize = 32 << 10
 	MaxVolumes      = 20
+	MaxPruneImages  = 100
 )
 
 var (
@@ -84,5 +85,24 @@ func (s *AppSpec) Validate() error {
 	if err := ValidateEnv(s.Env); err != nil {
 		return err
 	}
+	if a := s.RegistryAuth; a != nil && (len(a.Username) > 256 || len(a.Password) > 4096 || len(a.ServerAddress) > 256) {
+		return errors.New("invalid registry credentials")
+	}
+	if err := ValidateImageRefs(s.PruneImages); err != nil {
+		return err
+	}
 	return ValidateVolumes(s.Volumes)
+}
+
+// ValidateImageRefs checks images listed for removal.
+func ValidateImageRefs(refs []ImageRef) error {
+	if len(refs) > MaxPruneImages {
+		return fmt.Errorf("at most %d images to remove", MaxPruneImages)
+	}
+	for _, r := range refs {
+		if !docker.ValidRef(r.Ref) || r.Digest != "" && (!docker.ValidRef(r.Digest) || !strings.Contains(r.Digest, "@sha256:")) {
+			return fmt.Errorf("invalid image to remove %q", r.Ref)
+		}
+	}
+	return nil
 }
