@@ -3,7 +3,10 @@
 // bidirectional HTTP/2 stream secured with mutual TLS.
 //
 // Either side may send requests (id > 0), replies (reply = true, same id) and
-// notifications (id = 0). Both sides send heartbeats; a silent peer is dropped.
+// notifications (id = 0). A request may be answered with stream frames
+// (type "stream", same id) before its reply, and the caller may cancel it
+// (type "cancel", same id). Both sides send heartbeats; a silent peer is
+// dropped.
 package agentproto
 
 import (
@@ -26,6 +29,9 @@ type Envelope struct {
 	Reply   bool            `json:"reply,omitempty"`
 	Payload json.RawMessage `json:"payload,omitempty"`
 	Error   string          `json:"error,omitempty"`
+	// Stream, on a request, says the caller accepts stream frames (type
+	// "stream", same id) before the reply.
+	Stream bool `json:"stream,omitempty"`
 }
 
 func WriteFrame(w io.Writer, e *Envelope) error {

@@ -1,7 +1,9 @@
 package e2e
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -68,6 +70,24 @@ func TestAppValidationAndRoles(t *testing.T) {
 	// Rolling back needs a successful deployment.
 	p.call(http.StatusUnprocessableEntity, "POST", base+"/deploy", map[string]any{"rollback_to": 999})
 
+	// Live views: the agent has no Docker, which both streams report.
+	ev, stop := p.events(base + "/logs/stream?tail=10")
+	end := waitEvent(t, ev, "end")
+	stop()
+	if !strings.Contains(end.data, "Docker is not available") {
+		t.Fatalf("log stream end = %s", end.data)
+	}
+	dep := p.call(http.StatusAccepted, "POST", base+"/deploy", map[string]any{})["deployment"].(map[string]any)
+	d, log := followDeployment(t, p, base, jsonID(dep["id"]))
+	if d["status"] != "failed" || !strings.Contains(log, "Docker is not available") {
+		t.Fatalf("followed deployment: %v, log %q", d, log)
+	}
+	// A finished deployment's stream replays its log and outcome at once.
+	if d2, log2 := followDeployment(t, p, base, jsonID(dep["id"])); d2["status"] != "failed" || log2 != log {
+		t.Fatalf("replayed deployment: %v, log %q (live %q)", d2, log2, log)
+	}
+	p.call(http.StatusNotFound, "GET", base+"/deployments/999/stream", nil)
+
 	p.call(http.StatusCreated, "POST", "/api/v1/users", map[string]string{
 		"email": "v@example.com", "name": "V", "password": "viewer password 1", "role": "viewer",
 	})
@@ -78,6 +98,7 @@ func TestAppValidationAndRoles(t *testing.T) {
 	viewer.call(200, "GET", base+"/deployments", nil)
 	viewer.call(http.StatusForbidden, "GET", base+"/env", nil)
 	viewer.call(http.StatusForbidden, "GET", base+"/logs", nil)
+	viewer.call(http.StatusForbidden, "GET", base+"/logs/stream", nil)
 	viewer.call(http.StatusForbidden, "POST", base+"/deploy", map[string]any{})
 	viewer.call(http.StatusForbidden, "DELETE", base, nil)
 
@@ -131,21 +152,14 @@ func TestAppsWithDocker(t *testing.T) {
 	// Before any deployment the domain answers 503.
 	eventually(t, "503 before deploy", func() bool { code, _ := h.get("whoami.localhost", "/"); return code == 503 })
 
+	// deploy follows the deployment live and returns its outcome with the
+	// streamed log.
 	deploy := func(body map[string]any) map[string]any {
 		t.Helper()
 		dep := p.call(http.StatusAccepted, "POST", base+"/deploy", body)["deployment"].(map[string]any)
-		did := jsonID(dep["id"])
-		var d map[string]any
-		deadline := time.Now().Add(3 * time.Minute)
-		for time.Now().Before(deadline) {
-			d = p.call(200, "GET", base+"/deployments/"+did, nil)["deployment"].(map[string]any)
-			if d["status"] != "running" {
-				return d
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-		t.Fatalf("deployment %s did not finish", did)
-		return nil
+		d, log := followDeployment(t, p, base, jsonID(dep["id"]))
+		d["log"] = log
+		return d
 	}
 
 	p.call(200, "PUT", base+"/env", map[string]any{"env": map[string]string{"WHOAMI_NAME": "first"}})
@@ -162,6 +176,13 @@ func TestAppsWithDocker(t *testing.T) {
 	if st["state"] != "running" || jsonID(st["deployment_id"]) != jsonID(d1["id"]) {
 		t.Fatalf("status = %v", st)
 	}
+	if !strings.Contains(d1["log"].(string), "Traffic switched") {
+		t.Fatalf("live deployment log: %q", d1["log"])
+	}
+	// Follow the container output; the stream moves to the next container.
+	logs, stopLogs := p.events(base + "/logs/stream?tail=20")
+	defer stopLogs()
+	waitLog(t, logs, "Starting up on port 80")
 
 	// A second deployment replaces the container without dropping requests.
 	var served, failed atomic.Int64
@@ -194,6 +215,9 @@ func TestAppsWithDocker(t *testing.T) {
 	})
 	close(stop)
 	<-done
+	waitLog(t, logs, "now following deployment")
+	waitLog(t, logs, "Starting up on port 80")
+	stopLogs()
 	t.Logf("during redeploy: %d served, %d failed", served.Load(), failed.Load())
 	if failed.Load() != 0 || served.Load() == 0 {
 		t.Fatalf("requests failed during a zero-downtime deployment: %d of %d; first: %v",
@@ -220,9 +244,9 @@ func TestAppsWithDocker(t *testing.T) {
 		t.Fatalf("rollback: %v", rb)
 	}
 
-	logs := p.call(200, "GET", base+"/logs?tail=50", nil)["log"].(string)
-	if !strings.Contains(logs, "Starting up on port 80") {
-		t.Fatalf("logs = %q", logs)
+	tail := p.call(200, "GET", base+"/logs?tail=50", nil)["log"].(string)
+	if !strings.Contains(tail, "Starting up on port 80") {
+		t.Fatalf("logs = %q", tail)
 	}
 
 	// Deleting the app (keeping data) removes containers and the network.
@@ -242,4 +266,119 @@ func TestAppsWithDocker(t *testing.T) {
 		code, _ := h.get("whoami.localhost", "/")
 		return code != 200 && code != 503
 	})
+}
+
+type sseEvent struct{ name, data string }
+
+// events opens a server-sent event stream; stop closes it.
+func (p *panel) events(path string) (<-chan sseEvent, func()) {
+	p.t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, "GET", p.api.URL+path, nil)
+	resp, err := p.hc.Do(req)
+	if err != nil {
+		p.t.Fatal(err)
+	}
+	if resp.StatusCode != 200 || resp.Header.Get("Content-Type") != "text/event-stream" {
+		resp.Body.Close()
+		p.t.Fatalf("GET %s: %d %s", path, resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+	ch := make(chan sseEvent, 64)
+	go func() {
+		defer close(ch)
+		defer resp.Body.Close()
+		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(nil, 4<<20)
+		var ev sseEvent
+		for sc.Scan() {
+			line := sc.Text()
+			switch {
+			case line == "":
+				if ev.name != "" {
+					select {
+					case ch <- ev:
+					case <-ctx.Done():
+						return
+					}
+				}
+				ev = sseEvent{}
+			case strings.HasPrefix(line, "event: "):
+				ev.name = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "data: "):
+				ev.data += strings.TrimPrefix(line, "data: ")
+			}
+		}
+	}()
+	return ch, cancel
+}
+
+func waitEvent(t *testing.T, ch <-chan sseEvent, name string) sseEvent {
+	t.Helper()
+	timeout := time.After(3 * time.Minute)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("stream ended before a %q event", name)
+			}
+			if ev.name == name {
+				return ev
+			}
+		case <-timeout:
+			t.Fatalf("no %q event", name)
+		}
+	}
+}
+
+// waitLog reads "log" events until one contains want.
+func waitLog(t *testing.T, ch <-chan sseEvent, want string) {
+	t.Helper()
+	timeout := time.After(time.Minute)
+	var seen strings.Builder
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("stream ended without %q; got:\n%s", want, seen.String())
+			}
+			var c struct{ Text string }
+			json.Unmarshal([]byte(ev.data), &c)
+			seen.WriteString(c.Text)
+			if strings.Contains(c.Text, want) {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("no %q in the log stream; got:\n%s", want, seen.String())
+		}
+	}
+}
+
+// followDeployment reads a deployment's event stream to the end and returns
+// the outcome and the log text received.
+func followDeployment(t *testing.T, p *panel, base, did string) (map[string]any, string) {
+	t.Helper()
+	ch, stop := p.events(base + "/deployments/" + did + "/stream")
+	defer stop()
+	var log strings.Builder
+	timeout := time.After(3 * time.Minute)
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				t.Fatalf("deployment %s: stream ended without an outcome", did)
+			}
+			switch ev.name {
+			case "log":
+				var c struct{ Text string }
+				json.Unmarshal([]byte(ev.data), &c)
+				log.WriteString(c.Text)
+			case "end":
+				var d map[string]any
+				json.Unmarshal([]byte(ev.data), &d)
+				return d, log.String()
+			}
+		case <-timeout:
+			t.Fatalf("deployment %s did not finish", did)
+		}
+	}
 }

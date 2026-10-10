@@ -252,7 +252,7 @@ func (h *Hub) handleConnect(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	ip := remoteIP(r)
-	peer := agentproto.NewPeer(r.Body, &deadlineWriter{w: w, rc: rc}, rc.Flush,
+	peer := agentproto.NewPeer(r.Body, &deadlineWriter{w: w, rc: rc, timeout: writeTimeout}, nil,
 		func(ctx context.Context, typ string, payload json.RawMessage) (any, error) {
 			return h.handleAgentMessage(ctx, id, ip, typ, payload)
 		})
@@ -335,13 +335,19 @@ func (h *Hub) Connected(id int64) bool {
 
 // Call sends a request to a connected agent.
 func (h *Hub) Call(ctx context.Context, id int64, msgType string, req, resp any) error {
+	return h.Stream(ctx, id, msgType, req, resp, nil)
+}
+
+// Stream sends a request whose answer is streamed: fn receives the frames
+// in order before the reply is decoded into resp.
+func (h *Hub) Stream(ctx context.Context, id int64, msgType string, req, resp any, fn func(json.RawMessage) error) error {
 	h.mu.Lock()
 	c := h.conns[id]
 	h.mu.Unlock()
 	if c == nil {
 		return ErrAgentOffline
 	}
-	return c.peer.Call(ctx, msgType, req, resp)
+	return c.peer.Stream(ctx, msgType, req, resp, fn)
 }
 
 // Disconnect drops the agent's stream, e.g. after the server was removed.
@@ -359,16 +365,25 @@ func (h *Hub) internalError(w http.ResponseWriter, what string, err error) {
 	http.Error(w, "internal error", http.StatusInternalServerError)
 }
 
-// deadlineWriter bounds every write so a stalled agent cannot block the
-// writer forever (HTTP/2 flow control would otherwise wait indefinitely).
+// deadlineWriter writes and flushes each frame within a deadline, so a
+// stalled agent cannot block the writer forever (HTTP/2 flow control would
+// otherwise wait indefinitely). The deadline is lifted after the write: an
+// HTTP/2 write deadline left armed resets the stream when it passes, even
+// with no write in progress, which dropped idle agents.
 type deadlineWriter struct {
-	w  io.Writer
-	rc *http.ResponseController
+	w       io.Writer
+	rc      *http.ResponseController
+	timeout time.Duration
 }
 
 func (d *deadlineWriter) Write(p []byte) (int, error) {
-	_ = d.rc.SetWriteDeadline(time.Now().Add(writeTimeout))
-	return d.w.Write(p)
+	_ = d.rc.SetWriteDeadline(time.Now().Add(d.timeout))
+	defer d.rc.SetWriteDeadline(time.Time{})
+	n, err := d.w.Write(p)
+	if err != nil {
+		return n, err
+	}
+	return n, d.rc.Flush()
 }
 
 func remoteIP(r *http.Request) string {

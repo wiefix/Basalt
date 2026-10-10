@@ -310,6 +310,9 @@ export const api = {
   deployment: (id: number, did: number) => get<{ deployment: Deployment }>(`/api/v1/apps/${id}/deployments/${did}`),
   appStatus: (id: number) => get<{ status: AppStatus }>(`/api/v1/apps/${id}/status`),
   appLogs: (id: number, tail: number) => get<{ log: string }>(`/api/v1/apps/${id}/logs?tail=${tail}`),
+  // Server-sent event streams (see useEventStream).
+  appLogsStreamUrl: (id: number, tail: number) => `/api/v1/apps/${id}/logs/stream?tail=${tail}`,
+  deploymentStreamUrl: (id: number, did: number) => `/api/v1/apps/${id}/deployments/${did}/stream`,
 
   sftpUsers: (siteId: number) =>
     get<{ users: SFTPUser[]; connection: SFTPConnection | null }>(`/api/v1/sites/${siteId}/sftp-users`),

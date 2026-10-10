@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
@@ -18,6 +19,7 @@ import (
 type AgentHub interface {
 	Connected(serverID int64) bool
 	Call(ctx context.Context, serverID int64, msgType string, req, resp any) error
+	Stream(ctx context.Context, serverID int64, msgType string, req, resp any, fn func(json.RawMessage) error) error
 	Disconnect(serverID int64)
 	CAFingerprint() string
 }

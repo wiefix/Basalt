@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
 import { api, can, type App, type AppVolume, type Deployment, type User } from "../api";
 import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
+import { useEventStream, type StreamState } from "../components/stream";
 import { SyncBadge } from "./Server";
 
 export function AppPage({ user }: { user: User }) {
@@ -78,14 +79,22 @@ function Overview({ app, user }: { app: App; user: User }) {
   const deployments = useQuery({
     queryKey: ["deployments", app.id],
     queryFn: () => api.deployments(app.id),
-    refetchInterval: (q) => (q.state.data?.deployments.some((d) => d.status === "running") ? 2000 : 15_000),
+    refetchInterval: 15_000,
   });
-  const running = deployments.data?.deployments.some((d) => d.status === "running") ?? false;
+  const runningDep = deployments.data?.deployments.find((d) => d.status === "running");
+  const running = !!runningDep;
   const status = useQuery({
     queryKey: ["app-status", app.id],
     queryFn: () => api.appStatus(app.id),
-    refetchInterval: running ? 2000 : 10_000,
+    refetchInterval: 10_000,
     retry: false,
+  });
+  // The running deployment's stream tells when it ends; no polling needed.
+  useEventStream(runningDep ? api.deploymentStreamUrl(app.id, runningDep.id) : null, {
+    end: () => {
+      qc.invalidateQueries({ queryKey: ["deployments", app.id] });
+      qc.invalidateQueries({ queryKey: ["app-status", app.id] });
+    },
   });
   const deploy = useMutation({
     mutationFn: (rollbackTo?: number) => api.deployApp(app.id, rollbackTo),
@@ -205,12 +214,21 @@ function Overview({ app, user }: { app: App; user: User }) {
 }
 
 function DeploymentModal({ appId, id, onClose }: { appId: number; id: number; onClose: () => void }) {
-  const d = useQuery({
-    queryKey: ["deployment", appId, id],
-    queryFn: () => api.deployment(appId, id),
-    refetchInterval: (q) => (q.state.data?.deployment.status === "running" ? 1000 : false),
-  });
+  const qc = useQueryClient();
+  const d = useQuery({ queryKey: ["deployment", appId, id], queryFn: () => api.deployment(appId, id) });
   const dep = d.data?.deployment;
+  const following = dep?.status === "running";
+  const [live, setLive] = useState("");
+  useEventStream(following ? api.deploymentStreamUrl(appId, id) : null, {
+    open: () => setLive(""), // the stream starts from the beginning of the log
+    log: (c: { text: string }) => setLive((t) => t + c.text),
+    end: () => {
+      qc.invalidateQueries({ queryKey: ["deployment", appId, id] });
+      qc.invalidateQueries({ queryKey: ["deployments", appId] });
+      qc.invalidateQueries({ queryKey: ["app-status", appId] });
+    },
+  });
+  const text = following ? live : dep?.log;
   return (
     <Modal
       wide
@@ -228,7 +246,7 @@ function DeploymentModal({ appId, id, onClose }: { appId: number; id: number; on
       ) : (
         <div className="stack">
           {dep?.error && <div className="alert err small">{dep.error}</div>}
-          <pre className="logbox">{dep?.log || (dep?.status === "running" ? "Waiting for the server…" : "(no output)")}</pre>
+          <LogView text={text || (following ? "Waiting for the server…" : "(no output)")} />
           {dep?.image_digest && <div className="faint small mono">{dep.image_digest}</div>}
         </div>
       )}
@@ -236,19 +254,71 @@ function DeploymentModal({ appId, id, onClose }: { appId: number; id: number; on
   );
 }
 
+// LogView shows log text and keeps it scrolled to the end unless the user
+// scrolled up to read.
+function LogView({ text, tall }: { text: string; tall?: boolean }) {
+  const ref = useRef<HTMLPreElement>(null);
+  const stick = useRef(true);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el && stick.current) el.scrollTop = el.scrollHeight;
+  }, [text]);
+  return (
+    <pre
+      ref={ref}
+      className={tall ? "logbox tall" : "logbox"}
+      onScroll={(e) => {
+        const el = e.currentTarget;
+        stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+      }}
+    >
+      {text}
+    </pre>
+  );
+}
+
+const MAX_LOG_CHARS = 1_000_000;
+
+// Drop the oldest lines once the view holds too much text.
+function trimLog(t: string): string {
+  if (t.length <= MAX_LOG_CHARS) return t;
+  const cut = t.indexOf("\n", t.length - MAX_LOG_CHARS * 0.8);
+  return cut < 0 ? t.slice(-MAX_LOG_CHARS) : t.slice(cut + 1);
+}
+
+function StreamBadge({ state, ended }: { state: StreamState; ended: string | null }) {
+  if (ended !== null) return <span className="badge err" title={ended}>stopped</span>;
+  if (state === "open") return <span className="badge ok">live</span>;
+  if (state === "failed") return <span className="badge err">unavailable</span>;
+  return <span className="badge warn">connecting</span>;
+}
+
 function LogsTab({ app }: { app: App }) {
   const [tail, setTail] = useState(200);
-  const [follow, setFollow] = useState(false);
-  const logs = useQuery({
+  const [live, setLive] = useState(true);
+  const [text, setText] = useState("");
+  const [ended, setEnded] = useState<string | null>(null);
+  const snapshot = useQuery({
     queryKey: ["app-logs", app.id, tail],
     queryFn: () => api.appLogs(app.id, tail),
-    refetchInterval: follow ? 3000 : false,
+    enabled: !live,
     retry: false,
+  });
+  const state = useEventStream(live ? api.appLogsStreamUrl(app.id, tail) : null, {
+    open: () => {
+      setText(""); // a (re)connected stream starts with the last lines again
+      setEnded(null);
+    },
+    log: (c: { text: string }) => setText((t) => trimLog(t + c.text)),
+    end: (d: { error?: string } | null) => setEnded(d?.error || "the stream ended"),
   });
   return (
     <div className="card">
       <div className="card-head">
-        <h2>Container output</h2>
+        <div className="row">
+          <h2>Container output</h2>
+          {live && <StreamBadge state={state} ended={ended} />}
+        </div>
         <div className="row">
           <select className="input" style={{ width: "auto", height: 28 }} value={tail} onChange={(e) => setTail(Number(e.target.value))}>
             {[100, 200, 1000, 5000].map((n) => (
@@ -258,20 +328,27 @@ function LogsTab({ app }: { app: App }) {
             ))}
           </select>
           <label className="check small">
-            <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> auto-refresh
+            <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} /> live
           </label>
-          <button className="btn sm icon ghost" title="Refresh" onClick={() => logs.refetch()}>
-            <Icon name="refresh" size={14} />
-          </button>
+          {!live && (
+            <button className="btn sm icon ghost" title="Refresh" onClick={() => snapshot.refetch()}>
+              <Icon name="refresh" size={14} />
+            </button>
+          )}
         </div>
       </div>
       <div className="card-body">
-        {logs.isPending ? (
+        {live ? (
+          <>
+            {ended && <div className="alert err small" style={{ marginBottom: 12 }}>{ended}</div>}
+            <LogView tall text={text || (state === "open" ? "(no output yet)" : "Connecting…")} />
+          </>
+        ) : snapshot.isPending ? (
           <Loading />
-        ) : logs.error ? (
-          <ErrorBox error={logs.error} />
+        ) : snapshot.error ? (
+          <ErrorBox error={snapshot.error} />
         ) : (
-          <pre className="logbox tall">{logs.data.log || "(no output yet)"}</pre>
+          <LogView tall text={snapshot.data.log || "(no output yet)"} />
         )}
       </div>
     </div>

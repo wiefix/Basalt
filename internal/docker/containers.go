@@ -210,7 +210,7 @@ func (c *Client) ContainerLogs(ctx context.Context, id string, o LogsOptions) (i
 		q.Set("tail", strconv.Itoa(o.Tail))
 	}
 	if !o.Since.IsZero() {
-		q.Set("since", strconv.FormatInt(o.Since.Unix(), 10))
+		q.Set("since", fmt.Sprintf("%d.%09d", o.Since.Unix(), o.Since.Nanosecond()))
 	}
 	if o.Timestamps {
 		q.Set("timestamps", "1")

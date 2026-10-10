@@ -267,7 +267,19 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		if err := json.Unmarshal(payload, &spec); err != nil {
 			return nil, err
 		}
-		return a.apps.Deploy(ctx, spec), nil
+		return a.apps.Deploy(ctx, spec, agentproto.StreamSender(ctx)), nil
+	case agentproto.TypeAppLogsFollow:
+		var req agentproto.AppRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		send := agentproto.StreamSender(ctx)
+		if send == nil {
+			return nil, errors.New("following logs needs a streaming request")
+		}
+		return struct{}{}, a.apps.FollowLogs(ctx, req.AppID, req.Tail, func(s string) error {
+			return send(agentproto.LogChunk{Text: s})
+		})
 	case agentproto.TypeAppDelete, agentproto.TypeAppStatus, agentproto.TypeAppLogs:
 		var req agentproto.AppRequest
 		if err := json.Unmarshal(payload, &req); err != nil {

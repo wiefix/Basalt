@@ -384,20 +384,31 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request, p *prin
 		Volumes: app.Volumes, MemoryMB: app.MemoryMB, CPUs: app.CPUs,
 	}
 	// The deployment outlives the request; a panel restart marks it failed.
-	go s.runDeployment(app.ServerID, dep.ID, spec)
+	// Its output can be followed live from now on.
+	live := s.live.start(dep.ID)
+	go s.runDeployment(app.ServerID, dep.ID, spec, live)
 	writeJSON(w, http.StatusAccepted, map[string]any{"deployment": viewDeployment(dep, false)})
 }
 
-func (s *Server) runDeployment(serverID, depID int64, spec agentproto.AppSpec) {
+func (s *Server) runDeployment(serverID, depID int64, spec agentproto.AppSpec, live *liveLog) {
 	ctx, cancel := context.WithTimeout(context.Background(), deployTimeout)
 	defer cancel()
 	var resp agentproto.AppDeployResponse
-	if err := s.agents.Call(ctx, serverID, agentproto.TypeAppDeploy, spec, &resp); err != nil {
+	err := s.agents.Stream(ctx, serverID, agentproto.TypeAppDeploy, spec, &resp, func(raw json.RawMessage) error {
+		var c agentproto.LogChunk
+		if json.Unmarshal(raw, &c) == nil {
+			live.append(c.Text)
+		}
+		return nil
+	})
+	if err != nil {
 		resp = agentproto.AppDeployResponse{Error: "server unreachable: " + err.Error()}
 	}
 	if err := s.db.FinishDeployment(context.Background(), depID, resp.OK, resp.Error, resp.Log, resp.ImageDigest); err != nil {
 		s.log.Error("record deployment", "err", err, "deployment_id", depID)
 	}
+	// Followers now read the outcome from the database.
+	s.live.end(depID)
 	action := "app.deploy_failed"
 	if resp.OK {
 		action = "app.deployed"
@@ -484,6 +495,121 @@ func (s *Server) handleAppLogs(w http.ResponseWriter, r *http.Request, p *princi
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"log": resp.Log})
+}
+
+// handleAppLogsStream follows the app's container output as server-sent
+// events: "log" {text}, and "end" {error} if the server stops it.
+func (s *Server) handleAppLogsStream(w http.ResponseWriter, r *http.Request, p *principal) {
+	app, ok := s.pathApp(w, r)
+	if !ok {
+		return
+	}
+	tail := 200
+	if v := r.URL.Query().Get("tail"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > maxLogTail {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("tail must be between 1 and %d", maxLogTail))
+			return
+		}
+		tail = n
+	}
+	if !s.agents.Connected(app.ServerID) {
+		writeError(w, http.StatusConflict, "the server is offline")
+		return
+	}
+	if !s.acquireStream(p.user.ID) {
+		writeError(w, http.StatusTooManyRequests, "too many open log streams")
+		return
+	}
+	defer s.releaseStream(p.user.ID)
+	ev, err := startSSE(w)
+	if err != nil {
+		return
+	}
+	ctx := r.Context()
+	stop := ev.keepAlive(ctx)
+	defer stop()
+	err = s.agents.Stream(ctx, app.ServerID, agentproto.TypeAppLogsFollow,
+		agentproto.AppRequest{AppID: app.ID, Tail: tail}, nil, func(raw json.RawMessage) error {
+			var c agentproto.LogChunk
+			if err := json.Unmarshal(raw, &c); err != nil {
+				return err
+			}
+			return ev.send("log", c)
+		})
+	if ctx.Err() == nil {
+		ev.send("end", map[string]string{"error": agentErrorText(err)})
+	}
+}
+
+// handleDeploymentStream sends a deployment's log as server-sent events
+// while it runs ("log" {text}) and then its outcome ("end", a deployment).
+func (s *Server) handleDeploymentStream(w http.ResponseWriter, r *http.Request, p *principal) {
+	app, ok := s.pathApp(w, r)
+	if !ok {
+		return
+	}
+	id, _ := strconv.ParseInt(r.PathValue("did"), 10, 64)
+	d, err := s.db.DeploymentByID(r.Context(), app.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "deployment not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, r, "load deployment", err)
+		return
+	}
+	if !s.acquireStream(p.user.ID) {
+		writeError(w, http.StatusTooManyRequests, "too many open log streams")
+		return
+	}
+	defer s.releaseStream(p.user.ID)
+	ev, err := startSSE(w)
+	if err != nil {
+		return
+	}
+	ctx := r.Context()
+	stop := ev.keepAlive(ctx)
+	defer stop()
+	sent := false // live output was sent; the stored log would repeat it
+	sendLog := func(text string) error {
+		sent = true
+		return ev.send("log", agentproto.LogChunk{Text: text})
+	}
+	for d.Status == "running" {
+		if live := s.live.get(d.ID); live != nil {
+			if live.follow(ctx, sendLog) != nil {
+				return
+			}
+		} else {
+			// Finishing right now: its outcome is about to be stored.
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+		if d, err = s.db.DeploymentByID(ctx, app.ID, id); err != nil {
+			return
+		}
+	}
+	if !sent && d.Log != "" {
+		sendLog(d.Log)
+	}
+	ev.send("end", viewDeployment(d, false))
+}
+
+// agentErrorText is the message shown for a failed agent call.
+func agentErrorText(err error) string {
+	var re *agentproto.RemoteError
+	switch {
+	case err == nil:
+		return ""
+	case errors.As(err, &re):
+		return re.Msg
+	default:
+		return "server unreachable: " + err.Error()
+	}
 }
 
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request, p *principal) {

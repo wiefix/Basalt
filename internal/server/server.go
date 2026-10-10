@@ -61,6 +61,10 @@ type Server struct {
 	ipLimiter    *auth.Limiter // all credential endpoints, per client IP
 	emailLimiter *auth.Limiter // password attempts, per account
 	mfaLimiter   *auth.Limiter // second-factor attempts, per account
+
+	live     *liveLogs // output of running deployments
+	streamMu sync.Mutex
+	streams  map[int64]int // open event streams per user
 }
 
 func New(o Options) *Server {
@@ -82,6 +86,8 @@ func New(o Options) *Server {
 		ipLimiter:     auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
 		emailLimiter:  auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
 		mfaLimiter:    auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
+		live:          &liveLogs{m: map[int64]*liveLog{}},
+		streams:       map[int64]int{},
 	}
 }
 
@@ -148,8 +154,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/apps/{id}/deploy", s.requireRole(store.RoleMember, s.handleDeployApp))
 	mux.Handle("GET /api/v1/apps/{id}/deployments", s.requireRole(store.RoleViewer, s.handleListDeployments))
 	mux.Handle("GET /api/v1/apps/{id}/deployments/{did}", s.requireRole(store.RoleViewer, s.handleGetDeployment))
+	mux.Handle("GET /api/v1/apps/{id}/deployments/{did}/stream", s.requireRole(store.RoleViewer, s.handleDeploymentStream))
 	mux.Handle("GET /api/v1/apps/{id}/status", s.requireRole(store.RoleViewer, s.handleAppStatus))
 	mux.Handle("GET /api/v1/apps/{id}/logs", s.requireRole(store.RoleMember, s.handleAppLogs))
+	mux.Handle("GET /api/v1/apps/{id}/logs/stream", s.requireRole(store.RoleMember, s.handleAppLogsStream))
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not found")

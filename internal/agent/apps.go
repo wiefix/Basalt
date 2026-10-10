@@ -116,21 +116,34 @@ func (m *appsManager) Upstreams() map[int64]string {
 	return maps.Clone(m.upstreams)
 }
 
-// deployLog collects the messages shown to the user, bounded in size.
-type deployLog struct{ bytes.Buffer }
+// deployLog collects the messages shown to the user, bounded in size, and
+// streams them to the panel as they happen when it follows the deployment.
+type deployLog struct {
+	bytes.Buffer
+	stream func(any) error // nil when not followed
+}
 
 func (l *deployLog) printf(format string, args ...any) {
+	l.write(fmt.Sprintf(time.Now().UTC().Format("15:04:05")+" "+format+"\n", args...))
+}
+
+func (l *deployLog) write(s string) {
 	if l.Len() >= maxDeployLog {
 		return
 	}
-	fmt.Fprintf(l, time.Now().UTC().Format("15:04:05")+" "+format+"\n", args...)
+	l.WriteString(s)
+	if l.stream != nil {
+		// A lost frame only affects the live view; the full log is in the reply.
+		_ = l.stream(agentproto.LogChunk{Text: s})
+	}
 }
 
 // Deploy starts a new container for spec and, once it is ready, switches
 // the proxy to it and stops the previous one. If the new container fails,
-// the previous one keeps serving.
-func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec) agentproto.AppDeployResponse {
-	var lg deployLog
+// the previous one keeps serving. stream (may be nil) receives the log as
+// it is written.
+func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec, stream func(any) error) agentproto.AppDeployResponse {
+	lg := deployLog{stream: stream}
 	fail := func(err error) agentproto.AppDeployResponse {
 		lg.printf("Deployment failed: %v", err)
 		return agentproto.AppDeployResponse{Error: err.Error(), Log: lg.String()}
@@ -174,7 +187,7 @@ func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec) agent
 	}
 	if err := m.waitReady(ctx, dc, spec, id, &lg); err != nil {
 		lg.printf("Last output of the new container:")
-		lg.WriteString(m.tail(context.WithoutCancel(ctx), dc, id, 50))
+		lg.write(m.tail(context.WithoutCancel(ctx), dc, id, 50))
 		dc.ContainerRemove(context.WithoutCancel(ctx), id, true)
 		return fail(err)
 	}

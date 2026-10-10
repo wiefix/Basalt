@@ -13,8 +13,17 @@ import { AppPage } from "./pages/App";
 import { UsersPage } from "./pages/Users";
 import { AccountPage } from "./pages/Account";
 
+// The signed-in user, or null when signed out. A 401 is a normal answer
+// here, not an error: as an error, every refetch (e.g. on window focus) would
+// put the query back into loading and remount the login form.
+const fetchMe = () =>
+  api.me().catch((e) => {
+    if (e instanceof ApiError && e.status === 401) return null;
+    throw e;
+  });
+
 export function useMe() {
-  return useQuery({ queryKey: ["me"], queryFn: api.me, staleTime: 60_000 });
+  return useQuery({ queryKey: ["me"], queryFn: fetchMe, staleTime: 60_000 });
 }
 
 export function App() {
@@ -22,7 +31,7 @@ export function App() {
   const setup = useQuery({ queryKey: ["setup"], queryFn: api.setupStatus, staleTime: Infinity });
   const me = useQuery({
     queryKey: ["me"],
-    queryFn: api.me,
+    queryFn: fetchMe,
     enabled: setup.data?.required === false,
     staleTime: 60_000,
   });
@@ -40,8 +49,7 @@ export function App() {
   if (setup.isPending) return <Loading />;
   if (setup.data?.required) return <SetupPage />;
   if (me.isPending) return <Loading />;
-  const unauthenticated = me.data === null || (me.error instanceof ApiError && me.error.status === 401);
-  if (unauthenticated) return <LoginPage />;
+  if (me.data === null) return <LoginPage />;
   if (me.error) return <div className="auth-page"><div className="alert err">{String(me.error)}</div></div>;
 
   return <Shell user={me.data!.user} />;

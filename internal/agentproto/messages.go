@@ -29,11 +29,14 @@ const (
 	TypeFiles      = "files"
 	TypeSFTPApply  = "sftp_apply"
 	TypeDatabase   = "database"
-	TypeAppDeploy  = "app_deploy"
+	TypeAppDeploy  = "app_deploy" // streams LogChunk frames when asked to
 	TypeAppDelete  = "app_delete"
 	TypeAppStatus  = "app_status"
 	TypeAppLogs    = "app_logs"
-	TypeAppsSync   = "apps_sync"
+	// TypeAppLogsFollow streams LogChunk frames of the app's current
+	// container (and its successors) until cancelled.
+	TypeAppLogsFollow = "app_logs_follow"
+	TypeAppsSync      = "apps_sync"
 )
 
 // EnrollRequest is posted once, authenticated by the one-time token.
@@ -224,6 +227,11 @@ type AppStatus struct {
 
 type AppLogsResponse struct {
 	Log string `json:"log"`
+}
+
+// LogChunk is one stream frame of log output: whole lines.
+type LogChunk struct {
+	Text string `json:"text"`
 }
 
 // AppsSync lists every app the panel knows on this server; the agent
