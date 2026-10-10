@@ -157,7 +157,7 @@ export interface App {
   id: number;
   server_id: number;
   name: string;
-  source: "image" | "git" | "compose";
+  source: "image" | "git" | "compose" | "database";
   image: string;
   git?: GitSettings;
   deploy_key?: string;
@@ -165,6 +165,10 @@ export interface App {
   // Compose apps: the published service (port is its port) and the file's contents without secrets.
   service?: string;
   compose?: ComposeSummary;
+  // Databases: engine id, major version and the apps that reach it.
+  engine?: string;
+  version?: string;
+  links?: number[];
   port: number;
   domains: string[];
   tls: "auto" | "internal";
@@ -227,6 +231,23 @@ export interface ComposeFile {
   port: number;
   warnings: string[];
   error?: string;
+}
+
+export interface Engine {
+  id: string;
+  name: string;
+  versions: string[];
+  port: number;
+  env_var: string;
+  sql: boolean;
+}
+
+export interface DatabaseConnection {
+  host: string;
+  port: number;
+  url: string;
+  env_var: string;
+  credentials: { database?: string; user?: string; password: string; root_password?: string };
 }
 
 export interface Webhook {
@@ -368,8 +389,23 @@ export const api = {
   apps: () => get<{ apps: App[] }>("/api/v1/apps"),
   app: (id: number) => get<{ app: App; sync: Sync }>(`/api/v1/apps/${id}`),
   createApp: (
-    b: AppSettings & { source: string; server_id: number; name: string; domains: string[]; tls: string; compose?: string; service?: string },
+    b: AppSettings & {
+      source: string;
+      server_id: number;
+      name: string;
+      domains: string[];
+      tls: string;
+      compose?: string;
+      service?: string;
+      engine?: string;
+      version?: string;
+    },
   ) => post<{ app: App; sync: Sync; warnings: string[] }>("/api/v1/apps", b),
+  databaseEngines: () => get<{ engines: Engine[] }>("/api/v1/database-engines"),
+  databaseConnection: (id: number) => get<{ connection: DatabaseConnection }>(`/api/v1/apps/${id}/connection`),
+  linkApp: (id: number, appId: number, envVar: string) =>
+    post<{ app: App; attach_error?: string }>(`/api/v1/apps/${id}/links`, { app_id: appId, env_var: envVar }),
+  unlinkApp: (id: number, appId: number) => del<{ app: App; attach_error?: string }>(`/api/v1/apps/${id}/links/${appId}`),
   appCompose: (id: number) => get<ComposeFile>(`/api/v1/apps/${id}/compose`),
   setAppCompose: (id: number, b: { compose: string; service: string; port: number }) =>
     put<{ app: App; warnings: string[] }>(`/api/v1/apps/${id}/compose`, b),
@@ -432,9 +468,16 @@ export function upload(
   });
 }
 
+export const engineNames: Record<string, string> = { postgres: "PostgreSQL", mysql: "MySQL", mariadb: "MariaDB", redis: "Redis" };
+
+// appPath is the page of an app or database.
+export const appPath = (a: Pick<App, "id" | "source">) => `/${a.source === "database" ? "databases" : "apps"}/${a.id}`;
+
 // sourceLabel describes where an app comes from, for lists and headers.
 export const sourceLabel = (a: App) =>
-  a.source === "git"
+  a.source === "database"
+    ? `${engineNames[a.engine ?? ""] ?? a.engine} ${a.version}`
+    : a.source === "git"
     ? `${a.git?.url} · ${a.git?.branch}`
     : a.source === "compose"
       ? `compose · ${(a.compose?.services ?? []).map((s) => s.name).join(", ")}`

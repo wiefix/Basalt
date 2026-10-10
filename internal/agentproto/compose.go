@@ -272,7 +272,7 @@ func (s *AppSpec) ValidateCompose() error {
 	if a := s.RegistryAuths; len(a) > 50 {
 		return errors.New("too many registry credentials")
 	}
-	return nil
+	return ValidateAttach(s.AppID, s.Attach)
 }
 
 // ServiceOrder returns the services in an order that starts every service

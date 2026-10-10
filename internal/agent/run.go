@@ -296,6 +296,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		}
 		log, err := a.apps.Logs(ctx, req.AppID, req.Service, req.Tail)
 		return agentproto.AppLogsResponse{Log: log}, err
+	case agentproto.TypeAppAttach:
+		var req agentproto.AppAttach
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.apps.Attach(ctx, req)
 	case agentproto.TypeAppsSync:
 		var req agentproto.AppsSync
 		if err := json.Unmarshal(payload, &req); err != nil {

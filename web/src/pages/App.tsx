@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
-import { api, can, sourceLabel, type App, type AppVolume, type Deployment, type ServiceStatus, type User } from "../api";
+import { api, appPath, can, sourceLabel, type App, type AppVolume, type Deployment, type ServiceStatus, type User } from "../api";
 import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
 import { useEventStream, type StreamState } from "../components/stream";
 import { SyncBadge } from "./Server";
@@ -15,6 +15,8 @@ export function AppPage({ user }: { user: User }) {
   if (app.error) return <ErrorBox error={app.error} />;
   const a = app.data.app;
   const server = servers.data?.servers.find((x) => x.id === a.server_id);
+  const base = appPath(a);
+  const isDB = a.source === "database";
   const tab = (to: string, label: string) => (
     <NavLink to={to} end className={({ isActive }) => (isActive ? "tab active" : "tab")}>
       {label}
@@ -27,7 +29,7 @@ export function AppPage({ user }: { user: User }) {
         <div>
           <div className="row">
             <h1>{a.name}</h1>
-            <SyncBadge sync={app.data.sync} />
+            {!isDB && <SyncBadge sync={app.data.sync} />}
           </div>
           <div className="sub row wrap">
             <span className="mono">{sourceLabel(a)}</span>
@@ -44,21 +46,23 @@ export function AppPage({ user }: { user: User }) {
       </div>
       {server && server.status !== "online" && (
         <div className="alert warn" style={{ marginBottom: 16 }}>
-          The server is {server.status}. The app keeps running; it cannot be deployed or inspected until the agent
-          reconnects.
+          The server is {server.status}. The {isDB ? "database" : "app"} keeps running; it cannot be deployed or inspected
+          until the agent reconnects.
         </div>
       )}
       <div className="tabs">
-        {tab(`/apps/${id}`, "Overview")}
-        {can(user, "member") && tab(`/apps/${id}/logs`, "Logs")}
-        {can(user, "admin") && tab(`/apps/${id}/env`, "Environment")}
-        {tab(`/apps/${id}/domains`, "Domains")}
-        {a.source === "git" && can(user, "admin") && tab(`/apps/${id}/source`, "Source")}
-        {a.source === "compose" && can(user, "admin") && tab(`/apps/${id}/compose`, "Compose")}
-        {can(user, "admin") && tab(`/apps/${id}/settings`, "Settings")}
+        {tab(base, "Overview")}
+        {can(user, "member") && tab(`${base}/logs`, "Logs")}
+        {isDB && can(user, "admin") && tab(`${base}/connection`, "Connection")}
+        {!isDB && can(user, "admin") && tab(`${base}/env`, "Environment")}
+        {!isDB && tab(`${base}/domains`, "Domains")}
+        {a.source === "git" && can(user, "admin") && tab(`${base}/source`, "Source")}
+        {a.source === "compose" && can(user, "admin") && tab(`${base}/compose`, "Compose")}
+        {can(user, "admin") && tab(`${base}/settings`, "Settings")}
       </div>
       <Routes>
         <Route index element={<Overview app={a} user={user} />} />
+        <Route path="connection" element={<ConnectionTab app={a} />} />
         <Route path="logs" element={<LogsTab app={a} />} />
         <Route path="env" element={<EnvTab app={a} />} />
         <Route path="domains" element={<DomainsTab app={a} user={user} />} />
@@ -140,7 +144,13 @@ function Overview({ app, user }: { app: App; user: User }) {
           )}
         </div>
         <p className="faint small" style={{ marginBottom: 0 }}>
-          {app.source === "compose" ? (
+          {app.source === "database" ? (
+            <>
+              A deployment pulls the latest <span className="mono">{app.image}</span> and, if it changed (or the limits did),
+              restarts the database on it: it is stopped first, so its data is never used twice. Without changes it keeps
+              running. If the new container fails, the previous one is started again.
+            </>
+          ) : app.source === "compose" ? (
             <>
               A deployment pulls the images of the compose file and starts the services in dependency order. Unchanged
               services keep running; a changed service without volumes gets its new container before the old one stops,
@@ -157,12 +167,13 @@ function Overview({ app, user }: { app: App; user: User }) {
               A deployment pulls <span className="mono">{app.image}</span>,
             </>
           )}{" "}
-          {app.source !== "compose" &&
+          {app.source !== "compose" && app.source !== "database" &&
             " starts a new container and switches traffic once it is ready. If the new container fails, the current one keeps serving."}
         </p>
       </div>
 
       {app.source === "compose" && <ServicesCard app={app} services={st?.services} />}
+      {app.source === "database" ? <LinksCard app={app} user={user} /> : <LinkedDatabases app={app} />}
 
       <div className="card">
         <div className="card-head">
@@ -202,7 +213,11 @@ function Overview({ app, user }: { app: App; user: User }) {
                     <td>
                       <DeployBadge status={d.status} />
                     </td>
-                    {app.source === "compose" ? (
+                    {app.source === "database" ? (
+                      <td className="mono muted small" title={d.digests?.[app.name]}>
+                        {d.digests?.[app.name]?.split("@")[1]?.slice(0, 19) ?? "—"}
+                      </td>
+                    ) : app.source === "compose" ? (
                       <td className="muted small">{d.digests ? Object.keys(d.digests).sort().join(", ") : "—"}</td>
                     ) : app.source === "git" ? (
                       <td className="muted small" title={d.commit}>
@@ -229,7 +244,12 @@ function Overview({ app, user }: { app: App; user: User }) {
                             const ok = await confirm({
                               title: `Roll back to #${d.id}?`,
                               body:
-                                app.source === "compose" ? (
+                                app.source === "database" ? (
+                                  <p>
+                                    The image of deployment #{d.id} runs again on the current data. Going back to an older
+                                    minor version is usually fine; check the engine's notes if unsure.
+                                  </p>
+                                ) : app.source === "compose" ? (
                                   <p>The compose file and images of deployment #{d.id} are deployed again with the app's current environment.</p>
                                 ) : (
                                   <p>The image of deployment #{d.id} is deployed again with the app's current settings and environment.</p>
@@ -595,6 +615,39 @@ function SettingsTab({ app }: { app: App }) {
       toast("Saved. Deploy to apply.");
     },
   });
+  if (app.source === "database") {
+    return (
+      <div className="stack" style={{ maxWidth: 680 }}>
+        <form
+          className="card card-body form"
+          onSubmit={(e: FormEvent) => {
+            e.preventDefault();
+            save.mutate();
+          }}
+        >
+          <h2>Resources</h2>
+          <ErrorBox error={save.error} />
+          <div className="grid-2">
+            <Field label="Memory limit (MB)" help="Empty for no limit.">
+              <input className="input mono" type="number" min={16} value={memory} onChange={(e) => setMemory(e.target.value)} />
+            </Field>
+            <Field label="CPU limit (cores)" help="Empty for no limit, e.g. 0.5.">
+              <input className="input mono" type="number" min={0} step="0.1" value={cpus} onChange={(e) => setCpus(e.target.value)} />
+            </Field>
+          </div>
+          <p className="faint small" style={{ margin: 0 }}>
+            A deployment restarts the database with new limits: connections drop for a few seconds.
+          </p>
+          <div>
+            <button className="btn primary" disabled={save.isPending}>
+              Save
+            </button>
+          </div>
+        </form>
+        <DeleteCard app={app} />
+      </div>
+    );
+  }
   if (app.source === "compose") {
     return (
       <div className="stack" style={{ maxWidth: 680 }}>
@@ -650,21 +703,24 @@ function DeleteCard({ app }: { app: App }) {
   const [open, setOpen] = useState(false);
   const [confirmName, setConfirmName] = useState("");
   const [volumes, setVolumes] = useState(false);
-  const volumeNames = app.source === "compose" ? (app.compose?.volumes ?? []) : app.volumes.map((v) => v.name);
+  const isDB = app.source === "database";
+  const volumeNames = isDB ? ["data"] : app.source === "compose" ? (app.compose?.volumes ?? []) : app.volumes.map((v) => v.name);
   const del = useMutation({
     mutationFn: () => api.deleteApp(app.id, volumes),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["apps"] });
-      toast(r.cleanup_error ? `App deleted; cleanup pending: ${r.cleanup_error}` : "App deleted", !!r.cleanup_error);
-      navigate("/apps");
+      const what = isDB ? "Database" : "App";
+      toast(r.cleanup_error ? `${what} deleted; cleanup pending: ${r.cleanup_error}` : `${what} deleted`, !!r.cleanup_error);
+      navigate(isDB ? "/databases" : "/apps");
     },
   });
   return (
     <div className="card card-body stack">
-      <h2>Delete app</h2>
+      <h2>Delete {isDB ? "database" : "app"}</h2>
       <p className="muted" style={{ margin: 0 }}>
-        Its domains stop being served and its containers are removed. Persistent volumes are kept unless you choose to
-        delete them.
+        {isDB
+          ? "Its container is removed and linked apps lose access. The data volume is kept unless you choose to delete it."
+          : "Its domains stop being served and its containers are removed. Persistent volumes are kept unless you choose to delete them."}
       </p>
       <div>
         <button className="btn danger" onClick={() => setOpen(true)}>
@@ -681,7 +737,7 @@ function DeleteCard({ app }: { app: App }) {
                 Cancel
               </button>
               <button className="btn danger solid" disabled={confirmName !== app.name || del.isPending} onClick={() => del.mutate()}>
-                Delete app
+                Delete {isDB ? "database" : "app"}
               </button>
             </>
           }
@@ -1005,5 +1061,188 @@ function ComposeTab({ app }: { app: App }) {
         </div>
       </div>
     </form>
+  );
+}
+
+// LinkedDatabases lists the databases this app reaches, if any.
+function LinkedDatabases({ app }: { app: App }) {
+  const apps = useQuery({ queryKey: ["apps"], queryFn: api.apps });
+  const dbs = (apps.data?.apps ?? []).filter((a) => a.source === "database" && a.links?.includes(app.id));
+  if (dbs.length === 0) return null;
+  return (
+    <div className="card card-body stack">
+      <h2>Databases</h2>
+      <div className="row wrap">
+        {dbs.map((d) => (
+          <Link key={d.id} to={appPath(d)} className="row" style={{ gap: 6 }}>
+            <Icon name="database" size={14} />
+            <strong>{d.name}</strong> <span className="faint small">{sourceLabel(d)}</span>
+          </Link>
+        ))}
+      </div>
+      <p className="faint small" style={{ margin: 0 }}>
+        Reachable from the app's containers by these host names.
+      </p>
+    </div>
+  );
+}
+
+function LinksCard({ app, user }: { app: App; user: User }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const apps = useQuery({ queryKey: ["apps"], queryFn: api.apps });
+  const engines = useQuery({ queryKey: ["database-engines"], queryFn: api.databaseEngines, staleTime: Infinity });
+  const engine = engines.data?.engines.find((e) => e.id === app.engine);
+  const links = app.links ?? [];
+  const candidates = (apps.data?.apps ?? []).filter(
+    (a) => a.source !== "database" && a.server_id === app.server_id && !links.includes(a.id),
+  );
+  const [target, setTarget] = useState<number | "">("");
+  const [setEnv, setSetEnv] = useState(true);
+  const [envVar, setEnvVar] = useState("");
+  const done = (r: { app: App; attach_error?: string }, msg: string) => {
+    qc.setQueryData(["app", app.id], (old: { app: App } | undefined) => (old ? { ...old, app: r.app } : old));
+    qc.invalidateQueries({ queryKey: ["apps"] });
+    if (r.attach_error) toast(`Saved, but not applied on the server yet: ${r.attach_error}`, true);
+    else toast(msg);
+  };
+  const link = useMutation({
+    mutationFn: () => api.linkApp(app.id, Number(target || candidates[0]?.id), setEnv ? envVar || engine?.env_var || "" : ""),
+    onSuccess: (r) => {
+      setTarget("");
+      done(r, setEnv ? "Linked. Deploy the app to give it the new variable." : "Linked");
+    },
+  });
+  const unlink = useMutation({
+    mutationFn: (appId: number) => api.unlinkApp(app.id, appId),
+    onSuccess: (r) => done(r, "Unlinked"),
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  const name = (id: number) => apps.data?.apps.find((a) => a.id === id)?.name ?? `#${id}`;
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Linked apps</h2>
+      </div>
+      <div className="card-body stack">
+        <p className="muted" style={{ margin: 0 }}>
+          Linked apps reach the database at host <span className="mono">{app.name}</span>
+          {engine && (
+            <>
+              , port <span className="mono">{engine.port}</span>
+            </>
+          )}
+          . Nothing else can connect to it: other apps, the server's network and the internet cannot.
+        </p>
+        {links.length > 0 && (
+          <div className="table-wrap">
+            <table className="table">
+              <tbody>
+                {links.map((id) => (
+                  <tr key={id}>
+                    <td>
+                      <Link to={`/apps/${id}`}>
+                        <strong>{name(id)}</strong>
+                      </Link>
+                    </td>
+                    <td className="num">
+                      {can(user, "admin") && (
+                        <button className="btn sm" disabled={unlink.isPending} onClick={() => unlink.mutate(id)}>
+                          Unlink
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {can(user, "admin") &&
+          (candidates.length === 0 ? (
+            <p className="faint small" style={{ margin: 0 }}>
+              {links.length === 0 ? "No app on this server to link yet." : "Every app on this server is linked."}
+            </p>
+          ) : (
+            <form
+              className="form"
+              onSubmit={(e: FormEvent) => {
+                e.preventDefault();
+                link.mutate();
+              }}
+            >
+              <ErrorBox error={link.error} />
+              <div className="row wrap">
+                <select
+                  className="input"
+                  style={{ width: "auto", minWidth: 180 }}
+                  value={target || candidates[0].id}
+                  onChange={(e) => setTarget(Number(e.target.value))}
+                >
+                  {candidates.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.name}
+                    </option>
+                  ))}
+                </select>
+                <label className="check small">
+                  <input type="checkbox" checked={setEnv} onChange={(e) => setSetEnv(e.target.checked)} /> set its
+                </label>
+                <input
+                  className="input mono"
+                  style={{ width: 160 }}
+                  value={envVar}
+                  placeholder={engine?.env_var}
+                  disabled={!setEnv}
+                  onChange={(e) => setEnvVar(e.target.value)}
+                />
+                <span className="small muted">to the connection URL</span>
+                <button className="btn primary sm" disabled={link.isPending}>
+                  <Icon name="link" size={14} /> Link
+                </button>
+              </div>
+            </form>
+          ))}
+      </div>
+    </div>
+  );
+}
+
+function ConnectionTab({ app }: { app: App }) {
+  const conn = useQuery({ queryKey: ["db-connection", app.id], queryFn: () => api.databaseConnection(app.id), gcTime: 0 });
+  if (conn.isPending) return <Loading />;
+  if (conn.error) return <ErrorBox error={conn.error} />;
+  const c = conn.data.connection;
+  const row = (label: string, value?: string) =>
+    value ? (
+      <Field label={label}>
+        <CodeBox text={value} />
+      </Field>
+    ) : null;
+  return (
+    <div className="stack" style={{ maxWidth: 760 }}>
+      <div className="card card-body form">
+        <h2>Connection</h2>
+        <p className="muted" style={{ margin: 0 }}>
+          For linked apps (see Overview). Linking can put the URL into an app's environment as{" "}
+          <span className="mono">{c.env_var}</span>.
+        </p>
+        {row("URL", c.url)}
+        <div className="grid-2">
+          {row("Host", c.host)}
+          {row("Port", String(c.port))}
+        </div>
+        <div className="grid-2">
+          {row("Database", c.credentials.database)}
+          {row("User", c.credentials.user)}
+        </div>
+        {row("Password", c.credentials.password)}
+        {row("Root password", c.credentials.root_password)}
+        <p className="faint small" style={{ margin: 0 }}>
+          Stored encrypted. The database sets these when it is first created; changing them later is done inside the
+          database.
+        </p>
+      </div>
+    </div>
   );
 }

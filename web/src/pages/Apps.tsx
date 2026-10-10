@@ -6,6 +6,8 @@ import { ErrorBox, Field, Icon, Loading, Modal, formatDate } from "../components
 
 export function AppsPage({ user }: { user: User }) {
   const apps = useQuery({ queryKey: ["apps"], queryFn: api.apps });
+  // Databases have their own page.
+  const list = apps.data?.apps.filter((a) => a.source !== "database") ?? [];
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
   const [adding, setAdding] = useState(false);
   const serverName = (id: number) => servers.data?.servers.find((s) => s.id === id)?.name ?? `#${id}`;
@@ -27,7 +29,7 @@ export function AppsPage({ user }: { user: User }) {
         <Loading />
       ) : apps.error ? (
         <ErrorBox error={apps.error} />
-      ) : apps.data.apps.length === 0 ? (
+      ) : list.length === 0 ? (
         <div className="card empty">
           <h3>No apps yet</h3>
           <p>Run any Docker image on one of your servers and put it behind HTTPS.</p>
@@ -50,7 +52,7 @@ export function AppsPage({ user }: { user: User }) {
               </tr>
             </thead>
             <tbody>
-              {apps.data.apps.map((a) => (
+              {list.map((a) => (
                 <tr key={a.id}>
                   <td>
                     <Link to={`/apps/${a.id}`}>

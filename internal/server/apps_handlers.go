@@ -36,6 +36,10 @@ type appView struct {
 	// compose file contains, without its secrets.
 	Service string                `json:"service,omitempty"`
 	Compose *store.ComposeSummary `json:"compose,omitempty"`
+	// Databases: engine, major version and the apps that reach it.
+	Engine  string  `json:"engine,omitempty"`
+	Version string  `json:"version,omitempty"`
+	Links   []int64 `json:"links,omitzero"` // never nil for a database
 
 	Port      int                    `json:"port"`
 	Domains   []string               `json:"domains"`
@@ -66,6 +70,8 @@ func viewApp(a *store.App) appView {
 			sum.Volumes = []string{}
 		}
 		v.Service, v.Compose = a.Service, &sum
+	case store.SourceDatabase:
+		v.Engine, v.Version, v.Links = a.Engine, a.EngineVersion, nonNil(a.Links)
 	}
 	return v
 }
@@ -175,8 +181,11 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 		// Everything else comes from the compose file.
 		st.Volumes, st.MemoryMB, st.CPUs = nil, 0, 0
 		return st, nil
+	case store.SourceDatabase:
+		// The engine (checked on creation) sets everything but the limits.
+		st.Port, st.Volumes = 0, nil
 	default:
-		return st, errors.New(`source must be "image", "git" or "compose"`)
+		return st, errors.New(`source must be "image", "git", "compose" or "database"`)
 	}
 	switch {
 	case st.Port < 0 || st.Port > 65535:
@@ -193,8 +202,12 @@ type createAppRequest struct {
 	appSettingsRequest
 	// Compose apps: the compose file and the service to publish (by
 	// default the first one that mentions a port).
-	Compose  string        `json:"compose"`
-	Service  string        `json:"service"`
+	Compose string `json:"compose"`
+	Service string `json:"service"`
+	// Databases: the engine (postgres, mysql, mariadb, redis) and its
+	// version (by default the newest offered).
+	Engine   string        `json:"engine"`
+	Version  string        `json:"version"`
 	Source   string        `json:"source"`
 	ServerID int64         `json:"server_id"`
 	Name     string        `json:"name"`
@@ -240,6 +253,20 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
+	}
+	if req.Source == store.SourceDatabase {
+		if err := validDatabaseName(name); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		if len(req.Domains) > 0 {
+			writeError(w, http.StatusUnprocessableEntity, "a database has no domains: link it to the apps that use it")
+			return
+		}
+		if st, err = databaseSettings(st, req.Engine, strings.TrimSpace(req.Version)); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
 	}
 	var cf *composeFile
 	if req.Source == store.SourceCompose {
@@ -292,6 +319,12 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 			return
 		}
 	}
+	if app.Source == store.SourceDatabase {
+		if err := s.initDatabase(r.Context(), app); err != nil {
+			s.internalError(w, r, "create database credentials", err)
+			return
+		}
+	}
 	var warnings []string
 	if cf != nil {
 		if err := s.saveCompose(r.Context(), app, cf); err != nil {
@@ -301,7 +334,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 		warnings = cf.project.Warnings
 	}
 	s.audit(r, &p.user.ID, "app.created", map[string]any{"app_id": app.ID, "name": app.Name, "image": app.Image,
-		"git": app.Git.URL, "source": app.Source})
+		"git": app.Git.URL, "source": app.Source, "engine": app.Engine, "version": app.EngineVersion})
 	s.PushProxy(r.Context(), app.ServerID)
 	writeJSON(w, http.StatusCreated, map[string]any{"app": viewApp(app), "sync": s.proxySync(r.Context(), app.ServerID),
 		"warnings": nonNil(warnings)})
@@ -349,6 +382,9 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *prin
 	if st.Port == 0 && len(app.Domains) > 0 {
 		writeError(w, http.StatusUnprocessableEntity, "remove the app's domains before clearing its port")
 		return
+	}
+	if app.Source == store.SourceDatabase {
+		st.Engine, st.EngineVersion, st.Image = app.Engine, app.EngineVersion, app.Image
 	}
 	if err := s.db.UpdateAppSettings(r.Context(), app.ID, st); err != nil {
 		s.internalError(w, r, "update app", err)
@@ -415,6 +451,11 @@ type appEnvRequest struct {
 func (s *Server) handleSetAppEnv(w http.ResponseWriter, r *http.Request, p *principal) {
 	app, ok := s.pathApp(w, r)
 	if !ok {
+		return
+	}
+	if app.Source == store.SourceDatabase {
+		// The image applies credentials only when it creates the database.
+		writeError(w, http.StatusUnprocessableEntity, "a database's credentials are set when it is created")
 		return
 	}
 	var req appEnvRequest
@@ -520,6 +561,9 @@ func (s *Server) handleAppStatus(w http.ResponseWriter, r *http.Request, p *prin
 	service, ok := s.pathService(w, r, app)
 	if !ok {
 		return
+	}
+	if service == "" && app.Source == store.SourceDatabase {
+		service = app.Name // its only service
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), appCallTimeout)
 	defer cancel()
@@ -667,13 +711,13 @@ func (s *Server) handleDeploymentStream(w http.ResponseWriter, r *http.Request, 
 	ev.send("end", viewDeployment(d, false))
 }
 
-// pathService reads the optional ?service= of a compose app.
+// pathService reads the optional ?service= of a compose app or database.
 func (s *Server) pathService(w http.ResponseWriter, r *http.Request, app *store.App) (string, bool) {
 	service := r.URL.Query().Get("service")
 	if service == "" {
 		return "", true
 	}
-	if app.Source != store.SourceCompose || !agentproto.ServiceNameRE.MatchString(service) {
+	if !app.HasServices() || !agentproto.ServiceNameRE.MatchString(service) {
 		writeError(w, http.StatusUnprocessableEntity, "unknown service")
 		return "", false
 	}
@@ -684,8 +728,11 @@ func (s *Server) pathService(w http.ResponseWriter, r *http.Request, app *store.
 // default the published service (or the first one) of a compose app.
 func (s *Server) logService(w http.ResponseWriter, r *http.Request, app *store.App) (string, bool) {
 	service, ok := s.pathService(w, r, app)
-	if !ok || service != "" || app.Source != store.SourceCompose {
+	if !ok || service != "" || !app.HasServices() {
 		return service, ok
+	}
+	if app.Source == store.SourceDatabase {
+		return app.Name, true
 	}
 	if app.Service != "" {
 		return app.Service, true

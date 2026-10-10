@@ -728,6 +728,14 @@ func (m *appsManager) Delete(ctx context.Context, appID int64, volumes bool, ima
 			return err
 		}
 	}
+	// Databases linked to the app joined its network: detach them first.
+	if info, err := dc.NetworkInspect(ctx, appNetwork(appID)); err == nil {
+		for id := range info.Containers {
+			if err := dc.NetworkDisconnect(ctx, info.ID, id, true); err != nil && !errors.Is(err, docker.ErrNotFound) {
+				return err
+			}
+		}
+	}
 	if err := dc.NetworkRemove(ctx, appNetwork(appID)); err != nil {
 		return err
 	}

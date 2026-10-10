@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
@@ -79,6 +81,7 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 		return nil, err
 	}
 	var retired []docker.ContainerSummary // replaced containers, removed at the end
+	active := map[string]string{}         // container ID -> service, after this deployment
 	switched := false                     // the published service has a new container
 	for _, svc := range order {
 		hash := serviceHash(spec.AppID, svc, imageIDs[svc.Name])
@@ -88,6 +91,7 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 		}); i >= 0 && !svc.Job {
 			lg.printf("Service %s is unchanged", svc.Name)
 			retired = append(retired, slices.Delete(slices.Clone(olds), i, i+1)...)
+			active[olds[i].ID] = svc.Name
 			if err := m.waitDependency(ctx, dc, svc, olds[i].ID, lg); err != nil {
 				return rollback(err)
 			}
@@ -132,6 +136,15 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 			return rollback(err)
 		}
 		retired = append(retired, olds...)
+		if !svc.Job {
+			active[id] = svc.Name
+		}
+	}
+	// Join the networks of the apps that use this one (a database). The
+	// deployment has succeeded by now; a failure here is reported, and the
+	// next deployment or link change tries again.
+	if err := m.attach(ctx, dc, spec.AppID, active, spec.Attach); err != nil {
+		lg.printf("Warning: %v", err)
 	}
 
 	// Services removed from the compose file.
@@ -165,6 +178,77 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 	}
 	m.refresh(ctx)
 	return digests, nil
+}
+
+// attach connects the containers (ID -> service name) to the networks of
+// the apps in attach, reachable there by their service name, and
+// disconnects them from the networks of other apps.
+func (m *appsManager) attach(ctx context.Context, dc *docker.Client, appID int64, containers map[string]string, attach []int64) error {
+	want := map[string]int64{}
+	for _, id := range attach {
+		want[appNetwork(id)] = id
+	}
+	var errs []error
+	for _, cid := range slices.Sorted(maps.Keys(containers)) {
+		service := containers[cid]
+		info, err := dc.ContainerInspect(ctx, cid)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for name := range info.NetworkSettings.Networks {
+			if _, ok := want[name]; !ok && name != appNetwork(appID) && strings.HasPrefix(name, "basalt-app-") {
+				if err := dc.NetworkDisconnect(ctx, name, cid, true); err != nil && !errors.Is(err, docker.ErrNotFound) {
+					errs = append(errs, fmt.Errorf("disconnect %s from %s: %w", service, name, err))
+				}
+			}
+		}
+		for _, name := range slices.Sorted(maps.Keys(want)) {
+			if _, ok := info.NetworkSettings.Networks[name]; ok {
+				continue
+			}
+			if err := m.ensureNetwork(ctx, dc, want[name]); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			ep := &docker.EndpointSettings{Aliases: []string{service}}
+			if err := dc.NetworkConnect(ctx, name, cid, ep); err != nil && !errors.Is(err, docker.ErrConflict) {
+				errs = append(errs, fmt.Errorf("connect %s to the network of app %d: %w", service, want[name], err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Attach makes the running services of an app join exactly the networks of
+// the apps in req.Attach.
+func (m *appsManager) Attach(ctx context.Context, req agentproto.AppAttach) error {
+	if req.AppID <= 0 {
+		return errors.New("invalid app id")
+	}
+	if err := agentproto.ValidateAttach(req.AppID, req.Attach); err != nil {
+		return err
+	}
+	dc, err := m.client()
+	if err != nil {
+		return err
+	}
+	defer m.lock(req.AppID)()
+	list, err := m.containers(ctx, dc, req.AppID) // newest first
+	if err != nil {
+		return err
+	}
+	current := map[string]string{}
+	seen := map[string]bool{}
+	for _, c := range list {
+		svc := c.Labels[labelService]
+		if svc == "" || seen[svc] || c.State != "running" {
+			continue
+		}
+		seen[svc] = true
+		current[c.ID] = svc
+	}
+	return m.attach(ctx, dc, req.AppID, current, req.Attach)
 }
 
 // authFor picks the credentials for the registry of image.

@@ -16,7 +16,7 @@ type App struct {
 	ID       int64
 	ServerID int64
 	Name     string
-	Source   string // "image" or "git"
+	Source   string // "image", "git", "compose" or "database"
 	Image    string // for source "image"
 	Git      GitSettings
 	// Deploy key (encrypted OpenSSH private key and its public line) and
@@ -31,6 +31,12 @@ type App struct {
 	ComposeSealed []byte
 	Summary       ComposeSummary
 	Service       string
+
+	// Databases: engine and major version, and the apps whose networks the
+	// database joins (so they reach it by its name).
+	Engine        string
+	EngineVersion string
+	Links         []int64
 
 	Port      int
 	EnvSealed []byte // encrypted JSON object; nil when empty
@@ -52,10 +58,15 @@ type GitSettings struct {
 }
 
 const (
-	SourceImage   = "image"
-	SourceGit     = "git"
-	SourceCompose = "compose"
+	SourceImage    = "image"
+	SourceGit      = "git"
+	SourceCompose  = "compose"
+	SourceDatabase = "database"
 )
+
+// HasServices reports whether the app runs as named services (compose apps
+// and databases) rather than one anonymous container.
+func (a *App) HasServices() bool { return a.Source == SourceCompose || a.Source == SourceDatabase }
 
 // ComposeSummary describes a compose file without its secrets.
 type ComposeSummary struct {
@@ -73,13 +84,15 @@ type ComposeService struct {
 // AppSettings are the fields an app is deployed with, other than env.
 // Source is fixed when the app is created.
 type AppSettings struct {
-	Source   string
-	Image    string
-	Git      GitSettings
-	Port     int
-	Volumes  []agentproto.AppVolume
-	MemoryMB int
-	CPUs     float64
+	Source        string
+	Engine        string // databases
+	EngineVersion string
+	Image         string
+	Git           GitSettings
+	Port          int
+	Volumes       []agentproto.AppVolume
+	MemoryMB      int
+	CPUs          float64
 }
 
 var ErrDeployInProgress = errors.New("a deployment of this app is already running")
@@ -101,14 +114,15 @@ func (db *DB) CreateApp(ctx context.Context, serverID int64, name string, st App
 		st.Source = SourceImage
 	}
 	a := &App{ServerID: serverID, Name: name, Source: st.Source, Image: st.Image, Git: st.Git, Port: st.Port,
-		Volumes: st.Volumes, MemoryMB: st.MemoryMB, CPUs: st.CPUs, Domains: domains, TLS: tls}
+		Volumes: st.Volumes, MemoryMB: st.MemoryMB, CPUs: st.CPUs, Domains: domains, TLS: tls,
+		Engine: st.Engine, EngineVersion: st.EngineVersion, Links: []int64{}}
 	var created int64
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO apps (server_id, name, source, image, git_url, git_branch, git_dockerfile, git_context,
-		 port, volumes, memory_mb, cpus) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 port, volumes, memory_mb, cpus, engine, engine_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id, created_at`,
 		serverID, name, st.Source, st.Image, st.Git.URL, st.Git.Branch, st.Git.Dockerfile, st.Git.Context,
-		st.Port, vols, st.MemoryMB, st.CPUs).Scan(&a.ID, &created)
+		st.Port, vols, st.MemoryMB, st.CPUs, st.Engine, st.EngineVersion).Scan(&a.ID, &created)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: apps.name") {
 			return nil, ErrNameTaken
@@ -141,7 +155,8 @@ func marshalVolumes(v []agentproto.AppVolume) (string, error) {
 
 const appQuery = `SELECT a.id, a.server_id, a.name, a.source, a.image, a.git_url, a.git_branch, a.git_dockerfile,
 	a.git_context, a.deploy_key, a.deploy_key_public, a.webhook_secret, a.auto_deploy,
-	a.compose, a.compose_summary, a.service,
+	a.compose, a.compose_summary, a.service, a.engine, a.engine_version,
+	(SELECT COALESCE(json_group_array(l.app_id), '[]') FROM (SELECT app_id FROM app_links WHERE database_id = a.id ORDER BY app_id) l),
 	a.port, a.env, a.volumes, a.memory_mb, a.cpus, a.created_at, r.id, r.tls, COALESCE(d.domain, '')
 	FROM apps a JOIN proxy_routes r ON r.app_id = a.id
 	LEFT JOIN proxy_route_domains d ON d.route_id = r.id`
@@ -152,10 +167,10 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 	for rows.Next() {
 		var a App
 		var created int64
-		var vols, domain, summary string
+		var vols, domain, summary, links string
 		if err := rows.Scan(&a.ID, &a.ServerID, &a.Name, &a.Source, &a.Image, &a.Git.URL, &a.Git.Branch,
 			&a.Git.Dockerfile, &a.Git.Context, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
-			&a.ComposeSealed, &summary, &a.Service, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &created, &a.RouteID, &a.TLS, &domain); err != nil {
+			&a.ComposeSealed, &summary, &a.Service, &a.Engine, &a.EngineVersion, &links, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &created, &a.RouteID, &a.TLS, &domain); err != nil {
 			return nil, err
 		}
 		if n := len(out); n > 0 && out[n-1].ID == a.ID {
@@ -166,6 +181,9 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(summary), &a.Summary); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(links), &a.Links); err != nil {
 			return nil, err
 		}
 		a.CreatedAt = time.Unix(created, 0)
@@ -240,6 +258,37 @@ func (db *DB) SetAppCompose(ctx context.Context, id int64, sealed []byte, sum Co
 	}
 	return db.execOne(ctx, `UPDATE apps SET compose = ?, compose_summary = ?, service = ?, port = ? WHERE id = ?`,
 		sealed, string(b), service, port, id)
+}
+
+// LinkApp makes a database reachable from an app.
+func (db *DB) LinkApp(ctx context.Context, databaseID, appID int64) error {
+	_, err := db.W.ExecContext(ctx, `INSERT OR IGNORE INTO app_links (database_id, app_id) VALUES (?, ?)`, databaseID, appID)
+	return err
+}
+
+// UnlinkApp undoes LinkApp.
+func (db *DB) UnlinkApp(ctx context.Context, databaseID, appID int64) error {
+	return db.execOne(ctx, `DELETE FROM app_links WHERE database_id = ? AND app_id = ?`, databaseID, appID)
+}
+
+// LinkedDatabaseNames lists the names of the databases linked to an app:
+// host names on its network.
+func (db *DB) LinkedDatabaseNames(ctx context.Context, appID int64) ([]string, error) {
+	rows, err := db.R.QueryContext(ctx,
+		`SELECT a.name FROM app_links l JOIN apps a ON a.id = l.database_id WHERE l.app_id = ? ORDER BY a.name`, appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
 }
 
 // SetAppDeployKey stores a new deploy key (private half encrypted).

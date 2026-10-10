@@ -1,6 +1,7 @@
 package agentproto
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/wiefix/basalt/internal/docker"
@@ -38,6 +39,9 @@ const (
 	// container (and its successors) until cancelled.
 	TypeAppLogsFollow = "app_logs_follow"
 	TypeAppsSync      = "apps_sync"
+	// TypeAppAttach sets which other apps' networks an app's containers
+	// join (a database reachable from apps).
+	TypeAppAttach = "app_attach"
 )
 
 // EnrollRequest is posted once, authenticated by the one-time token.
@@ -206,6 +210,34 @@ type AppSpec struct {
 	// RegistryAuths are credentials for the registries of service images,
 	// matched by ServerAddress.
 	RegistryAuths []docker.AuthConfig `json:"registry_auths,omitempty"`
+	// Attach lists apps whose networks the services join, reachable there
+	// by their service name (a database used by those apps).
+	Attach []int64 `json:"attach,omitempty"`
+}
+
+// AppAttach replaces the networks of other apps an app's running
+// containers are attached to (see AppSpec.Attach).
+type AppAttach struct {
+	AppID  int64   `json:"app_id"`
+	Attach []int64 `json:"attach"`
+}
+
+// MaxAttach bounds AppSpec.Attach.
+const MaxAttach = 200
+
+// ValidateAttach checks the apps an app joins the networks of.
+func ValidateAttach(appID int64, attach []int64) error {
+	if len(attach) > MaxAttach {
+		return fmt.Errorf("at most %d linked apps", MaxAttach)
+	}
+	seen := map[int64]bool{}
+	for _, id := range attach {
+		if id <= 0 || id == appID || seen[id] {
+			return fmt.Errorf("invalid linked app %d", id)
+		}
+		seen[id] = true
+	}
+	return nil
 }
 
 // ImageRef is an image an app was deployed from: the reference used and

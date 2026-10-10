@@ -178,6 +178,9 @@ code,
   padding: 28px 36px 64px;
   max-width: 1280px;
   width: 100%;
+  /* A grid item: without this, wide tables widen the page instead of
+     scrolling in their .table-wrap. */
+  min-width: 0;
 }
 
 .page-head {

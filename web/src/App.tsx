@@ -10,6 +10,7 @@ import { SitesPage } from "./pages/Sites";
 import { SitePage } from "./pages/Site";
 import { AppsPage } from "./pages/Apps";
 import { AppPage } from "./pages/App";
+import { DatabasesPage } from "./pages/Databases";
 import { UsersPage } from "./pages/Users";
 import { RegistriesPage } from "./pages/Registries";
 import { AccountPage } from "./pages/Account";
@@ -83,6 +84,9 @@ function Shell({ user }: { user: User }) {
         <NavLink className="nav-link" to="/apps">
           <Icon name="box" /> Apps
         </NavLink>
+        <NavLink className="nav-link" to="/databases">
+          <Icon name="database" /> Databases
+        </NavLink>
         {can(user, "admin") && (
           <NavLink className="nav-link" to="/registries">
             <Icon name="key" /> Registries
@@ -117,6 +121,8 @@ function Shell({ user }: { user: User }) {
           <Route path="/sites/:id/*" element={<SitePage user={user} />} />
           <Route path="/apps" element={<AppsPage user={user} />} />
           <Route path="/apps/:id/*" element={<AppPage user={user} />} />
+          <Route path="/databases" element={<DatabasesPage user={user} />} />
+          <Route path="/databases/:id/*" element={<AppPage user={user} />} />
           <Route path="/registries" element={<RegistriesPage user={user} />} />
           <Route path="/users" element={<UsersPage user={user} />} />
           <Route path="/account" element={<AccountPage user={user} />} />

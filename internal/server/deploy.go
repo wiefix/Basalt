@@ -44,6 +44,9 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		if err != nil || d.Status != "succeeded" {
 			return nil, &deployError{status: http.StatusUnprocessableEntity, msg: "only a successful deployment of this app can be rolled back to"}
 		}
+		if app.Source == store.SourceDatabase && d.Digests[app.Name] == "" {
+			return nil, &deployError{status: http.StatusUnprocessableEntity, msg: "this deployment has no recorded image"}
+		}
 		if app.Source == store.SourceGit && d.CommitSHA == "" {
 			return nil, &deployError{status: http.StatusUnprocessableEntity, msg: "this deployment has no recorded commit"}
 		}
@@ -80,6 +83,15 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		spec = agentproto.AppSpec{AppID: app.ID}
 		if warnings, err = s.composeSpec(ctx, app, composeContent, pinned, &spec); err != nil {
 			return nil, err
+		}
+	case store.SourceDatabase:
+		var pinned map[string]string
+		if prev != nil {
+			pinned = prev.Digests
+		}
+		spec = agentproto.AppSpec{AppID: app.ID}
+		if err := s.databaseSpec(app, pinned, &spec); err != nil {
+			return nil, &deployError{status: http.StatusUnprocessableEntity, msg: err.Error(), cause: err}
 		}
 	case store.SourceGit:
 		if spec.Git, err = s.gitSource(ctx, app); err != nil {
@@ -196,6 +208,8 @@ func (s *Server) runDeployment(serverID, depID int64, spec agentproto.AppSpec, l
 	}
 	if x.compose != nil {
 		result.ComposeSealed = s.box.Seal(x.compose, deploymentComposeAD(depID))
+	}
+	if len(spec.Services) > 0 {
 		result.Digests = cleanDigests(resp.Digests)
 	}
 	// Under pendMu: a push that arrives meanwhile either sees this

@@ -170,6 +170,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/apps/{id}/deploy-key", s.requireRole(store.RoleAdmin, s.handleRegenerateDeployKey))
 	mux.Handle("GET /api/v1/apps/{id}/webhook", s.requireRole(store.RoleAdmin, s.handleGetWebhook))
 	mux.Handle("PUT /api/v1/apps/{id}/webhook", s.requireRole(store.RoleAdmin, s.handleSetWebhook))
+	mux.Handle("GET /api/v1/database-engines", s.requireRole(store.RoleViewer, s.handleListEngines))
+	mux.Handle("GET /api/v1/apps/{id}/connection", s.requireRole(store.RoleAdmin, s.handleDatabaseConnection))
+	mux.Handle("POST /api/v1/apps/{id}/links", s.requireRole(store.RoleAdmin, s.handleLinkApp))
+	mux.Handle("DELETE /api/v1/apps/{id}/links/{app}", s.requireRole(store.RoleAdmin, s.handleUnlinkApp))
 	mux.Handle("GET /api/v1/apps/{id}/compose", s.requireRole(store.RoleAdmin, s.handleGetCompose))
 	mux.Handle("PUT /api/v1/apps/{id}/compose", s.requireRole(store.RoleAdmin, s.handleSetCompose))
 	// Authenticated by the delivery's signature, not a session.

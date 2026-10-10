@@ -146,6 +146,17 @@ func (s *Server) handleSetCompose(w http.ResponseWriter, r *http.Request, p *pri
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	linked, err := s.db.LinkedDatabaseNames(r.Context(), app.ID)
+	if err != nil {
+		s.internalError(w, r, "list linked databases", err)
+		return
+	}
+	for _, svc := range cf.project.Services {
+		if slices.Contains(linked, svc.Name) || slices.ContainsFunc(svc.Aliases, func(a string) bool { return slices.Contains(linked, a) }) {
+			writeError(w, http.StatusUnprocessableEntity, "service "+svc.Name+" has the name of a linked database; rename it or unlink the database")
+			return
+		}
+	}
 	if cf.port == 0 && len(app.Domains) > 0 {
 		writeError(w, http.StatusUnprocessableEntity, "the app has domains: choose the service and port they point to")
 		return
