@@ -1,7 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, can, type BackupStorage, type StorageInput, type User } from "../api";
-import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, useConfirm, useToast } from "../components/ui";
+import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useConfirm, useToast } from "../components/ui";
+import { LogView } from "../components/LogView";
+import { PolicyCard } from "./BackupsTab";
 
 const kindLabel = { s3: "S3", sftp: "SFTP", local: "Local directory" } as const;
 
@@ -87,7 +89,7 @@ export function BackupsPage({ user }: { user: User }) {
                   </td>
                   <td className="muted">{kindLabel[s.kind]}</td>
                   <td className="mono muted small">{storageWhere(s)}</td>
-                  <td className="muted hide-sm">{s.policies ? `${s.policies} site${s.policies > 1 ? "s" : ""}` : "—"}</td>
+                  <td className="muted hide-sm">{s.policies ? `${s.policies} site${s.policies > 1 ? "s or apps" : " or app"}` : "—"}</td>
                   <td className="num">
                     <div className="row" style={{ justifyContent: "flex-end" }}>
                       <button className="btn sm" onClick={() => setChecking(s)}>
@@ -123,6 +125,7 @@ export function BackupsPage({ user }: { user: User }) {
           server.
         </p>
       </div>
+      <PanelBackup user={user} />
       {editing && <StorageModal storage={editing === "new" ? null : editing} onClose={() => setEditing(null)} />}
       {checking && <CheckModal storage={checking} onClose={() => setChecking(null)} />}
       {password && (
@@ -339,6 +342,197 @@ function CheckModal({ storage, onClose }: { storage: BackupStorage; onClose: () 
         <ErrorBox error={check.error} />
         {check.data && (check.data.ok ? <div className="alert ok">The repository is ready.</div> : <div className="alert err">{check.data.error}</div>)}
       </div>
+    </Modal>
+  );
+}
+
+const panelTarget = { base: "/api/v1/panel-backup", name: "the panel", policyUrl: "/api/v1/panel-backup/policy", queryKey: ["panel-backup"] };
+
+// PanelBackup backs up the panel's own database with its master key,
+// encrypted with the owner's recovery passphrase.
+function PanelBackup({ user }: { user: User }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [shown, setShown] = useState<number | null>(null);
+  const data = useQuery({
+    queryKey: ["panel-backup"],
+    queryFn: api.panelBackup,
+    refetchInterval: (q) => (q.state.data?.backups.some((b) => b.status === "running") ? 2000 : 30_000),
+  });
+  const run = useMutation({
+    mutationFn: api.runPanelBackup,
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["panel-backup"] });
+      setShown(r.backup.id);
+    },
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  if (data.isPending) return <Loading />;
+  if (data.error) return <ErrorBox error={data.error} />;
+  const d = data.data;
+  const running = d.backups.some((b) => b.status === "running");
+  return (
+    <div className="stack" style={{ marginTop: 24 }}>
+      <div className="page-head" style={{ marginBottom: 0 }}>
+        <div>
+          <h2>Panel</h2>
+          <div className="sub">The panel's own database (users, servers, settings, secrets) and its encrypted master key.</div>
+        </div>
+        <button className="btn primary" onClick={() => run.mutate()} disabled={run.isPending || running || !d.policy || !d.recovery.set}>
+          <Icon name="archive" /> {running ? "Running…" : "Back up now"}
+        </button>
+      </div>
+      {d.restic_error && <div className="alert warn">{d.restic_error}</div>}
+      <RecoveryCard user={user} recovery={d.recovery} />
+      <PolicyCard target={panelTarget} policy={d.policy} />
+      {d.backups.length > 0 && (
+        <div className="card table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Status</th>
+                <th className="hide-sm">Size</th>
+                <th>Started</th>
+              </tr>
+            </thead>
+            <tbody>
+              {d.backups.map((b) => (
+                <tr key={b.id} className="clickable" onClick={() => setShown(b.id)}>
+                  <td className="mono">{b.id}</td>
+                  <td>
+                    <span className={`badge ${b.status === "succeeded" ? "ok" : b.status === "running" ? "warn" : "err"}`}>{b.status}</span>
+                    {b.trigger === "schedule" && <span className="faint small"> · scheduled</span>}
+                  </td>
+                  <td className="muted hide-sm">{b.status === "succeeded" ? formatBytes(b.bytes) : ""}</td>
+                  <td className="muted">{formatDate(b.created_at)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="card card-body stack">
+        <h2>Restoring the panel</h2>
+        <ol className="steps muted small">
+          <li>
+            Install the panel on a new server: <code>sh install.sh panel --domain …</code>, then{" "}
+            <code>systemctl stop basalt-server</code>.
+          </li>
+          <li>
+            Fetch the latest backup: <code>restic -r &lt;storage&gt;/panel restore latest --target /root/restore</code> (with the
+            storage's password).
+          </li>
+          <li>
+            <code>basalt server recover --from /root/restore</code> — it asks for the recovery passphrase — then{" "}
+            <code>systemctl start basalt-server</code>. Servers reconnect by themselves.
+          </li>
+        </ol>
+        <p className="faint small" style={{ margin: 0 }}>
+          Keep the storage's password and the recovery passphrase outside the panel: both are needed. A local storage for the
+          panel must be under <code>/var/backups/basalt</code> on the panel's server.
+        </p>
+      </div>
+      {shown !== null && <PanelRunModal id={shown} onClose={() => setShown(null)} />}
+    </div>
+  );
+}
+
+function RecoveryCard({ user, recovery }: { user: User; recovery: { set: boolean; set_at?: string } }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [editing, setEditing] = useState(false);
+  const [password, setPassword] = useState("");
+  const [phrase, setPhrase] = useState("");
+  const [again, setAgain] = useState("");
+  const save = useMutation({
+    mutationFn: () => api.setRecoveryPassphrase(password, phrase),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["panel-backup"] });
+      setEditing(false);
+      setPassword("");
+      setPhrase("");
+      setAgain("");
+      toast("Recovery passphrase set; it applies to the next backups");
+    },
+  });
+  const owner = user.role === "owner";
+  return (
+    <div className="card card-body stack">
+      <div className="row wrap" style={{ justifyContent: "space-between" }}>
+        <div>
+          <h2>Recovery passphrase</h2>
+          <p className="muted small" style={{ margin: "4px 0 0" }}>
+            {recovery.set
+              ? `Set ${recovery.set_at ? formatDate(recovery.set_at) : ""}. Backups carry the master key encrypted with it.`
+              : "Not set: panel backups need it."}
+          </p>
+        </div>
+        {owner && !editing && (
+          <button className="btn" onClick={() => setEditing(true)}>
+            <Icon name="key" /> {recovery.set ? "Change" : "Set passphrase"}
+          </button>
+        )}
+      </div>
+      {!owner && !recovery.set && <div className="alert warn small">Only the owner can set it.</div>}
+      {editing && (
+        <form
+          className="form"
+          onSubmit={(e: FormEvent) => {
+            e.preventDefault();
+            save.mutate();
+          }}
+        >
+          <ErrorBox error={save.error} />
+          <div className="alert warn small">
+            The panel does not keep the passphrase. Write it down somewhere safe: without it, a panel backup cannot be restored.
+            Changing it applies to new backups only.
+          </div>
+          <div className="grid-2">
+            <Field label="Recovery passphrase" help="At least 12 characters; a few random words work well.">
+              <input className="input" type="password" value={phrase} onChange={(e) => setPhrase(e.target.value)} required minLength={12} autoComplete="new-password" />
+            </Field>
+            <Field label="Repeat it">
+              <input className="input" type="password" value={again} onChange={(e) => setAgain(e.target.value)} required autoComplete="new-password" />
+            </Field>
+          </div>
+          <Field label="Your password" help="To confirm it is you.">
+            <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required autoComplete="current-password" />
+          </Field>
+          <div className="row">
+            <button className="btn primary" disabled={save.isPending || phrase !== again || phrase.length < 12}>
+              Save
+            </button>
+            <button type="button" className="btn ghost" onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+            {again && phrase !== again && <span className="small" style={{ color: "var(--err)" }}>The passphrases differ.</span>}
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+function PanelRunModal({ id, onClose }: { id: number; onClose: () => void }) {
+  const d = useQuery({
+    queryKey: ["panel-backup-run", id],
+    queryFn: () => api.panelBackupRun(id),
+    refetchInterval: (q) => (q.state.data?.backup.status === "running" ? 1500 : false),
+  });
+  const run = d.data?.backup;
+  return (
+    <Modal wide title={`Panel backup #${id}`} onClose={onClose}>
+      {d.isPending ? (
+        <Loading />
+      ) : d.error ? (
+        <ErrorBox error={d.error} />
+      ) : (
+        <div className="stack">
+          {run?.error && <div className="alert err small">{run.error}</div>}
+          <LogView text={run?.log || (run?.status === "running" ? "Running…" : "(no output)")} />
+        </div>
+      )}
     </Modal>
   );
 }

@@ -2,15 +2,12 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -88,38 +85,15 @@ func (b *backupManager) repo(spec agentproto.BackupRepo) (restic.Repo, error) {
 	if err := os.MkdirAll(filepath.Join(b.dataDir, "restic-cache"), 0o700); err != nil {
 		return restic.Repo{}, err
 	}
-	r := restic.Repo{Password: spec.Password, Env: map[string]string{}}
-	switch spec.Kind {
-	case agentproto.StorageS3:
-		r.Location = "s3:" + strings.TrimSuffix(spec.Endpoint, "/") + "/" + spec.Bucket
-		if p := strings.Trim(spec.Path, "/"); p != "" {
-			r.Location += "/" + p
-		}
-		r.Env["AWS_ACCESS_KEY_ID"], r.Env["AWS_SECRET_ACCESS_KEY"] = spec.AccessKey, spec.SecretKey
-		if spec.Region != "" {
-			r.Env["AWS_DEFAULT_REGION"] = spec.Region
-		}
-	case agentproto.StorageSFTP:
-		key, knownHosts, err := b.sshFiles(spec)
-		if err != nil {
-			return restic.Repo{}, err
-		}
-		r.Location = "sftp:" + spec.User + "@" + spec.Host + ":" + spec.Path
-		// restic splits sftp.command on spaces; every part here is free of them.
-		r.Options = []string{"sftp.command=ssh -i " + key + " -p " + strconv.Itoa(spec.Port) +
-			" -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" +
-			" -o UserKnownHostsFile=" + knownHosts + " -o ConnectTimeout=20 -o ServerAliveInterval=30" +
-			" " + spec.User + "@" + spec.Host + " -s sftp"}
-	case agentproto.StorageLocal:
+	if spec.Kind == agentproto.StorageLocal {
 		if err := b.localPathAllowed(spec.Path); err != nil {
 			return restic.Repo{}, err
 		}
 		if err := os.MkdirAll(spec.Path, 0o700); err != nil {
 			return restic.Repo{}, fmt.Errorf("create the backup directory: %w", err)
 		}
-		r.Location = spec.Path
 	}
-	return r, nil
+	return restic.FromSpec(spec, filepath.Join(b.dataDir, "backup-ssh"))
 }
 
 // localPathAllowed keeps local repositories out of places other users
@@ -143,34 +117,6 @@ func (b *backupManager) localPathAllowed(p string) error {
 		}
 	}
 	return nil
-}
-
-// sshFiles writes the storage's SSH key and returns it with the storage's
-// known_hosts file (the host key is accepted on first use).
-func (b *backupManager) sshFiles(spec agentproto.BackupRepo) (key, knownHosts string, err error) {
-	dir := filepath.Join(b.dataDir, "backup-ssh")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", "", err
-	}
-	if strings.ContainsAny(dir, " \t") {
-		return "", "", errors.New("the agent's data directory must not contain spaces for SFTP backups")
-	}
-	sum := sha256.Sum256([]byte(spec.SSHKey))
-	key = filepath.Join(dir, hex.EncodeToString(sum[:8])+".key")
-	if _, err := os.Stat(key); err != nil {
-		data := spec.SSHKey
-		if !strings.HasSuffix(data, "\n") {
-			data += "\n"
-		}
-		tmp := key + ".tmp"
-		if err := os.WriteFile(tmp, []byte(data), 0o600); err != nil {
-			return "", "", err
-		}
-		if err := os.Rename(tmp, key); err != nil {
-			return "", "", err
-		}
-	}
-	return key, filepath.Join(dir, "known_hosts_"+spec.Host+"_"+strconv.Itoa(spec.Port)), nil
 }
 
 // Check opens the repository, creating it if needed.

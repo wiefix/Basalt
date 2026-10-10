@@ -317,6 +317,18 @@ export interface BackupRun {
   log?: string;
 }
 
+export interface PanelBackupRun {
+  id: number;
+  trigger: "manual" | "schedule";
+  status: "running" | "succeeded" | "failed";
+  error?: string;
+  snapshot?: string;
+  bytes: number;
+  created_at: string;
+  finished_at?: string;
+  log?: string;
+}
+
 export interface Snapshot {
   id: string;
   time: string;
@@ -519,8 +531,20 @@ export const api = {
     get<{ policy: BackupPolicy | null; backups: BackupRun[]; restic: string; items: BackupItem[] }>(`${base}/backups`),
   backup: (base: string, id: number) => get<{ backup: BackupRun }>(`${base}/backups/${id}`),
   backupStreamUrl: (base: string, id: number) => `${base}/backups/${id}/stream`,
-  setBackupPolicy: (base: string, b: Omit<BackupPolicy, "next_run">) => put<{ policy: BackupPolicy }>(`${base}/backup-policy`, b),
-  deleteBackupPolicy: (base: string) => del<{ ok: boolean }>(`${base}/backup-policy`),
+  setBackupPolicy: (url: string, b: Omit<BackupPolicy, "next_run">) => put<{ policy: BackupPolicy }>(url, b),
+  deleteBackupPolicy: (url: string) => del<{ ok: boolean }>(url),
+  panelBackup: () =>
+    get<{
+      recovery: { set: boolean; set_at?: string };
+      policy: BackupPolicy | null;
+      backups: PanelBackupRun[];
+      restic: string;
+      restic_error?: string;
+    }>("/api/v1/panel-backup"),
+  setRecoveryPassphrase: (password: string, passphrase: string) =>
+    put<{ ok: boolean }>("/api/v1/panel-backup/recovery", { password, passphrase }),
+  runPanelBackup: () => post<{ backup: PanelBackupRun }>("/api/v1/panel-backup/run"),
+  panelBackupRun: (id: number) => get<{ backup: PanelBackupRun }>(`/api/v1/panel-backup/runs/${id}`),
   runBackup: (base: string) => post<{ backup: BackupRun }>(`${base}/backups`),
   snapshots: (base: string) => get<{ snapshots: Snapshot[] }>(`${base}/snapshots`),
   restore: (base: string, snapshots: string[]) => post<{ backup: BackupRun }>(`${base}/restore`, { snapshots }),

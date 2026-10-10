@@ -34,6 +34,7 @@ const usage = `Usage: basalt <command> [flags]
 
 Commands:
   server    run the control plane (API and web UI)
+            (server recover: restore the panel from a backup)
   agent     run the agent on a managed host
             (agent enroll: register this host with a panel)
   proxy     run the web proxy (embedded Caddy) on a managed host
@@ -89,6 +90,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	if len(args) > 0 && args[0] == "local-enroll" {
 		return runLocalEnroll(ctx, args[1:], os.Stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "recover" {
+		return runRecover(ctx, args[1:], os.Stdin, os.Stdout, stderr)
+	}
 	cfg, err := config.ParseServer(args, stderr)
 	if err != nil {
 		return err
@@ -130,6 +134,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	} else if n > 0 {
 		log.Warn("deployments interrupted by the restart were marked as failed", "count", n)
+	}
+	if err := db.FailUnfinishedPanelBackups(ctx); err != nil {
+		return err
 	}
 	if n, err := db.FailUnfinishedBackups(ctx); err != nil {
 		return err
@@ -179,6 +186,8 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		AgentURL:       cfg.AgentURL,
 		TrustedProxies: trusted,
 		SetupTokenFile: setupFile,
+		DataDir:        cfg.DataDir,
+		Restic:         cfg.Restic,
 	})
 	hub.OnConnect(api.SyncSites)
 

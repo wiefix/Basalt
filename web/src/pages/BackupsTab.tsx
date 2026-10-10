@@ -31,7 +31,12 @@ function contents(items: BackupItem[]) {
 export interface BackupTarget {
   base: string; // API path, e.g. /api/v1/sites/1
   name: string;
+  policyUrl?: string; // default base + "/backup-policy"
+  queryKey?: unknown[]; // refreshed when the policy changes; default ["backups", base]
 }
+
+const policyUrl = (t: BackupTarget) => t.policyUrl ?? `${t.base}/backup-policy`;
+const targetKey = (t: BackupTarget) => t.queryKey ?? ["backups", t.base];
 
 export function BackupsTab({ target, user }: { target: BackupTarget; user: User }) {
   const qc = useQueryClient();
@@ -150,7 +155,7 @@ export function BackupsTab({ target, user }: { target: BackupTarget; user: User 
   );
 }
 
-function PolicyCard({ target, policy }: { target: BackupTarget; policy: BackupPolicy | null }) {
+export function PolicyCard({ target, policy }: { target: BackupTarget; policy: BackupPolicy | null }) {
   const qc = useQueryClient();
   const toast = useToast();
   const confirm = useConfirm();
@@ -169,7 +174,7 @@ function PolicyCard({ target, policy }: { target: BackupTarget; policy: BackupPo
   }, [storages.data, storageId]);
   const save = useMutation({
     mutationFn: () =>
-      api.setBackupPolicy(target.base, {
+      api.setBackupPolicy(policyUrl(target), {
         storage_id: Number(storageId),
         schedule,
         at_minute: schedule === "hourly" ? parseMinute(time) % 60 : parseMinute(time),
@@ -179,7 +184,7 @@ function PolicyCard({ target, policy }: { target: BackupTarget; policy: BackupPo
         keep_monthly: keep.monthly,
       }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["backups", target.base] });
+      qc.invalidateQueries({ queryKey: targetKey(target) });
       toast("Backup settings saved");
     },
   });
@@ -192,8 +197,8 @@ function PolicyCard({ target, policy }: { target: BackupTarget; policy: BackupPo
     });
     if (!ok) return;
     try {
-      await api.deleteBackupPolicy(target.base);
-      qc.invalidateQueries({ queryKey: ["backups", target.base] });
+      await api.deleteBackupPolicy(policyUrl(target));
+      qc.invalidateQueries({ queryKey: targetKey(target) });
     } catch (e) {
       toast(errorMessage(e), true);
     }

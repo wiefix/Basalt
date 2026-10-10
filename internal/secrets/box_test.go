@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -58,5 +59,36 @@ func TestLoadOrCreateKey(t *testing.T) {
 	os.Chmod(path, 0o644)
 	if _, err := LoadOrCreateKey(path); err == nil {
 		t.Fatal("world-readable key accepted")
+	}
+}
+
+func TestRecoveryFile(t *testing.T) {
+	key := make([]byte, KeySize)
+	key[0] = 7
+	b, _ := NewBox(key)
+	if _, err := b.WrapKey("short"); err == nil {
+		t.Fatal("short passphrase accepted")
+	}
+	f, err := b.WrapKey("correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(f, key) {
+		t.Fatal("key in clear")
+	}
+	got, err := UnwrapKey(f, "correct horse battery staple")
+	if err != nil || !b.SameKey(got) {
+		t.Fatalf("unwrap: %v", err)
+	}
+	if _, err := UnwrapKey(f, "wrong horse battery staple"); !errors.Is(err, ErrRecoveryPassphrase) {
+		t.Fatalf("wrong passphrase: %v", err)
+	}
+	// A crafted file cannot ask for absurd KDF costs.
+	bomb := bytes.Replace(f, []byte(`"memory_kib": 65536`), []byte(`"memory_kib": 4000000000`), 1)
+	if _, err := UnwrapKey(bomb, "correct horse battery staple"); err == nil || errors.Is(err, ErrRecoveryPassphrase) {
+		t.Fatalf("memory bomb: %v", err)
+	}
+	if _, err := UnwrapKey([]byte("{}"), "x"); err == nil {
+		t.Fatal("empty file accepted")
 	}
 }

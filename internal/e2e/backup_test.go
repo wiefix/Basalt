@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -10,6 +11,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/wiefix/basalt/internal/secrets"
+	"github.com/wiefix/basalt/internal/server"
 )
 
 // waitBackup waits for a backup or restore run to end and returns it with
@@ -333,5 +337,95 @@ func TestAppBackupsWithDocker(t *testing.T) {
 	snaps := p.call(200, "GET", "/api/v1/apps/"+pg+"/snapshots", nil)["snapshots"].([]any)
 	if len(snaps) != 1 || snaps[0].(map[string]any)["item"].(map[string]any)["kind"] != "db_dump" {
 		t.Fatalf("snapshots = %v", snaps)
+	}
+}
+
+// TestPanelBackup backs the panel up with restic, then reads the snapshot
+// back with the restic command and the recovery passphrase. Needs restic.
+func TestPanelBackup(t *testing.T) {
+	bin, err := exec.LookPath("restic")
+	if err != nil {
+		t.Skip("restic is not installed")
+	}
+	p := startPanelWith(t, server.Options{Restic: bin})
+	got := p.call(200, "GET", "/api/v1/panel-backup", nil)
+	if got["recovery"].(map[string]any)["set"] != false || got["restic"] == "" {
+		t.Fatalf("initial state = %v", got)
+	}
+	p.call(http.StatusUnprocessableEntity, "POST", "/api/v1/panel-backup/run", map[string]any{})
+	dir := filepath.Join(t.TempDir(), "backups")
+	st := p.call(http.StatusCreated, "POST", "/api/v1/backup-storages", map[string]any{
+		"name": "local", "kind": "local", "path": dir})["storage"].(map[string]any)
+	p.call(http.StatusUnprocessableEntity, "PUT", "/api/v1/panel-backup/policy", map[string]any{"storage_id": st["id"], "schedule": "daily"})
+	p.call(200, "PUT", "/api/v1/panel-backup/policy", map[string]any{"storage_id": st["id"], "schedule": "daily",
+		"at_minute": 60, "keep_last": 3, "keep_daily": 7})
+	p.call(http.StatusConflict, "DELETE", "/api/v1/backup-storages/"+jsonID(st["id"]), nil)
+	// Without a recovery passphrase a backup would be useless.
+	p.call(http.StatusUnprocessableEntity, "POST", "/api/v1/panel-backup/run", map[string]any{})
+
+	const phrase = "violet tractor sings at dawn"
+	p.call(http.StatusForbidden, "PUT", "/api/v1/panel-backup/recovery", map[string]any{"password": "wrong", "passphrase": phrase})
+	p.call(http.StatusUnprocessableEntity, "PUT", "/api/v1/panel-backup/recovery", map[string]any{"password": "owner password 123", "passphrase": "short"})
+	// Admins manage backups, only the owner sets the passphrase.
+	p.call(http.StatusCreated, "POST", "/api/v1/users", map[string]string{"email": "a@example.com", "name": "A", "password": "admin password 1", "role": "admin"})
+	a := *p
+	a.hc = &http.Client{Jar: newJar()}
+	a.call(200, "POST", "/api/v1/auth/login", map[string]string{"email": "a@example.com", "password": "admin password 1"})
+	a.call(http.StatusForbidden, "PUT", "/api/v1/panel-backup/recovery", map[string]any{"password": "admin password 1", "passphrase": phrase})
+	p.call(200, "PUT", "/api/v1/panel-backup/recovery", map[string]any{"password": "owner password 123", "passphrase": phrase})
+	var stored string
+	p.db.R.QueryRow(`SELECT value FROM settings WHERE key = 'recovery_key'`).Scan(&stored)
+	if stored == "" || strings.Contains(stored, phrase) {
+		t.Fatal("recovery key not stored, or the passphrase is")
+	}
+
+	b := a.call(http.StatusAccepted, "POST", "/api/v1/panel-backup/run", map[string]any{})["backup"].(map[string]any)
+	var run map[string]any
+	eventually(t, "panel backup", func() bool {
+		run = p.call(200, "GET", "/api/v1/panel-backup/runs/"+jsonID(b["id"]), nil)["backup"].(map[string]any)
+		return run["status"] != "running"
+	})
+	if run["status"] != "succeeded" || run["snapshot"] == "" {
+		t.Fatalf("panel backup: %v\n%v", run, run["log"])
+	}
+	t.Logf("panel backup log:\n%s", run["log"])
+	if _, err := os.Stat(filepath.Join(p.dataDir, "panel-backup")); !os.IsNotExist(err) {
+		t.Fatal("staging directory left behind")
+	}
+
+	// Disaster recovery by hand: restic restore with the storage password,
+	// then the key with the passphrase.
+	pw := p.call(200, "GET", "/api/v1/backup-storages/"+jsonID(st["id"])+"/password", nil)["password"].(string)
+	target := t.TempDir()
+	cmd := exec.Command(bin, "-r", filepath.Join(dir, "panel"), "restore", "latest", "--target", target)
+	cmd.Env = append(os.Environ(), "RESTIC_PASSWORD="+pw)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("restic restore: %v %s", err, out)
+	}
+	var restored string
+	filepath.WalkDir(target, func(path string, d os.DirEntry, err error) error {
+		if err == nil && d.Name() == "master-key.json" {
+			restored = filepath.Dir(path)
+		}
+		return nil
+	})
+	wrapped, err := os.ReadFile(filepath.Join(restored, "master-key.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := secrets.UnwrapKey(wrapped, phrase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if orig, _ := os.ReadFile(filepath.Join(p.dataDir, "master.key")); !bytes.Equal(orig, key) {
+		t.Fatal("recovered key differs")
+	}
+	for _, f := range []string{"basalt.db", "RESTORE.txt"} {
+		if _, err := os.Stat(filepath.Join(restored, f)); err != nil {
+			t.Fatalf("%s missing from the snapshot", f)
+		}
+	}
+	if list := p.call(200, "GET", "/api/v1/panel-backup", nil)["backups"].([]any); len(list) != 1 {
+		t.Fatalf("runs = %v", list)
 	}
 }

@@ -225,6 +225,10 @@ MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native'
 
 if [ "$MODE" = panel ]; then
+	# Local backup storages default to /var/backups/basalt: agents (root)
+	# write server-<id>/ there, the panel its own panel/.
+	install -d -m 0711 /var/backups/basalt
+	install -d -o basalt -g basalt -m 0700 /var/backups/basalt/panel
 	cat >"$UNITS/basalt-server.service" <<EOF
 [Unit]
 Description=Basalt panel
@@ -239,7 +243,7 @@ Restart=always
 RestartSec=2
 UMask=0077
 ProtectSystem=strict
-ReadWritePaths=$LIB/server
+ReadWritePaths=$LIB/server -/var/backups/basalt/panel
 CapabilityBoundingSet=
 AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

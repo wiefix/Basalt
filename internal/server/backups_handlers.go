@@ -203,6 +203,10 @@ func (s *Server) handleDeleteStorage(w http.ResponseWriter, r *http.Request, p *
 	if !ok {
 		return
 	}
+	if pol, err := s.db.PanelBackupPolicy(r.Context()); err == nil && pol.StorageID == st.ID {
+		writeError(w, http.StatusConflict, "the panel is backed up to this storage; change that first")
+		return
+	}
 	err := s.db.DeleteBackupStorage(r.Context(), st.ID)
 	if errors.Is(err, store.ErrStorageInUse) {
 		writeError(w, http.StatusConflict, "sites or apps are backed up to this storage; change their backup settings first")
@@ -234,6 +238,11 @@ func (s *Server) handleStoragePassword(w http.ResponseWriter, r *http.Request, p
 
 // repoFor describes the repository a server keeps in a storage.
 func (s *Server) repoFor(st *store.BackupStorage, serverID int64) (agentproto.BackupRepo, error) {
+	return s.repoAt(st, "server-"+strconv.FormatInt(serverID, 10))
+}
+
+// repoAt describes the repository in folder sub of a storage.
+func (s *Server) repoAt(st *store.BackupStorage, sub string) (agentproto.BackupRepo, error) {
 	pw, err := s.box.Open(st.PasswordSealed, storagePasswordAD(st.ID))
 	if err != nil {
 		return agentproto.BackupRepo{}, fmt.Errorf("decrypt repository password: %w", err)
@@ -247,7 +256,7 @@ func (s *Server) repoFor(st *store.BackupStorage, serverID int64) (agentproto.Ba
 	c := st.Config
 	repo := agentproto.BackupRepo{Kind: st.Kind, Endpoint: c.Endpoint, Bucket: c.Bucket, Region: c.Region,
 		AccessKey: c.AccessKey, Host: c.Host, Port: c.Port, User: c.User, Password: string(pw),
-		Path: path.Join(c.Path, "server-"+strconv.FormatInt(serverID, 10))}
+		Path: path.Join(c.Path, sub)}
 	if strings.HasPrefix(c.Path, "/") {
 		repo.Path = "/" + strings.TrimPrefix(repo.Path, "/")
 	} else {
@@ -969,6 +978,7 @@ func (s *Server) backupLoop(ctx context.Context) {
 	defer t.Stop()
 	for {
 		s.runDueBackups(ctx)
+		s.runDuePanelBackup(ctx)
 		select {
 		case <-ctx.Done():
 			return

@@ -41,6 +41,10 @@ type Options struct {
 	SetupTokenFile string
 	// Now is the clock; defaults to time.Now.
 	Now func() time.Time
+	// DataDir is the panel's data directory (backup staging, restic cache).
+	DataDir string
+	// Restic is the restic binary panel backups run with.
+	Restic string
 	// ImagesKept is how many images of recent deployments each app keeps
 	// on its server (default 3).
 	ImagesKept int
@@ -58,6 +62,8 @@ type Server struct {
 	agentURL      string
 	now           func() time.Time
 	imagesKept    int
+	dataDir       string
+	restic        string
 
 	setupMu    sync.Mutex
 	setupToken string
@@ -80,6 +86,9 @@ func New(o Options) *Server {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	if o.Restic == "" {
+		o.Restic = "restic"
+	}
 	if o.ImagesKept <= 0 {
 		o.ImagesKept = defaultImagesKept
 	}
@@ -95,6 +104,8 @@ func New(o Options) *Server {
 		agentURL:      o.AgentURL,
 		now:           o.Now,
 		imagesKept:    o.ImagesKept,
+		dataDir:       o.DataDir,
+		restic:        o.Restic,
 		setupToken:    o.SetupToken,
 		ipLimiter:     auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
 		emailLimiter:  auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
@@ -157,6 +168,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/sites/{id}/databases/{did}", s.requireRole(store.RoleAdmin, s.handleDeleteDatabase))
 	s.backupRoutes(mux, "/api/v1/sites/{id}", s.pathSiteTarget)
 	s.backupRoutes(mux, "/api/v1/apps/{id}", s.pathAppTarget)
+	mux.Handle("GET /api/v1/panel-backup", s.requireRole(store.RoleAdmin, s.handlePanelBackup))
+	mux.Handle("PUT /api/v1/panel-backup/recovery", s.requireRole(store.RoleOwner, s.handleSetRecovery))
+	mux.Handle("PUT /api/v1/panel-backup/policy", s.requireRole(store.RoleAdmin, s.handleSetPanelBackupPolicy))
+	mux.Handle("DELETE /api/v1/panel-backup/policy", s.requireRole(store.RoleAdmin, s.handleDeletePanelBackupPolicy))
+	mux.Handle("POST /api/v1/panel-backup/run", s.requireRole(store.RoleAdmin, s.handleRunPanelBackup))
+	mux.Handle("GET /api/v1/panel-backup/runs/{bid}", s.requireRole(store.RoleAdmin, s.handleGetPanelBackup))
 	mux.Handle("GET /api/v1/backup-storages", s.requireRole(store.RoleAdmin, s.handleListStorages))
 	mux.Handle("POST /api/v1/backup-storages", s.requireRole(store.RoleAdmin, s.handleCreateStorage))
 	mux.Handle("PUT /api/v1/backup-storages/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateStorage))

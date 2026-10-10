@@ -36,6 +36,7 @@ type panel struct {
 	agentURL string
 	api      *httptest.Server
 	hc       *http.Client
+	dataDir  string
 }
 
 func startPanel(t *testing.T) *panel { return startPanelWith(t, server.Options{}) }
@@ -75,11 +76,14 @@ func startPanelWith(t *testing.T, o server.Options) *panel {
 	o.Log, o.DB, o.Box = log, db, box
 	o.Hasher = auth.NewHasher(auth.Argon2Params{Memory: 1024, Time: 1, Threads: 1}, 4)
 	o.SetupToken, o.Agents, o.AgentURL = "setup", hub, agentURL
+	if o.DataDir == "" {
+		o.DataDir = dir
+	}
 	api := httptest.NewServer(server.New(o).Handler())
 	t.Cleanup(api.Close)
 
 	jar, _ := cookiejar.New(nil)
-	p := &panel{t: t, db: db, hub: hub, agentURL: agentURL, api: api, hc: &http.Client{Jar: jar}}
+	p := &panel{t: t, db: db, hub: hub, agentURL: agentURL, api: api, hc: &http.Client{Jar: jar}, dataDir: o.DataDir}
 	p.call(http.StatusCreated, "POST", "/api/v1/setup", map[string]string{
 		"setup_token": "setup", "email": "o@example.com", "name": "O", "password": "owner password 123",
 	})

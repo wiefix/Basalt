@@ -38,6 +38,7 @@ type Server struct {
 	// BinariesDir optionally holds basalt-<os>-<arch> builds served to
 	// agents on other architectures.
 	BinariesDir string
+	Restic      string
 }
 
 // LocalEnroll configures `basalt server local-enroll`.
@@ -127,6 +128,7 @@ func ParseServer(args []string, output io.Writer) (Server, error) {
 	fs.StringVar(&cfg.AgentListen, "agent-listen", env("AGENT_LISTEN", ":8443"), "agent channel listen address (mutual TLS)")
 	fs.StringVar(&cfg.AgentURL, "agent-url", env("AGENT_URL", ""), "URL agents use to reach the agent channel (default https://<hostname>:<agent port>)")
 	fs.StringVar(&cfg.TrustedProxies, "trusted-proxies", env("TRUSTED_PROXIES", ""), "comma-separated IPs/CIDRs of reverse proxies allowed to set X-Forwarded-For")
+	fs.StringVar(&cfg.Restic, "restic", env("RESTIC", "restic"), "restic binary used for backups of the panel")
 	fs.StringVar(&cfg.BinariesDir, "binaries-dir", env("BINARIES_DIR", ""), "directory with basalt-<os>-<arch> binaries to serve to agents")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
