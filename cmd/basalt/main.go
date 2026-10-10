@@ -131,6 +131,11 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	} else if n > 0 {
 		log.Warn("deployments interrupted by the restart were marked as failed", "count", n)
 	}
+	if n, err := db.FailUnfinishedBackups(ctx); err != nil {
+		return err
+	} else if n > 0 {
+		log.Warn("backups interrupted by the restart were marked as failed", "count", n)
+	}
 
 	var setupToken string
 	setupFile := filepath.Join(cfg.DataDir, "setup-token")
@@ -225,6 +230,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		MySQLSocket:   cfg.MySQLSocket,
 		DockerSocket:  cfg.DockerSocket,
 		GitCAFile:     cfg.GitCAFile,
+		Restic:        cfg.Restic,
 		PanelDomain:   cfg.PanelDomain,
 		PanelUpstream: cfg.PanelUpstream,
 	}, log)

@@ -34,6 +34,7 @@ type Server struct {
 	Docker        string // Docker Engine version, "" if unavailable
 	// DockerSecurity is how the daemon isolates containers; nil if unknown.
 	DockerSecurity *docker.Security
+	Restic         string // restic version, "" if backups cannot run
 	CreatedAt      time.Time
 }
 
@@ -41,7 +42,7 @@ var ErrNameTaken = errors.New("name already in use")
 
 const serverColumns = `id, name, enrolled_at IS NOT NULL, enroll_expires_at, COALESCE(cert_fp, ''),
 	COALESCE(prev_cert_fp, ''), cert_expires_at, hostname, os, arch, kernel, distro, agent_version,
-	cpu_count, mem_total, last_seen_at, last_ip, php_versions, isolated, docker, docker_security, created_at`
+	cpu_count, mem_total, last_seen_at, last_ip, php_versions, isolated, docker, docker_security, restic, created_at`
 
 func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 	var s Server
@@ -50,7 +51,7 @@ func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 	var phpVersions, dockerSec string
 	err := row.Scan(&s.ID, &s.Name, &s.Enrolled, &enrollExp, &s.CertFP, &s.PrevCertFP, &certExp,
 		&s.Hostname, &s.OS, &s.Arch, &s.Kernel, &s.Distro, &s.AgentVersion,
-		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &phpVersions, &s.Isolated, &s.Docker, &dockerSec, &created)
+		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &phpVersions, &s.Isolated, &s.Docker, &dockerSec, &s.Restic, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

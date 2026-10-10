@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,6 +60,9 @@ func startHostWith(t *testing.T, p *panel, dockerSocket string, configure ...fun
 	cfg := agent.Config{
 		DataDir: agentDir, ProxyDir: proxyDir, SitesRoot: sitesRoot,
 		HTTPPort: freePort(t), HTTPSPort: httpsPort, SFTPListen: "127.0.0.1:0", DockerSocket: dockerSocket,
+	}
+	if bin, err := exec.LookPath("restic"); err == nil {
+		cfg.Restic = bin
 	}
 	for _, f := range configure {
 		f(&cfg)

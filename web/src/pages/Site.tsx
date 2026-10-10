@@ -5,6 +5,7 @@ import { api, can, type DatabaseCredentials, type Site, type User } from "../api
 import { FileManager } from "../components/FileManager";
 import { CodeBox, CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useConfirm, useToast } from "../components/ui";
 import { SyncBadge } from "./Server";
+import { SiteBackupsTab } from "./SiteBackups";
 
 export function SitePage({ user }: { user: User }) {
   const id = Number(useParams().id);
@@ -52,6 +53,7 @@ export function SitePage({ user }: { user: User }) {
         {tab(`/sites/${id}/domains`, "Domains")}
         {tab(`/sites/${id}/sftp`, "SFTP")}
         {tab(`/sites/${id}/databases`, "Databases")}
+        {tab(`/sites/${id}/backups`, "Backups")}
         {can(user, "admin") && tab(`/sites/${id}/settings`, "Settings")}
       </div>
       <Routes>
@@ -59,6 +61,7 @@ export function SitePage({ user }: { user: User }) {
         <Route path="domains" element={<DomainsTab site={s} user={user} />} />
         <Route path="sftp" element={<SFTPTab site={s} user={user} host={server?.last_ip} />} />
         <Route path="databases" element={<DatabasesTab site={s} user={user} />} />
+        <Route path="backups" element={<SiteBackupsTab site={s} user={user} />} />
         <Route path="settings" element={<SettingsTab site={s} phpVersions={server?.isolated ? server.php_versions : []} />} />
       </Routes>
     </>

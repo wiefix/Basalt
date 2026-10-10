@@ -49,6 +49,7 @@ type serverView struct {
 	Isolated       bool             `json:"isolated"`
 	Docker         string           `json:"docker"`
 	DockerSecurity *docker.Security `json:"docker_security,omitempty"`
+	Restic         string           `json:"restic"`
 	CreatedAt      time.Time        `json:"created_at"`
 }
 
@@ -66,7 +67,7 @@ func (s *Server) viewServer(srv *store.Server) serverView {
 		CPUCount: srv.CPUCount, MemTotal: srv.MemTotal, LastSeen: srv.LastSeen, LastIP: srv.LastIP,
 		CertExpires: srv.CertExpires, EnrollExpires: srv.EnrollExpires, CreatedAt: srv.CreatedAt,
 		PHPVersions: srv.PHPVersions, Isolated: srv.Isolated, Docker: srv.Docker,
-		DockerSecurity: srv.DockerSecurity,
+		DockerSecurity: srv.DockerSecurity, Restic: srv.Restic,
 	}
 }
 

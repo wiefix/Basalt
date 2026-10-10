@@ -75,7 +75,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # ---------- packages ----------
 
-PKGS="ca-certificates curl"
+PKGS="ca-certificates curl bzip2"
 [ "$WITH_PHP" -eq 1 ] && PKGS="$PKGS php-fpm php-mysql php-curl php-gd php-intl php-mbstring php-xml php-zip"
 [ "$WITH_DB" -eq 1 ] && PKGS="$PKGS mariadb-server"
 export DEBIAN_FRONTEND=noninteractive
@@ -113,6 +113,33 @@ if [ "$WITH_DOCKER" -eq 1 ]; then
 		fi
 	fi
 	systemctl enable --now docker.service >/dev/null 2>&1
+fi
+
+# ---------- restic (backups) ----------
+
+# The distribution's restic when it is recent enough (0.17+), otherwise the
+# official release, checked against these checksums.
+RESTIC_VERSION=0.19.1
+RESTIC_SHA256_amd64=f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c
+RESTIC_SHA256_arm64=a5f64aaab53d51e311fa3829124c5b703f2d14cf187d8640b6be3b2b49376465
+restic_ok() { # version
+	[ -n "$1" ] && dpkg --compare-versions "$1" ge 0.17.0 2>/dev/null
+}
+installed=$(restic version 2>/dev/null | awk '{print $2}')
+if ! restic_ok "$installed"; then
+	candidate=$(apt-cache policy restic 2>/dev/null | awk '/Candidate:/ {print $2}')
+	if restic_ok "${candidate%%-*}"; then
+		say "Installing restic $candidate"
+		apt-get install -y -qq restic >/dev/null
+	else
+		say "Downloading restic $RESTIC_VERSION"
+		eval "sum=\$RESTIC_SHA256_$ARCH"
+		curl -fsSL --retry 3 -o "$TMP/restic.bz2" \
+			"https://github.com/restic/restic/releases/download/v$RESTIC_VERSION/restic_${RESTIC_VERSION}_linux_$ARCH.bz2"
+		echo "$sum  $TMP/restic.bz2" | sha256sum -c - >/dev/null 2>&1 || die "the restic download does not match its checksum"
+		bunzip2 -c "$TMP/restic.bz2" >"$TMP/restic"
+		install -m 0755 "$TMP/restic" /usr/local/bin/restic
+	fi
 fi
 
 # ---------- binary ----------

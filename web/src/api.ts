@@ -31,6 +31,7 @@ export interface Server {
   enroll_expires?: string;
   php_versions: string[];
   isolated: boolean;
+  restic: string; // version, "" when backups cannot run there
   docker: string;
   // How Docker isolates containers (absent when unknown).
   docker_security?: { userns: boolean; rootless?: boolean; seccomp?: string; apparmor: boolean; selinux?: boolean; cgroup_v2: boolean };
@@ -263,6 +264,64 @@ export interface DatabaseConnection {
   credentials: { database?: string; user?: string; password: string; root_password?: string };
 }
 
+export interface BackupStorage {
+  id: number;
+  name: string;
+  kind: "s3" | "sftp" | "local";
+  endpoint?: string;
+  bucket?: string;
+  region?: string;
+  access_key?: string;
+  host?: string;
+  port?: number;
+  user?: string;
+  path: string;
+  ssh_public_key?: string;
+  policies: number;
+  created_at: string;
+}
+
+export type StorageInput = Omit<BackupStorage, "id" | "policies" | "created_at" | "ssh_public_key"> & { secret_key?: string };
+
+export interface BackupPolicy {
+  storage_id: number;
+  schedule: "manual" | "hourly" | "daily";
+  at_minute: number; // UTC
+  keep_last: number;
+  keep_daily: number;
+  keep_weekly: number;
+  keep_monthly: number;
+  next_run?: string;
+}
+
+export interface BackupItem {
+  kind: "site_files" | "mariadb";
+  site_id?: number;
+  database?: string;
+}
+
+export interface BackupRun {
+  id: number;
+  kind: "backup" | "restore";
+  trigger: "manual" | "schedule";
+  status: "running" | "succeeded" | "failed";
+  error?: string;
+  storage_id?: number;
+  snapshots: { item: BackupItem; id?: string; snapshot?: string; bytes?: number; data_added?: number }[];
+  bytes: number;
+  data_added: number;
+  created_at: string;
+  finished_at?: string;
+  log?: string;
+}
+
+export interface Snapshot {
+  id: string;
+  time: string;
+  item: BackupItem;
+  bytes: number;
+}
+
 export interface Webhook {
   path: string;
   secret: string;
@@ -445,6 +504,25 @@ export const api = {
   appLogsStreamUrl: (id: number, tail: number, service = "") =>
     `/api/v1/apps/${id}/logs/stream?tail=${tail}${service ? `&service=${encodeURIComponent(service)}` : ""}`,
   deploymentStreamUrl: (id: number, did: number) => `/api/v1/apps/${id}/deployments/${did}/stream`,
+
+  backupStorages: () => get<{ storages: BackupStorage[] }>("/api/v1/backup-storages"),
+  createBackupStorage: (b: StorageInput) => post<{ storage: BackupStorage }>("/api/v1/backup-storages", b),
+  updateBackupStorage: (id: number, b: StorageInput) => put<{ storage: BackupStorage }>(`/api/v1/backup-storages/${id}`, b),
+  deleteBackupStorage: (id: number) => del<{ ok: boolean }>(`/api/v1/backup-storages/${id}`),
+  backupStoragePassword: (id: number) => get<{ password: string }>(`/api/v1/backup-storages/${id}/password`),
+  checkBackupStorage: (id: number, serverId: number) =>
+    post<{ ok: boolean; error?: string }>(`/api/v1/backup-storages/${id}/check`, { server_id: serverId }),
+  siteBackups: (siteId: number) =>
+    get<{ policy: BackupPolicy | null; backups: BackupRun[]; restic: string }>(`/api/v1/sites/${siteId}/backups`),
+  siteBackup: (siteId: number, id: number) => get<{ backup: BackupRun }>(`/api/v1/sites/${siteId}/backups/${id}`),
+  siteBackupStreamUrl: (siteId: number, id: number) => `/api/v1/sites/${siteId}/backups/${id}/stream`,
+  setSiteBackupPolicy: (siteId: number, b: Omit<BackupPolicy, "next_run">) =>
+    put<{ policy: BackupPolicy }>(`/api/v1/sites/${siteId}/backup-policy`, b),
+  deleteSiteBackupPolicy: (siteId: number) => del<{ ok: boolean }>(`/api/v1/sites/${siteId}/backup-policy`),
+  runSiteBackup: (siteId: number) => post<{ backup: BackupRun }>(`/api/v1/sites/${siteId}/backups`),
+  siteSnapshots: (siteId: number) => get<{ snapshots: Snapshot[] }>(`/api/v1/sites/${siteId}/snapshots`),
+  restoreSite: (siteId: number, snapshots: string[]) =>
+    post<{ backup: BackupRun }>(`/api/v1/sites/${siteId}/restore`, { snapshots }),
 
   sftpUsers: (siteId: number) =>
     get<{ users: SFTPUser[]; connection: SFTPConnection | null }>(`/api/v1/sites/${siteId}/sftp-users`),

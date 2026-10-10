@@ -82,6 +82,8 @@ type Hello struct {
 	Docker string `json:"docker,omitempty"`
 	// DockerSecurity describes how the daemon isolates containers.
 	DockerSecurity *docker.Security `json:"docker_security,omitempty"`
+	// Restic is the version of restic backups run with ("" if absent).
+	Restic string `json:"restic,omitempty"`
 }
 
 type Metrics struct {

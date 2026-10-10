@@ -67,11 +67,13 @@ type Server struct {
 	mfaLimiter   *auth.Limiter // second-factor attempts, per account
 	hookLimiter  *auth.Limiter // webhook deliveries, per app
 
-	live     *liveLogs // output of running deployments
-	pendMu   sync.Mutex
-	pending  map[int64]string // per app: commit pushed while a deployment ran
-	streamMu sync.Mutex
-	streams  map[int64]int // open event streams per user
+	live *liveLogs // output of running deployments
+	// backupLive holds the output of running backups and restores.
+	backupLive *liveLogs
+	pendMu     sync.Mutex
+	pending    map[int64]string // per app: commit pushed while a deployment ran
+	streamMu   sync.Mutex
+	streams    map[int64]int // open event streams per user
 }
 
 func New(o Options) *Server {
@@ -99,6 +101,7 @@ func New(o Options) *Server {
 		mfaLimiter:    auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
 		hookLimiter:   auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
 		live:          &liveLogs{m: map[int64]*liveLog{}},
+		backupLive:    &liveLogs{m: map[int64]*liveLog{}},
 		pending:       map[int64]string{},
 		streams:       map[int64]int{},
 	}
@@ -152,6 +155,20 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/sites/{id}/databases", s.requireRole(store.RoleAdmin, s.handleCreateDatabase))
 	mux.Handle("POST /api/v1/sites/{id}/databases/{did}/password", s.requireRole(store.RoleAdmin, s.handleResetDatabasePassword))
 	mux.Handle("DELETE /api/v1/sites/{id}/databases/{did}", s.requireRole(store.RoleAdmin, s.handleDeleteDatabase))
+	mux.Handle("GET /api/v1/sites/{id}/backups", s.requireRole(store.RoleViewer, s.handleSiteBackups))
+	mux.Handle("POST /api/v1/sites/{id}/backups", s.requireRole(store.RoleMember, s.handleRunSiteBackup))
+	mux.Handle("GET /api/v1/sites/{id}/backups/{bid}", s.requireRole(store.RoleMember, s.handleGetSiteBackup))
+	mux.Handle("GET /api/v1/sites/{id}/backups/{bid}/stream", s.requireRole(store.RoleMember, s.handleSiteBackupStream))
+	mux.Handle("PUT /api/v1/sites/{id}/backup-policy", s.requireRole(store.RoleAdmin, s.handleSetSiteBackupPolicy))
+	mux.Handle("DELETE /api/v1/sites/{id}/backup-policy", s.requireRole(store.RoleAdmin, s.handleDeleteSiteBackupPolicy))
+	mux.Handle("GET /api/v1/sites/{id}/snapshots", s.requireRole(store.RoleMember, s.handleSiteSnapshots))
+	mux.Handle("POST /api/v1/sites/{id}/restore", s.requireRole(store.RoleAdmin, s.handleRestoreSite))
+	mux.Handle("GET /api/v1/backup-storages", s.requireRole(store.RoleAdmin, s.handleListStorages))
+	mux.Handle("POST /api/v1/backup-storages", s.requireRole(store.RoleAdmin, s.handleCreateStorage))
+	mux.Handle("PUT /api/v1/backup-storages/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateStorage))
+	mux.Handle("DELETE /api/v1/backup-storages/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteStorage))
+	mux.Handle("GET /api/v1/backup-storages/{id}/password", s.requireRole(store.RoleAdmin, s.handleStoragePassword))
+	mux.Handle("POST /api/v1/backup-storages/{id}/check", s.requireRole(store.RoleAdmin, s.handleCheckStorage))
 	mux.Handle("GET /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleViewer, s.handleListSFTPUsers))
 	mux.Handle("POST /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleAdmin, s.handleCreateSFTPUser))
 	mux.Handle("DELETE /api/v1/sites/{id}/sftp-users/{uid}", s.requireRole(store.RoleAdmin, s.handleDeleteSFTPUser))
@@ -228,6 +245,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	}
 
 	go s.cleanupLoop(ctx)
+	go s.backupLoop(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -60,6 +61,7 @@ func TestLinuxIsolationAndPHP(t *testing.T) {
 		DataDir: agentDir, ProxyDir: proxyDir, SitesRoot: sitesRoot,
 		HTTPPort: freePort(t), HTTPSPort: httpsPort, SFTPListen: "127.0.0.1:0",
 		Isolate: true, PHPRunDir: "/run/basalt-it/php", MySQLSocket: "/run/mysqld/mysqld.sock",
+		Restic: "restic",
 	}, log)
 	if err != nil {
 		t.Fatal(err)
@@ -270,6 +272,51 @@ try {
 		t.Fatalf("old database password still works: %s", body)
 	}
 
+	// Backups: files and a consistent dump of the database, restored after
+	// both were damaged.
+	eventually(t, "restic reported", func() bool { return p.server(sid)["restic"] != "" })
+	os.RemoveAll("/var/backups/basalt-it")
+	st := p.call(http.StatusCreated, "POST", "/api/v1/backup-storages", map[string]any{
+		"name": "local", "kind": "local", "path": "/var/backups/basalt-it"})["storage"].(map[string]any)
+	p.call(200, "PUT", "/api/v1/sites/"+idA+"/backup-policy", map[string]any{
+		"storage_id": st["id"], "schedule": "manual", "keep_last": 3})
+	bk := p.call(http.StatusAccepted, "POST", "/api/v1/sites/"+idA+"/backups", map[string]any{})["backup"].(map[string]any)
+	done := waitBackup(t, p, idA, jsonID(bk["id"]))
+	if done["status"] != "succeeded" || len(done["snapshots"].([]any)) != 2 {
+		t.Fatalf("backup: %v\n%v", done, done["log"])
+	}
+	t.Logf("backup log:\n%s", done["log"])
+	mysql := func(sql string) string {
+		out, err := exec.Command("mariadb", "-N", "-e", sql).CombinedOutput()
+		if err != nil {
+			t.Fatalf("mariadb: %v %s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	mysql("DELETE FROM " + credA["database"].(string) + ".t")
+	p.raw("PUT", "/api/v1/sites/"+idA+"/files/content"+q("/public/db.php"), "", []byte("damaged"))
+	var ids []string
+	for _, sn := range done["snapshots"].([]any) {
+		ids = append(ids, sn.(map[string]any)["id"].(string))
+	}
+	rs := p.call(http.StatusAccepted, "POST", "/api/v1/sites/"+idA+"/restore", map[string]any{"snapshots": ids})["backup"].(map[string]any)
+	if r := waitBackup(t, p, idA, jsonID(rs["id"])); r["status"] != "succeeded" {
+		t.Fatalf("restore: %v\n%v", r, r["log"])
+	}
+	if v := mysql("SELECT v FROM " + credA["database"].(string) + ".t"); v != "hello-db" {
+		t.Fatalf("database after restore: %q", v)
+	}
+	restored := filepath.Join(sitesRoot, idA, "public", "db.php")
+	if b, _ := os.ReadFile(restored); !strings.Contains(string(b), "PDO") {
+		t.Fatalf("file after restore: %q", b)
+	}
+	if fi, err := os.Stat(restored); err != nil || strconv.Itoa(int(fi.Sys().(*syscall.Stat_t).Uid)) != mustUID(t, "basalt-s"+idA) {
+		t.Fatal("restored file is not owned by the site user")
+	}
+	if fi, _ := os.Stat("/var/backups/basalt-it"); fi == nil || fi.Mode().Perm() != 0o700 {
+		t.Fatal("backup directory is not private")
+	}
+
 	// Sites with databases cannot be deleted by accident.
 	p.call(http.StatusConflict, "DELETE", "/api/v1/sites/"+idA, nil)
 	p.call(http.StatusNoContent, "DELETE", "/api/v1/sites/"+idA+"/databases/"+jsonID(dbA["database"].(map[string]any)["id"]), nil)
@@ -282,4 +329,13 @@ try {
 	if g, _ := filepath.Glob("/etc/php/*/fpm/pool.d/basalt-site-" + idA + ".conf"); len(g) != 0 {
 		t.Errorf("pool not removed: %v", g)
 	}
+}
+
+func mustUID(t *testing.T, name string) string {
+	t.Helper()
+	u, err := user.Lookup(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Uid
 }

@@ -295,6 +295,9 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 		if err := h.db.SetServerMariaDB(ctx, id, clean(m.MariaDB)); err != nil {
 			return nil, err
 		}
+		if err := h.db.SetServerRestic(ctx, id, clean(m.Restic)); err != nil {
+			return nil, err
+		}
 		return nil, h.db.UpdateServerHello(ctx, id, store.Server{
 			Hostname: clean(m.Hostname), OS: clean(m.OS), Arch: clean(m.Arch), Kernel: clean(m.Kernel),
 			Distro: clean(m.Distro), AgentVersion: clean(m.AgentVersion),

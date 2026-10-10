@@ -345,7 +345,7 @@ function DeploymentModal({ appId, id, onClose }: { appId: number; id: number; on
 
 // LogView shows log text and keeps it scrolled to the end unless the user
 // scrolled up to read.
-function LogView({ text, tall }: { text: string; tall?: boolean }) {
+export function LogView({ text, tall }: { text: string; tall?: boolean }) {
   const ref = useRef<HTMLPreElement>(null);
   const stick = useRef(true);
   useLayoutEffect(() => {

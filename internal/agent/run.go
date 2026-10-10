@@ -60,6 +60,8 @@ type Config struct {
 	// GitCAFile is an extra CA bundle trusted for https git remotes (a
 	// self-hosted git server with a private CA).
 	GitCAFile string
+	// Restic is the restic binary backups run with ("" disables backups).
+	Restic string
 	// PanelDomain and PanelUpstream publish the panel itself through this
 	// host's proxy (set on the panel's own host). The route exists even
 	// before the panel has sent any state, so the UI is reachable at once.
@@ -68,14 +70,15 @@ type Config struct {
 }
 
 type Agent struct {
-	dir    string
-	log    *slog.Logger
-	proxy  *proxyManager
-	sites  *sitesManager
-	sftp   *sftpManager
-	apps   *appsManager
-	mysql  string
-	docker string
+	dir     string
+	log     *slog.Logger
+	proxy   *proxyManager
+	sites   *sitesManager
+	sftp    *sftpManager
+	apps    *appsManager
+	backups *backupManager
+	mysql   string
+	docker  string
 
 	mu sync.Mutex
 	id *identity
@@ -106,6 +109,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		return nil, err
 	}
 	apps := newAppsManager(cfg, log.With("subsystem", "apps"))
+	backups := newBackupManager(cfg, sites, log.With("subsystem", "backup"))
 	proxy := newProxyManager(cfg, sites, apps, log.With("subsystem", "proxy"))
 	apps.onChange = func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -117,6 +121,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		sites:           sites,
 		sftp:            sftp,
 		apps:            apps,
+		backups:         backups,
 		mysql:           cfg.MySQLSocket,
 		docker:          cfg.DockerSocket,
 		proxy:           proxy,
@@ -221,6 +226,7 @@ func (a *Agent) session(ctx context.Context) error {
 	hello.PHPVersions, hello.Isolated = a.sites.PHPVersions(), a.sites.isolate
 	hello.MariaDB = a.mariadbVersion(ctx)
 	hello.Docker, hello.DockerSecurity = a.dockerVersion(ctx)
+	hello.Restic = a.backups.Version(ctx)
 	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
 		return err
 	}
@@ -296,6 +302,30 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		}
 		log, err := a.apps.Logs(ctx, req.AppID, req.Service, req.Tail)
 		return agentproto.AppLogsResponse{Log: log}, err
+	case agentproto.TypeBackupCheck:
+		var req agentproto.BackupRepo
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.backups.Check(ctx, req)
+	case agentproto.TypeBackupRun:
+		var req agentproto.BackupRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.backups.Run(ctx, req, agentproto.StreamSender(ctx)), nil
+	case agentproto.TypeBackupSnapshots:
+		var req agentproto.SnapshotsRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.backups.Snapshots(ctx, req)
+	case agentproto.TypeBackupRestore:
+		var req agentproto.RestoreRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.backups.Restore(ctx, req, agentproto.StreamSender(ctx)), nil
 	case agentproto.TypeAppAttach:
 		var req agentproto.AppAttach
 		if err := json.Unmarshal(payload, &req); err != nil {
