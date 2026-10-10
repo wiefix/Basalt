@@ -47,6 +47,7 @@ type appView struct {
 	Volumes   []agentproto.AppVolume `json:"volumes"`
 	MemoryMB  int                    `json:"memory_mb"`
 	CPUs      float64                `json:"cpus"`
+	ReadOnly  bool                   `json:"read_only"`
 	CreatedAt time.Time              `json:"created_at"`
 }
 
@@ -56,7 +57,7 @@ func viewApp(a *store.App) appView {
 		vols = []agentproto.AppVolume{}
 	}
 	v := appView{ID: a.ID, ServerID: a.ServerID, Name: a.Name, Source: a.Source, Image: a.Image, Port: a.Port,
-		Domains: a.Domains, TLS: a.TLS, Volumes: vols, MemoryMB: a.MemoryMB, CPUs: a.CPUs, CreatedAt: a.CreatedAt}
+		Domains: a.Domains, TLS: a.TLS, Volumes: vols, MemoryMB: a.MemoryMB, CPUs: a.CPUs, ReadOnly: a.ReadOnly, CreatedAt: a.CreatedAt}
 	switch a.Source {
 	case store.SourceGit:
 		v.Git = &gitView{URL: a.Git.URL, Branch: a.Git.Branch, Dockerfile: a.Git.Dockerfile, Context: a.Git.Context}
@@ -148,10 +149,12 @@ type appSettingsRequest struct {
 	Volumes  []agentproto.AppVolume `json:"volumes"`
 	MemoryMB int                    `json:"memory_mb"`
 	CPUs     float64                `json:"cpus"`
+	ReadOnly bool                   `json:"read_only"`
 }
 
 func (req appSettingsRequest) settings(source string) (store.AppSettings, error) {
-	st := store.AppSettings{Source: source, Port: req.Port, Volumes: req.Volumes, MemoryMB: req.MemoryMB, CPUs: req.CPUs}
+	st := store.AppSettings{Source: source, Port: req.Port, Volumes: req.Volumes, MemoryMB: req.MemoryMB, CPUs: req.CPUs,
+		ReadOnly: req.ReadOnly}
 	switch source {
 	case store.SourceImage:
 		st.Image = strings.TrimSpace(req.Image)
@@ -179,11 +182,11 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 		st.Git = store.GitSettings{URL: g.URL, Branch: g.Branch, Dockerfile: g.Dockerfile, Context: g.Context}
 	case store.SourceCompose:
 		// Everything else comes from the compose file.
-		st.Volumes, st.MemoryMB, st.CPUs = nil, 0, 0
+		st.Volumes, st.MemoryMB, st.CPUs, st.ReadOnly = nil, 0, 0, false
 		return st, nil
 	case store.SourceDatabase:
 		// The engine (checked on creation) sets everything but the limits.
-		st.Port, st.Volumes = 0, nil
+		st.Port, st.Volumes, st.ReadOnly = 0, nil, false
 	default:
 		return st, errors.New(`source must be "image", "git", "compose" or "database"`)
 	}
@@ -392,6 +395,7 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *prin
 	}
 	s.audit(r, &p.user.ID, "app.updated", map[string]any{"app_id": app.ID, "image": st.Image, "git": st.Git.URL, "port": st.Port})
 	app.Image, app.Git, app.Port, app.Volumes, app.MemoryMB, app.CPUs = st.Image, st.Git, st.Port, st.Volumes, st.MemoryMB, st.CPUs
+	app.ReadOnly = st.ReadOnly
 	writeJSON(w, http.StatusOK, map[string]any{"app": viewApp(app)})
 }
 
@@ -805,4 +809,41 @@ func (s *Server) SyncApps(ctx context.Context, serverID int64) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	return s.agents.Call(ctx, serverID, agentproto.TypeAppsSync, agentproto.AppsSync{AppIDs: ids}, nil)
+}
+
+type appMetricsView struct {
+	At       time.Time `json:"at"`
+	CPUPct   float64   `json:"cpu_pct"`
+	MemUsed  uint64    `json:"mem_used"`
+	MemLimit uint64    `json:"mem_limit"`
+	NetRx    uint64    `json:"net_rx"`
+	NetTx    uint64    `json:"net_tx"`
+}
+
+// handleAppMetrics returns the resource usage of an app's containers over
+// the last ?minutes= (default 60, at most 48 hours).
+func (s *Server) handleAppMetrics(w http.ResponseWriter, r *http.Request, p *principal) {
+	app, ok := s.pathApp(w, r)
+	if !ok {
+		return
+	}
+	minutes := 60
+	if v := r.URL.Query().Get("minutes"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 48*60 {
+			writeError(w, http.StatusUnprocessableEntity, "minutes must be between 1 and 2880")
+			return
+		}
+		minutes = n
+	}
+	samples, err := s.db.AppMetricsSince(r.Context(), app.ID, s.now().Add(-time.Duration(minutes)*time.Minute), 20000)
+	if err != nil {
+		s.internalError(w, r, "load app metrics", err)
+		return
+	}
+	out := make([]appMetricsView, len(samples))
+	for i, m := range samples {
+		out[i] = appMetricsView{At: m.At, CPUPct: m.CPUPct, MemUsed: m.MemUsed, MemLimit: m.MemLimit, NetRx: m.NetRx, NetTx: m.NetTx}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"metrics": out})
 }

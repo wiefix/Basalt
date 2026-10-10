@@ -220,7 +220,7 @@ func (a *Agent) session(ctx context.Context) error {
 	hello.SFTPPort, hello.SFTPFingerprint = a.sftp.Port(), a.sftp.Fingerprint()
 	hello.PHPVersions, hello.Isolated = a.sites.PHPVersions(), a.sites.isolate
 	hello.MariaDB = a.mariadbVersion(ctx)
-	hello.Docker = a.dockerVersion(ctx)
+	hello.Docker, hello.DockerSecurity = a.dockerVersion(ctx)
 	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
 		return err
 	}
@@ -324,6 +324,11 @@ func (a *Agent) reportMetrics(ctx context.Context, peer *agentproto.Peer) {
 	defer t.Stop()
 	for {
 		m, err := a.collector.collect(a.dir)
+		if err == nil {
+			sctx, cancel := context.WithTimeout(ctx, a.MetricsInterval)
+			m.Apps = a.apps.Stats(sctx)
+			cancel()
+		}
 		if err != nil {
 			a.log.Warn("collect metrics", "err", err)
 		} else if err := peer.Notify(agentproto.TypeMetrics, m); err != nil {
@@ -413,18 +418,27 @@ func (a *Agent) mariadbVersion(ctx context.Context) string {
 	return v
 }
 
-func (a *Agent) dockerVersion(ctx context.Context) string {
+// dockerVersion returns the version of the local Docker Engine and how it
+// isolates containers ("" and nil without a usable daemon).
+func (a *Agent) dockerVersion(ctx context.Context) (string, *docker.Security) {
 	if a.docker == "" || !docker.Available(a.docker) {
-		return ""
+		return "", nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	v, err := docker.New(a.docker).Version(ctx)
+	dc := docker.New(a.docker)
+	v, err := dc.Version(ctx)
 	if err != nil {
 		a.log.Warn("Docker socket present but not usable", "err", err)
-		return ""
+		return "", nil
 	}
-	return v.Version
+	info, err := dc.Info(ctx)
+	if err != nil {
+		a.log.Warn("Docker info", "err", err)
+		return v.Version, nil
+	}
+	sec := info.Security()
+	return v.Version, &sec
 }
 
 func (a *Agent) database(ctx context.Context, req agentproto.DatabaseRequest) error {

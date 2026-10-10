@@ -184,6 +184,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/apps/{id}/deployments", s.requireRole(store.RoleViewer, s.handleListDeployments))
 	mux.Handle("GET /api/v1/apps/{id}/deployments/{did}", s.requireRole(store.RoleViewer, s.handleGetDeployment))
 	mux.Handle("GET /api/v1/apps/{id}/deployments/{did}/stream", s.requireRole(store.RoleViewer, s.handleDeploymentStream))
+	mux.Handle("GET /api/v1/apps/{id}/metrics", s.requireRole(store.RoleViewer, s.handleAppMetrics))
 	mux.Handle("GET /api/v1/apps/{id}/status", s.requireRole(store.RoleViewer, s.handleAppStatus))
 	mux.Handle("GET /api/v1/apps/{id}/logs", s.requireRole(store.RoleMember, s.handleAppLogs))
 	mux.Handle("GET /api/v1/apps/{id}/logs/stream", s.requireRole(store.RoleMember, s.handleAppLogsStream))

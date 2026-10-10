@@ -65,6 +65,7 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 	}
 	spec := agentproto.AppSpec{
 		AppID: app.ID, Port: app.Port, Env: env, Volumes: app.Volumes, MemoryMB: app.MemoryMB, CPUs: app.CPUs,
+		ReadOnly:    app.ReadOnly,
 		PruneImages: imagesToPrune(previous, s.imagesKept),
 	}
 	var composeContent []byte // compose apps: the file this deployment runs

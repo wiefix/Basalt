@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wiefix/basalt/internal/agent"
 	"github.com/wiefix/basalt/internal/proxy/caddyrun"
@@ -66,6 +67,7 @@ func startHostWith(t *testing.T, p *panel, dockerSocket string, configure ...fun
 	if err != nil {
 		t.Fatal(err)
 	}
+	a.MetricsInterval = time.Second
 	agentDone := make(chan struct{})
 	go func() { a.Run(ctx); close(agentDone) }()
 	t.Cleanup(func() { cancel(); <-agentDone; <-proxyDone; os.RemoveAll(proxyDir) })

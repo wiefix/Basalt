@@ -32,6 +32,8 @@ export interface Server {
   php_versions: string[];
   isolated: boolean;
   docker: string;
+  // How Docker isolates containers (absent when unknown).
+  docker_security?: { userns: boolean; rootless?: boolean; seccomp?: string; apparmor: boolean; selinux?: boolean; cgroup_v2: boolean };
   created_at: string;
 }
 
@@ -175,6 +177,7 @@ export interface App {
   volumes: AppVolume[];
   memory_mb: number;
   cpus: number;
+  read_only: boolean;
   created_at: string;
 }
 
@@ -185,6 +188,16 @@ export interface AppSettings {
   volumes: AppVolume[];
   memory_mb: number;
   cpus: number;
+  read_only?: boolean;
+}
+
+export interface AppMetrics {
+  at: string;
+  cpu_pct: number; // percent of one CPU
+  mem_used: number;
+  mem_limit: number;
+  net_rx: number; // bytes since the containers started
+  net_tx: number;
 }
 
 export interface Deployment {
@@ -424,6 +437,7 @@ export const api = {
     post<{ deployment: Deployment }>(`/api/v1/apps/${id}/deploy`, rollbackTo ? { rollback_to: rollbackTo } : {}),
   deployments: (id: number) => get<{ deployments: Deployment[] }>(`/api/v1/apps/${id}/deployments`),
   deployment: (id: number, did: number) => get<{ deployment: Deployment }>(`/api/v1/apps/${id}/deployments/${did}`),
+  appMetrics: (id: number, minutes: number) => get<{ metrics: AppMetrics[] }>(`/api/v1/apps/${id}/metrics?minutes=${minutes}`),
   appStatus: (id: number) => get<{ status: AppStatus }>(`/api/v1/apps/${id}/status`),
   appLogs: (id: number, tail: number, service = "") =>
     get<{ log: string }>(`/api/v1/apps/${id}/logs?tail=${tail}${service ? `&service=${encodeURIComponent(service)}` : ""}`),

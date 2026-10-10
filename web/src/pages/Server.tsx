@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router";
-import { api, can, type Enrollment, type Route, type Sync, type User } from "../api";
+import { api, can, type Enrollment, type Route, type Server, type Sync, type User } from "../api";
 import { Chart } from "../components/Chart";
 import {
   ErrorBox,
@@ -171,6 +171,14 @@ export function ServerPage({ user }: { user: User }) {
               <dd>{s.php_versions?.length ? s.php_versions.join(", ") : "not installed"}</dd>
               <dt>Docker</dt>
               <dd>{s.docker || "not installed"}</dd>
+              {s.docker && s.docker_security && (
+                <>
+                  <dt>Container isolation</dt>
+                  <dd>
+                    <DockerSecurity sec={s.docker_security} />
+                  </dd>
+                </>
+              )}
               <dt>Agent version</dt>
               <dd className="mono">{s.agent_version || "—"}</dd>
               <dt>Address</dt>
@@ -189,13 +197,35 @@ export function ServerPage({ user }: { user: User }) {
   );
 }
 
-function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+export function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
     <div className="card stat">
       <div className="label">{label}</div>
       <div className="value">{value}</div>
       <div className="hint">{hint}</div>
     </div>
+  );
+}
+
+function DockerSecurity({ sec }: { sec: NonNullable<Server["docker_security"]> }) {
+  const item = (ok: boolean, label: string, title: string) => (
+    <span className={`badge ${ok ? "ok" : "warn"}`} title={title}>
+      {label}
+    </span>
+  );
+  return (
+    <span className="row wrap" style={{ gap: 4 }}>
+      {item(
+        sec.userns || !!sec.rootless,
+        sec.rootless ? "rootless" : sec.userns ? "user namespaces" : "no user namespaces",
+        sec.userns || sec.rootless
+          ? "Root in a container is an unprivileged user on the host."
+          : "Root in a container is root on the host. Enable userns-remap in /etc/docker/daemon.json (the installer does it for a Docker it installs).",
+      )}
+      {item(!!sec.seccomp, sec.seccomp ? `seccomp: ${sec.seccomp}` : "no seccomp", "System calls containers may make are filtered.")}
+      {(sec.apparmor || sec.selinux) && item(true, sec.apparmor ? "AppArmor" : "SELinux", "Mandatory access control confines containers.")}
+      {item(sec.cgroup_v2, sec.cgroup_v2 ? "cgroup v2" : "cgroup v1", "Resource limits and accounting.")}
+    </span>
   );
 }
 

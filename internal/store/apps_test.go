@@ -63,3 +63,47 @@ func TestDeploymentsOneAtATime(t *testing.T) {
 		t.Fatal("deployments outlived their app")
 	}
 }
+
+func TestAppMetrics(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTemp(t)
+	s1, _ := db.CreateServer(ctx, "s1", []byte("t1"), time.Now().Add(time.Hour))
+	s2, _ := db.CreateServer(ctx, "s2", []byte("t2"), time.Now().Add(time.Hour))
+	a1, err := db.CreateApp(ctx, s1.ID, "a1", AppSettings{Image: "nginx:1.27", ReadOnly: true}, []string{}, proxy.TLSAuto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a2, _ := db.CreateApp(ctx, s2.ID, "a2", AppSettings{Image: "nginx:1.27"}, []string{}, proxy.TLSAuto)
+	if got, _ := db.AppByID(ctx, a1.ID); !got.ReadOnly {
+		t.Fatal("read_only not stored")
+	}
+	old, now := time.Now().Add(-3*time.Hour), time.Now()
+	// A server reports only its own apps: a2 is on s2.
+	if err := db.InsertAppMetrics(ctx, s1.ID, []AppMetrics{
+		{AppID: a1.ID, At: old, CPUPct: 5}, {AppID: a1.ID, At: now, CPUPct: 150, MemUsed: 10, MemLimit: 20, NetRx: 1, NetTx: 2},
+		{AppID: a2.ID, At: now, CPUPct: 1}, {AppID: 999, At: now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := db.AppMetricsSince(ctx, a2.ID, old.Add(-time.Hour), 10); len(m) != 0 {
+		t.Fatalf("metrics of another server's app stored: %v", m)
+	}
+	m, err := db.AppMetricsSince(ctx, a1.ID, old.Add(-time.Hour), 10)
+	if err != nil || len(m) != 2 || m[1].CPUPct != 150 || m[1].NetTx != 2 {
+		t.Fatalf("metrics = %+v, %v", m, err)
+	}
+	if _, err := db.DeleteMetricsBefore(ctx, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := db.AppMetricsSince(ctx, a1.ID, old.Add(-time.Hour), 10); len(m) != 1 {
+		t.Fatalf("after pruning: %+v", m)
+	}
+	if err := db.DeleteApp(ctx, a1.ID); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	db.R.QueryRow(`SELECT COUNT(*) FROM app_metrics`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d samples left after deleting the app", n)
+	}
+}

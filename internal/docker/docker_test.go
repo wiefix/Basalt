@@ -223,3 +223,24 @@ func TestPullSendsCredentials(t *testing.T) {
 		t.Fatalf("daemon received %+v", got)
 	}
 }
+
+func TestSecurityAndMemory(t *testing.T) {
+	info := Info{CgroupVersion: "2", SecurityOptions: []string{
+		"name=apparmor", "name=seccomp,profile=builtin", "name=userns", "name=cgroupns"}}
+	if s := info.Security(); !s.UserNS || !s.AppArmor || s.Seccomp != "builtin" || !s.CgroupV2 || s.Rootless {
+		t.Fatalf("security = %+v", s)
+	}
+	if s := (Info{SecurityOptions: []string{"name=rootless", "name=seccomp"}}).Security(); !s.Rootless || s.Seccomp != "default" || s.UserNS {
+		t.Fatalf("security = %+v", s)
+	}
+	var st Stats
+	st.MemoryStats.Usage = 100
+	st.MemoryStats.Stats = map[string]uint64{"inactive_file": 30}
+	if st.MemoryUsed() != 70 {
+		t.Fatalf("v2 memory = %d", st.MemoryUsed())
+	}
+	st.MemoryStats.Stats = map[string]uint64{"total_inactive_file": 500}
+	if st.MemoryUsed() != 0 {
+		t.Fatalf("v1 memory = %d", st.MemoryUsed())
+	}
+}

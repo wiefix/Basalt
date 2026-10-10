@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/wiefix/basalt/internal/docker"
 )
 
 type Server struct {
@@ -30,23 +32,25 @@ type Server struct {
 	PHPVersions   []string
 	Isolated      bool
 	Docker        string // Docker Engine version, "" if unavailable
-	CreatedAt     time.Time
+	// DockerSecurity is how the daemon isolates containers; nil if unknown.
+	DockerSecurity *docker.Security
+	CreatedAt      time.Time
 }
 
 var ErrNameTaken = errors.New("name already in use")
 
 const serverColumns = `id, name, enrolled_at IS NOT NULL, enroll_expires_at, COALESCE(cert_fp, ''),
 	COALESCE(prev_cert_fp, ''), cert_expires_at, hostname, os, arch, kernel, distro, agent_version,
-	cpu_count, mem_total, last_seen_at, last_ip, php_versions, isolated, docker, created_at`
+	cpu_count, mem_total, last_seen_at, last_ip, php_versions, isolated, docker, docker_security, created_at`
 
 func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 	var s Server
 	var enrollExp, certExp, lastSeen sql.NullInt64
 	var created int64
-	var phpVersions string
+	var phpVersions, dockerSec string
 	err := row.Scan(&s.ID, &s.Name, &s.Enrolled, &enrollExp, &s.CertFP, &s.PrevCertFP, &certExp,
 		&s.Hostname, &s.OS, &s.Arch, &s.Kernel, &s.Distro, &s.AgentVersion,
-		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &phpVersions, &s.Isolated, &s.Docker, &created)
+		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &phpVersions, &s.Isolated, &s.Docker, &dockerSec, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -55,6 +59,12 @@ func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 	}
 	if err := json.Unmarshal([]byte(phpVersions), &s.PHPVersions); err != nil {
 		return nil, err
+	}
+	if dockerSec != "" {
+		s.DockerSecurity = &docker.Security{}
+		if err := json.Unmarshal([]byte(dockerSec), s.DockerSecurity); err != nil {
+			return nil, err
+		}
 	}
 	s.EnrollExpires = timePtr(enrollExp)
 	s.CertExpires = timePtr(certExp)
@@ -116,12 +126,17 @@ func (db *DB) UpdateServerHello(ctx context.Context, id int64, s Server) error {
 		s.PHPVersions = []string{}
 	}
 	php, _ := json.Marshal(s.PHPVersions)
+	sec := ""
+	if s.DockerSecurity != nil {
+		b, _ := json.Marshal(s.DockerSecurity)
+		sec = string(b)
+	}
 	return db.execOne(ctx,
 		`UPDATE servers SET hostname = ?, os = ?, arch = ?, kernel = ?, distro = ?, agent_version = ?,
-		 cpu_count = ?, mem_total = ?, last_ip = ?, last_seen_at = ?, php_versions = ?, isolated = ?, docker = ?
-		 WHERE id = ?`,
+		 cpu_count = ?, mem_total = ?, last_ip = ?, last_seen_at = ?, php_versions = ?, isolated = ?, docker = ?,
+		 docker_security = ? WHERE id = ?`,
 		s.Hostname, s.OS, s.Arch, s.Kernel, s.Distro, s.AgentVersion, s.CPUCount, s.MemTotal,
-		s.LastIP, s.LastSeen.Unix(), string(php), s.Isolated, s.Docker, id)
+		s.LastIP, s.LastSeen.Unix(), string(php), s.Isolated, s.Docker, sec, id)
 }
 
 func (db *DB) ServerByID(ctx context.Context, id int64) (*Server, error) {
@@ -213,7 +228,68 @@ func (db *DB) DeleteMetricsBefore(ctx context.Context, before time.Time) (int64,
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, _ := res.RowsAffected()
+	res, err = db.W.ExecContext(ctx, `DELETE FROM app_metrics WHERE at < ?`, before.Unix())
+	if err != nil {
+		return n, err
+	}
+	m, _ := res.RowsAffected()
+	return n + m, nil
+}
+
+// AppMetrics is one sample of an app's container usage.
+type AppMetrics struct {
+	AppID    int64
+	At       time.Time
+	CPUPct   float64
+	MemUsed  uint64
+	MemLimit uint64
+	NetRx    uint64
+	NetTx    uint64
+}
+
+// InsertAppMetrics stores samples reported by a server; samples of apps
+// that are not on that server are ignored.
+func (db *DB) InsertAppMetrics(ctx context.Context, serverID int64, samples []AppMetrics) error {
+	if len(samples) == 0 {
+		return nil
+	}
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, m := range samples {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT OR REPLACE INTO app_metrics (app_id, at, cpu_pct, mem_used, mem_limit, net_rx, net_tx)
+			 SELECT id, ?, ?, ?, ?, ?, ? FROM apps WHERE id = ? AND server_id = ?`,
+			m.At.Unix(), m.CPUPct, m.MemUsed, m.MemLimit, m.NetRx, m.NetTx, m.AppID, serverID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// AppMetricsSince returns an app's samples newer than since, oldest first.
+func (db *DB) AppMetricsSince(ctx context.Context, appID int64, since time.Time, limit int) ([]AppMetrics, error) {
+	rows, err := db.R.QueryContext(ctx,
+		`SELECT at, cpu_pct, mem_used, mem_limit, net_rx, net_tx FROM app_metrics
+		 WHERE app_id = ? AND at > ? ORDER BY at LIMIT ?`, appID, since.Unix(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AppMetrics
+	for rows.Next() {
+		m := AppMetrics{AppID: appID}
+		var at int64
+		if err := rows.Scan(&at, &m.CPUPct, &m.MemUsed, &m.MemLimit, &m.NetRx, &m.NetTx); err != nil {
+			return nil, err
+		}
+		m.At = time.Unix(at, 0)
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // SetSettingIfAbsent stores value under key unless the key already exists.

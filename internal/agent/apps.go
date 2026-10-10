@@ -76,6 +76,8 @@ type appsManager struct {
 	dataDir   string        // builds and known hosts live here
 	gitCAFile string        // extra CA bundle for https git remotes
 	builds    chan struct{} // limits concurrent builds
+
+	stats appStats
 }
 
 func newAppsManager(cfg Config, log *slog.Logger) *appsManager {
@@ -363,6 +365,10 @@ func (m *appsManager) containerConfig(spec agentproto.AppSpec) docker.ContainerC
 		Memory:        int64(spec.MemoryMB) << 20,
 		NanoCPUs:      int64(spec.CPUs * 1e9),
 		LogConfig:     &docker.LogConfig{Type: "local", Config: map[string]string{"max-size": "10m", "max-file": "3"}},
+	}
+	if spec.ReadOnly {
+		hc.ReadonlyRootfs = true
+		hc.Tmpfs = map[string]string{"/tmp": "", "/run": ""}
 	}
 	for _, v := range spec.Volumes {
 		hc.Mounts = append(hc.Mounts, docker.Mount{Type: "volume", Source: appVolume(spec.AppID, v.Name), Target: v.Path})

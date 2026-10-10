@@ -5,7 +5,7 @@ import { ApiError } from "../api";
 
 export function formatBytes(n: number | undefined): string {
   if (n === undefined || n === null) return "—";
-  if (n < 1024) return `${n} B`;
+  if (n < 1024) return `${Math.round(n)} B`;
   const units = ["KB", "MB", "GB", "TB"];
   let v = n;
   let i = -1;

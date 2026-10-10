@@ -165,6 +165,7 @@ type ContainerInfo struct {
 		} `json:"Networks"`
 		Ports map[string][]PortBinding `json:"Ports"`
 	} `json:"NetworkSettings"`
+	HostConfig HostConfig `json:"HostConfig"`
 }
 
 // ContainerInspect returns a container; ErrNotFound if it does not exist.

@@ -22,12 +22,14 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/auth"
+	"github.com/wiefix/basalt/internal/docker"
 	"github.com/wiefix/basalt/internal/pki"
 	"github.com/wiefix/basalt/internal/store"
 )
 
 const (
 	metricsRetention = 48 * time.Hour
+	maxAppMetrics    = 1000 // apps per sample
 	writeTimeout     = 15 * time.Second
 	maxEnrollBody    = 64 << 10
 )
@@ -298,6 +300,7 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 			Distro: clean(m.Distro), AgentVersion: clean(m.AgentVersion),
 			CPUCount: max(0, m.CPUCount), MemTotal: m.MemTotal, LastIP: ip, LastSeen: &now,
 			PHPVersions: cleanVersions(m.PHPVersions), Isolated: m.Isolated, Docker: clean(m.Docker),
+			DockerSecurity: cleanSecurity(m.DockerSecurity),
 		})
 	case agentproto.TypeMetrics:
 		var m agentproto.Metrics
@@ -305,11 +308,21 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 			return nil, err
 		}
 		// Timestamp with the panel clock: agent clocks may be wrong.
-		return nil, h.db.InsertMetrics(ctx, id, store.ServerMetrics{
-			At: h.now(), CPUPct: clamp(m.CPUPct, 0, 100), MemUsed: m.MemUsed, MemTotal: m.MemTotal,
+		now := h.now()
+		if err := h.db.InsertMetrics(ctx, id, store.ServerMetrics{
+			At: now, CPUPct: clamp(m.CPUPct, 0, 100), MemUsed: m.MemUsed, MemTotal: m.MemTotal,
 			DiskUsed: m.DiskUsed, DiskTotal: m.DiskTotal, Load1: clamp(m.Load1, 0, 1e6),
 			Load5: clamp(m.Load5, 0, 1e6), Load15: clamp(m.Load15, 0, 1e6), Uptime: m.Uptime,
-		})
+		}); err != nil {
+			return nil, err
+		}
+		apps := make([]store.AppMetrics, 0, min(len(m.Apps), maxAppMetrics))
+		for _, a := range m.Apps[:min(len(m.Apps), maxAppMetrics)] {
+			apps = append(apps, store.AppMetrics{AppID: a.AppID, At: now, CPUPct: clamp(a.CPUPct, 0, 1e5),
+				MemUsed: a.MemUsed, MemLimit: a.MemLimit, NetRx: a.NetRx, NetTx: a.NetTx})
+		}
+		// Only apps placed on this server are stored.
+		return nil, h.db.InsertAppMetrics(ctx, id, apps)
 	case agentproto.TypeRenewCert:
 		var req agentproto.RenewCertRequest
 		if err := json.Unmarshal(payload, &req); err != nil {
@@ -427,4 +440,17 @@ func cleanVersions(vs []string) []string {
 		}
 	}
 	return out
+}
+
+// cleanSecurity keeps a reported seccomp profile name printable and short.
+func cleanSecurity(s *docker.Security) *docker.Security {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	c.Seccomp = clean(c.Seccomp)
+	if len(c.Seccomp) > 64 {
+		c.Seccomp = c.Seccomp[:64]
+	}
+	return &c
 }

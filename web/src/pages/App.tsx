@@ -2,9 +2,23 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "re
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
 import { api, appPath, can, sourceLabel, type App, type AppVolume, type Deployment, type ServiceStatus, type User } from "../api";
-import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
+import {
+  CodeBox,
+  ErrorBox,
+  Field,
+  Icon,
+  Loading,
+  Modal,
+  errorMessage,
+  formatBytes,
+  formatDate,
+  timeAgo,
+  useConfirm,
+  useToast,
+} from "../components/ui";
 import { useEventStream, type StreamState } from "../components/stream";
-import { SyncBadge } from "./Server";
+import { Stat, SyncBadge } from "./Server";
+import { Chart } from "../components/Chart";
 
 export function AppPage({ user }: { user: User }) {
   const id = Number(useParams().id);
@@ -173,6 +187,7 @@ function Overview({ app, user }: { app: App; user: User }) {
       </div>
 
       {app.source === "compose" && <ServicesCard app={app} services={st?.services} />}
+      <ResourcesCard app={app} running={st?.state === "running"} />
       {app.source === "database" ? <LinksCard app={app} user={user} /> : <LinkedDatabases app={app} />}
 
       <div className="card">
@@ -599,6 +614,7 @@ function SettingsTab({ app }: { app: App }) {
   const [volumes, setVolumes] = useState(formatVolumes(app.volumes));
   const [memory, setMemory] = useState(app.memory_mb ? String(app.memory_mb) : "");
   const [cpus, setCpus] = useState(app.cpus ? String(app.cpus) : "");
+  const [readOnly, setReadOnly] = useState(app.read_only);
   const save = useMutation({
     mutationFn: () =>
       api.updateApp(app.id, {
@@ -608,6 +624,7 @@ function SettingsTab({ app }: { app: App }) {
         volumes: parseVolumes(volumes),
         memory_mb: Number(memory) || 0,
         cpus: Number(cpus) || 0,
+        read_only: readOnly,
       }),
     onSuccess: (r) => {
       qc.setQueryData(["app", app.id], (old: { app: App } | undefined) => (old ? { ...old, app: r.app } : old));
@@ -685,6 +702,14 @@ function SettingsTab({ app }: { app: App }) {
             <input className="input mono" type="number" min={0} step="0.1" value={cpus} onChange={(e) => setCpus(e.target.value)} />
           </Field>
         </div>
+        <Field
+          label="Security"
+          help="The container cannot change its own files, which stops many attacks from persisting. /tmp and /run stay writable in memory, volumes stay writable; apps that write elsewhere fail to start."
+        >
+          <label className="check">
+            <input type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} /> Read-only root filesystem
+          </label>
+        </Field>
         <div>
           <button className="btn primary" disabled={save.isPending}>
             Save
@@ -777,6 +802,7 @@ function SourceTab({ app }: { app: App }) {
         volumes: app.volumes,
         memory_mb: app.memory_mb,
         cpus: app.cpus,
+        read_only: app.read_only,
       }),
     onSuccess: (r) => {
       qc.setQueryData(["app", app.id], (old: { app: App } | undefined) => (old ? { ...old, app: r.app } : old));
@@ -1061,6 +1087,61 @@ function ComposeTab({ app }: { app: App }) {
         </div>
       </div>
     </form>
+  );
+}
+
+// rate is bytes per second between two cumulative counters (0 after a reset).
+const rate = (a: { at: string; v: number }, b: { at: string; v: number }) => {
+  const dt = (new Date(b.at).getTime() - new Date(a.at).getTime()) / 1000;
+  return dt > 0 && b.v >= a.v ? (b.v - a.v) / dt : 0;
+};
+
+function ResourcesCard({ app, running }: { app: App; running: boolean }) {
+  const metrics = useQuery({
+    queryKey: ["app-metrics", app.id],
+    queryFn: () => api.appMetrics(app.id, 60),
+    refetchInterval: 10_000,
+  });
+  const list = metrics.data?.metrics ?? [];
+  if (list.length === 0) return null;
+  const last = list[list.length - 1];
+  // Samples stop when no container runs.
+  const stale = !running || Date.now() - new Date(last.at).getTime() > 60_000;
+  const prev = list.length > 1 ? list[list.length - 2] : last;
+  const rx = rate({ at: prev.at, v: prev.net_rx }, { at: last.at, v: last.net_rx });
+  const tx = rate({ at: prev.at, v: prev.net_tx }, { at: last.at, v: last.net_tx });
+  const series = (f: (x: (typeof list)[number]) => number) => list.map((x) => ({ t: new Date(x.at).getTime(), v: f(x) }));
+  const traffic = list.slice(1).map((x, i) => ({
+    t: new Date(x.at).getTime(),
+    v: rate({ at: list[i].at, v: list[i].net_rx + list[i].net_tx }, { at: x.at, v: x.net_rx + x.net_tx }),
+  }));
+  return (
+    <div className="stack">
+      <div className="grid-4">
+        <Stat label="CPU" value={stale ? "—" : `${last.cpu_pct.toFixed(1)}%`} hint="of one core" />
+        <Stat
+          label="Memory"
+          value={stale ? "—" : formatBytes(last.mem_used)}
+          hint={app.memory_mb || app.source === "compose" ? `limit ${formatBytes(last.mem_limit)}` : `no limit (host ${formatBytes(last.mem_limit)})`}
+        />
+        <Stat label="Network in" value={stale ? "—" : `${formatBytes(rx)}/s`} hint={`${formatBytes(last.net_rx)} since start`} />
+        <Stat label="Network out" value={stale ? "—" : `${formatBytes(tx)}/s`} hint={`${formatBytes(last.net_tx)} since start`} />
+      </div>
+      <div className="grid-2">
+        <div className="card card-body">
+          <h3>CPU · last hour</h3>
+          <Chart points={series((x) => x.cpu_pct)} format={(v) => `${v.toFixed(v < 10 ? 1 : 0)}%`} />
+        </div>
+        <div className="card card-body">
+          <h3>Memory · last hour</h3>
+          <Chart points={series((x) => x.mem_used)} format={(v) => formatBytes(v)} />
+        </div>
+      </div>
+      <div className="card card-body">
+        <h3>Network traffic · last hour</h3>
+        <Chart points={traffic} format={(v) => `${formatBytes(v)}/s`} />
+      </div>
+    </div>
   );
 }
 

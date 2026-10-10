@@ -48,3 +48,14 @@ func TestParseLoadavgUptime(t *testing.T) {
 		t.Fatalf("uptime %v %v", up, err)
 	}
 }
+
+func TestContainerCPUUsage(t *testing.T) {
+	// One full CPU of four busy: 100% of one CPU.
+	if got := cpuUsage(cpuSample{0, 0}, cpuSample{1e9, 4e9}, 4); got != 100 {
+		t.Fatalf("usage = %v", got)
+	}
+	// Counters reset (container restarted) or no time passed: no reading.
+	if cpuUsage(cpuSample{5, 10}, cpuSample{1, 20}, 4) != 0 || cpuUsage(cpuSample{1, 10}, cpuSample{2, 10}, 4) != 0 {
+		t.Fatal("bad samples gave a reading")
+	}
+}

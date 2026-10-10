@@ -5,6 +5,11 @@
 #   New server:  the one-line command shown in the panel ("Add server"), which runs
 #                sh install.sh agent --panel https://HOST:8443 --token TOKEN --ca-sha256 FINGERPRINT
 #
+#   --with-docker turns on user namespaces (userns-remap: root in a container
+#   is an unprivileged user on the host) when it installs Docker; for an
+#   existing Docker, --docker-userns turns them on (its current images and
+#   containers are hidden until turned off), --no-docker-userns leaves them off.
+#
 # Running it again upgrades the binary and restarts the services; existing
 # data and enrollment are kept.
 set -eu
@@ -19,14 +24,14 @@ say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
-	sed -n '2,10p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
+	sed -n '2,15p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
 	exit 2
 }
 
 MODE=${1:-}
 [ -n "$MODE" ] || usage
 shift
-DOMAIN="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0
+DOMAIN="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0 USERNS=auto
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--domain) DOMAIN=$2; shift 2 ;;
@@ -37,6 +42,8 @@ while [ $# -gt 0 ]; do
 	--with-php) WITH_PHP=1; shift ;;
 	--with-mariadb) WITH_DB=1; shift ;;
 	--with-docker) WITH_DOCKER=1; shift ;;
+	--docker-userns) USERNS=on; shift ;;
+	--no-docker-userns) USERNS=off; shift ;;
 	-h | --help) usage ;;
 	*) die "unknown option $1" ;;
 	esac
@@ -73,6 +80,8 @@ PKGS="ca-certificates curl"
 [ "$WITH_DB" -eq 1 ] && PKGS="$PKGS mariadb-server"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
+HAD_DOCKER=0
+command -v dockerd >/dev/null 2>&1 && HAD_DOCKER=1
 if [ "$WITH_DOCKER" -eq 1 ]; then
 	# git and ssh clone repositories of apps built from source; buildx gives
 	# the docker command BuildKit (older releases lack the package).
@@ -89,7 +98,22 @@ if [ "$WITH_PHP" -eq 1 ]; then
 	done
 fi
 [ "$WITH_DB" -eq 1 ] && systemctl enable --now mariadb.service >/dev/null 2>&1
-[ "$WITH_DOCKER" -eq 1 ] && systemctl enable --now docker.service >/dev/null 2>&1
+if [ "$WITH_DOCKER" -eq 1 ]; then
+	# User namespaces: on by default only for a Docker installed now, since
+	# switching them on hides the images and containers that exist.
+	[ "$USERNS" = auto ] && { [ "$HAD_DOCKER" -eq 1 ] && USERNS=off || USERNS=on; }
+	if [ "$USERNS" = on ]; then
+		if [ ! -s /etc/docker/daemon.json ]; then
+			say "Enabling user namespaces for Docker containers"
+			mkdir -p /etc/docker
+			printf '{\n  "userns-remap": "default"\n}\n' >/etc/docker/daemon.json
+			systemctl restart docker.service >/dev/null 2>&1 || true
+		elif ! grep -q '"userns-remap"' /etc/docker/daemon.json; then
+			say "Note: add \"userns-remap\": \"default\" to /etc/docker/daemon.json and restart Docker to enable user namespaces"
+		fi
+	fi
+	systemctl enable --now docker.service >/dev/null 2>&1
+fi
 
 # ---------- binary ----------
 

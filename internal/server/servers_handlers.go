@@ -12,6 +12,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/auth"
+	"github.com/wiefix/basalt/internal/docker"
 	"github.com/wiefix/basalt/internal/store"
 )
 
@@ -29,25 +30,26 @@ const enrollTokenTTL = time.Hour
 var serverNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$`)
 
 type serverView struct {
-	ID            int64      `json:"id"`
-	Name          string     `json:"name"`
-	Status        string     `json:"status"` // pending, online, offline
-	Hostname      string     `json:"hostname,omitempty"`
-	OS            string     `json:"os,omitempty"`
-	Arch          string     `json:"arch,omitempty"`
-	Kernel        string     `json:"kernel,omitempty"`
-	Distro        string     `json:"distro,omitempty"`
-	AgentVersion  string     `json:"agent_version,omitempty"`
-	CPUCount      int        `json:"cpu_count,omitempty"`
-	MemTotal      uint64     `json:"mem_total,omitempty"`
-	LastSeen      *time.Time `json:"last_seen,omitempty"`
-	LastIP        string     `json:"last_ip,omitempty"`
-	CertExpires   *time.Time `json:"cert_expires,omitempty"`
-	EnrollExpires *time.Time `json:"enroll_expires,omitempty"`
-	PHPVersions   []string   `json:"php_versions"`
-	Isolated      bool       `json:"isolated"`
-	Docker        string     `json:"docker"`
-	CreatedAt     time.Time  `json:"created_at"`
+	ID             int64            `json:"id"`
+	Name           string           `json:"name"`
+	Status         string           `json:"status"` // pending, online, offline
+	Hostname       string           `json:"hostname,omitempty"`
+	OS             string           `json:"os,omitempty"`
+	Arch           string           `json:"arch,omitempty"`
+	Kernel         string           `json:"kernel,omitempty"`
+	Distro         string           `json:"distro,omitempty"`
+	AgentVersion   string           `json:"agent_version,omitempty"`
+	CPUCount       int              `json:"cpu_count,omitempty"`
+	MemTotal       uint64           `json:"mem_total,omitempty"`
+	LastSeen       *time.Time       `json:"last_seen,omitempty"`
+	LastIP         string           `json:"last_ip,omitempty"`
+	CertExpires    *time.Time       `json:"cert_expires,omitempty"`
+	EnrollExpires  *time.Time       `json:"enroll_expires,omitempty"`
+	PHPVersions    []string         `json:"php_versions"`
+	Isolated       bool             `json:"isolated"`
+	Docker         string           `json:"docker"`
+	DockerSecurity *docker.Security `json:"docker_security,omitempty"`
+	CreatedAt      time.Time        `json:"created_at"`
 }
 
 func (s *Server) viewServer(srv *store.Server) serverView {
@@ -64,6 +66,7 @@ func (s *Server) viewServer(srv *store.Server) serverView {
 		CPUCount: srv.CPUCount, MemTotal: srv.MemTotal, LastSeen: srv.LastSeen, LastIP: srv.LastIP,
 		CertExpires: srv.CertExpires, EnrollExpires: srv.EnrollExpires, CreatedAt: srv.CreatedAt,
 		PHPVersions: srv.PHPVersions, Isolated: srv.Isolated, Docker: srv.Docker,
+		DockerSecurity: srv.DockerSecurity,
 	}
 }
 

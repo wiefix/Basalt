@@ -80,6 +80,8 @@ type Hello struct {
 	// Docker is the version of the local Docker Engine ("" if absent or
 	// too old for the API Basalt uses).
 	Docker string `json:"docker,omitempty"`
+	// DockerSecurity describes how the daemon isolates containers.
+	DockerSecurity *docker.Security `json:"docker_security,omitempty"`
 }
 
 type Metrics struct {
@@ -93,6 +95,21 @@ type Metrics struct {
 	Load5     float64   `json:"load5"`
 	Load15    float64   `json:"load15"`
 	Uptime    uint64    `json:"uptime"` // seconds
+	// Apps is the resource usage of each app's running containers.
+	Apps []AppMetrics `json:"apps,omitempty"`
+}
+
+// AppMetrics sums the usage of an app's running containers.
+type AppMetrics struct {
+	AppID int64 `json:"app_id"`
+	// CPUPct is in percent of one CPU (two busy cores: 200).
+	CPUPct   float64 `json:"cpu_pct"`
+	MemUsed  uint64  `json:"mem_used"`
+	MemLimit uint64  `json:"mem_limit"` // the containers' limits, or the host's memory
+	// NetRx and NetTx count bytes since the containers started.
+	NetRx      uint64 `json:"net_rx"`
+	NetTx      uint64 `json:"net_tx"`
+	Containers int    `json:"containers"`
 }
 
 type RenewCertRequest struct {
@@ -192,6 +209,9 @@ type AppSpec struct {
 	Volumes      []AppVolume       `json:"volumes,omitempty"`
 	MemoryMB     int               `json:"memory_mb,omitempty"`
 	CPUs         float64           `json:"cpus,omitempty"`
+	// ReadOnly runs the container with a read-only root filesystem;
+	// /tmp and /run stay writable (in memory).
+	ReadOnly bool `json:"read_only,omitempty"`
 	// RegistryAuth holds credentials for the image's registry (private
 	// images). Used for the pull only; the agent does not keep them.
 	RegistryAuth *docker.AuthConfig `json:"registry_auth,omitempty"`
