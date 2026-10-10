@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from "re
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
 import { api, can, type App, type AppVolume, type Deployment, type User } from "../api";
-import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
+import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
 import { useEventStream, type StreamState } from "../components/stream";
 import { SyncBadge } from "./Server";
 
@@ -30,7 +30,7 @@ export function AppPage({ user }: { user: User }) {
             <SyncBadge sync={app.data.sync} />
           </div>
           <div className="sub row wrap">
-            <span className="mono">{a.image}</span>
+            <span className="mono">{a.source === "git" ? `${a.git?.url} · ${a.git?.branch}` : a.image}</span>
             {a.domains.map((d) => (
               <a key={d} href={`https://${d}`} target="_blank" rel="noreferrer noopener">
                 {d} ↗
@@ -53,6 +53,7 @@ export function AppPage({ user }: { user: User }) {
         {can(user, "member") && tab(`/apps/${id}/logs`, "Logs")}
         {can(user, "admin") && tab(`/apps/${id}/env`, "Environment")}
         {tab(`/apps/${id}/domains`, "Domains")}
+        {a.source === "git" && can(user, "admin") && tab(`/apps/${id}/source`, "Source")}
         {can(user, "admin") && tab(`/apps/${id}/settings`, "Settings")}
       </div>
       <Routes>
@@ -60,6 +61,7 @@ export function AppPage({ user }: { user: User }) {
         <Route path="logs" element={<LogsTab app={a} />} />
         <Route path="env" element={<EnvTab app={a} />} />
         <Route path="domains" element={<DomainsTab app={a} user={user} />} />
+        <Route path="source" element={<SourceTab app={a} />} />
         <Route path="settings" element={<SettingsTab app={a} />} />
       </Routes>
     </>
@@ -136,8 +138,19 @@ function Overview({ app, user }: { app: App; user: User }) {
           )}
         </div>
         <p className="faint small" style={{ marginBottom: 0 }}>
-          A deployment pulls <span className="mono">{app.image}</span>, starts a new container and switches traffic once
-          it is ready. If the new container fails, the current one keeps serving.
+          {app.source === "git" ? (
+            <>
+              A deployment builds branch <span className="mono">{app.git?.branch}</span> with{" "}
+              <span className="mono">{app.git?.dockerfile}</span>
+              {app.auto_deploy ? " (also on every push, through the webhook)" : ""},
+            </>
+          ) : (
+            <>
+              A deployment pulls <span className="mono">{app.image}</span>,
+            </>
+          )}{" "}
+          starts a new container and switches traffic once it is ready. If the new container fails, the current one keeps
+          serving.
         </p>
       </div>
 
@@ -160,7 +173,7 @@ function Overview({ app, user }: { app: App; user: User }) {
                 <tr>
                   <th>#</th>
                   <th>Status</th>
-                  <th>Image</th>
+                  <th>{app.source === "git" ? "Commit" : "Image"}</th>
                   <th>Started</th>
                   <th />
                 </tr>
@@ -179,9 +192,21 @@ function Overview({ app, user }: { app: App; user: User }) {
                     <td>
                       <DeployBadge status={d.status} />
                     </td>
-                    <td className="mono muted small" title={d.image_digest}>
-                      {d.image}
-                    </td>
+                    {app.source === "git" ? (
+                      <td className="muted small" title={d.commit}>
+                        {d.commit ? (
+                          <>
+                            <span className="mono">{d.commit.slice(0, 8)}</span> {d.commit_message}
+                          </>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                    ) : (
+                      <td className="mono muted small" title={d.image_digest}>
+                        {d.image}
+                      </td>
+                    )}
                     <td className="muted">{formatDate(d.created_at)}</td>
                     <td className="num" onClick={(e) => e.stopPropagation()}>
                       {can(user, "member") && d.status === "succeeded" && d.id !== current && (
@@ -495,6 +520,7 @@ function SettingsTab({ app }: { app: App }) {
     mutationFn: () =>
       api.updateApp(app.id, {
         image: image.trim(),
+        git: app.git,
         port: Number(port) || 0,
         volumes: parseVolumes(volumes),
         memory_mb: Number(memory) || 0,
@@ -517,9 +543,11 @@ function SettingsTab({ app }: { app: App }) {
       >
         <h2>Runtime</h2>
         <ErrorBox error={save.error} />
-        <Field label="Image">
-          <input className="input mono" value={image} onChange={(e) => setImage(e.target.value)} required />
-        </Field>
+        {app.source === "image" && (
+          <Field label="Image">
+            <input className="input mono" value={image} onChange={(e) => setImage(e.target.value)} required />
+          </Field>
+        )}
         <Field label="HTTP port" help="0 if the app serves no HTTP (a worker).">
           <input className="input mono" type="number" min={0} max={65535} value={port} onChange={(e) => setPort(e.target.value)} />
         </Field>
@@ -601,6 +629,167 @@ function DeleteCard({ app }: { app: App }) {
           </div>
         </Modal>
       )}
+    </div>
+  );
+}
+
+function SourceTab({ app }: { app: App }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const g = app.git!;
+  const [url, setUrl] = useState(g.url);
+  const [branch, setBranch] = useState(g.branch);
+  const [dockerfile, setDockerfile] = useState(g.dockerfile);
+  const [context, setContext] = useState(g.context);
+  const save = useMutation({
+    mutationFn: () =>
+      api.updateApp(app.id, {
+        image: "",
+        git: { url: url.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim() },
+        port: app.port,
+        volumes: app.volumes,
+        memory_mb: app.memory_mb,
+        cpus: app.cpus,
+      }),
+    onSuccess: (r) => {
+      qc.setQueryData(["app", app.id], (old: { app: App } | undefined) => (old ? { ...old, app: r.app } : old));
+      toast("Saved. The next deployment uses it.");
+    },
+  });
+  const ssh = !app.git!.url.startsWith("https://");
+  return (
+    <div className="stack" style={{ maxWidth: 760 }}>
+      <form
+        className="card card-body form"
+        onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          save.mutate();
+        }}
+      >
+        <h2>Repository</h2>
+        <ErrorBox error={save.error} />
+        <Field label="URL" help="https://… for public repositories, git@host:org/repo.git with the deploy key below for private ones.">
+          <input className="input mono" value={url} onChange={(e) => setUrl(e.target.value)} required />
+        </Field>
+        <div className="grid-2">
+          <Field label="Branch">
+            <input className="input mono" value={branch} onChange={(e) => setBranch(e.target.value)} required />
+          </Field>
+          <Field label="Dockerfile">
+            <input className="input mono" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} required />
+          </Field>
+        </div>
+        <Field label="Build context" help="Directory sent to the build; . is the repository root.">
+          <input className="input mono" value={context} onChange={(e) => setContext(e.target.value)} required />
+        </Field>
+        <div>
+          <button className="btn primary" disabled={save.isPending}>
+            Save
+          </button>
+        </div>
+      </form>
+      <DeployKeyCard app={app} ssh={ssh} />
+      <WebhookCard app={app} />
+    </div>
+  );
+}
+
+function DeployKeyCard({ app, ssh }: { app: App; ssh: boolean }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const regenerate = async () => {
+    const ok = await confirm({
+      title: "Replace the deploy key?",
+      body: <p>Builds fail until the new key is added to the repository. Remove the old key there too.</p>,
+      confirm: "Replace",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const r = await api.regenerateDeployKey(app.id);
+      qc.setQueryData(["app", app.id], (old: { app: App } | undefined) => (old ? { ...old, app: r.app } : old));
+      toast("New deploy key created");
+    } catch (e) {
+      toast(errorMessage(e), true);
+    }
+  };
+  return (
+    <div className="card card-body stack">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2>Deploy key</h2>
+        <button className="btn sm" onClick={regenerate}>
+          <Icon name="refresh" size={14} /> Replace
+        </button>
+      </div>
+      {!ssh && (
+        <div className="alert small">
+          The repository is fetched over HTTPS, so no key is used. For a private repository, switch to its SSH URL
+          (git@…) and add this key.
+        </div>
+      )}
+      <p className="muted" style={{ margin: 0 }}>
+        Grants this app read access to a private repository. Add it as a <strong>read-only</strong> deploy key:
+      </p>
+      <ul className="steps muted small">
+        <li>GitHub: repository → Settings → Deploy keys → Add deploy key</li>
+        <li>GitLab: project → Settings → Repository → Deploy keys</li>
+        <li>Gitea / Forgejo: repository → Settings → Deploy keys</li>
+      </ul>
+      <CodeBox text={app.deploy_key ?? ""} />
+      <p className="faint small" style={{ margin: 0 }}>
+        The private key is stored encrypted and only sent to the app's server for fetching the code. The git server's own
+        key is remembered on first contact.
+      </p>
+    </div>
+  );
+}
+
+function WebhookCard({ app }: { app: App }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const hook = useQuery({ queryKey: ["webhook", app.id], queryFn: () => api.appWebhook(app.id), gcTime: 0 });
+  const update = useMutation({
+    mutationFn: (b: { auto_deploy: boolean; regenerate?: boolean }) => api.setAppWebhook(app.id, b),
+    onSuccess: (r, b) => {
+      qc.setQueryData(["webhook", app.id], r);
+      qc.invalidateQueries({ queryKey: ["app", app.id] });
+      toast(b.regenerate ? "New secret created; update it at your git host" : "Saved");
+    },
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  if (hook.isPending) return <Loading />;
+  if (hook.error) return <ErrorBox error={hook.error} />;
+  const w = hook.data.webhook;
+  return (
+    <div className="card card-body stack">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2>Deploy on push</h2>
+        <label className="check">
+          <input type="checkbox" checked={w.auto_deploy} onChange={(e) => update.mutate({ auto_deploy: e.target.checked })} />{" "}
+          enabled
+        </label>
+      </div>
+      <p className="muted" style={{ margin: 0 }}>
+        Add a webhook at your git host; every push to <span className="mono">{app.git?.branch}</span> deploys that commit.
+        A push during a deployment is deployed right after it.
+      </p>
+      <Field label="Payload URL" help="Must be reachable from your git host.">
+        <CodeBox text={window.location.origin + w.path} />
+      </Field>
+      <Field label="Secret">
+        <CodeBox text={w.secret} />
+      </Field>
+      <ul className="steps muted small">
+        <li>GitHub: Settings → Webhooks → Add webhook; content type application/json, the secret above, "Just the push event".</li>
+        <li>GitLab: Settings → Webhooks; the secret as "Secret token", trigger "Push events".</li>
+        <li>Gitea / Forgejo: Settings → Webhooks → Add webhook; POST, application/json, the secret above, push events.</li>
+      </ul>
+      <div>
+        <button className="btn sm" onClick={() => update.mutate({ auto_deploy: w.auto_deploy, regenerate: true })} disabled={update.isPending}>
+          <Icon name="refresh" size={14} /> New secret
+        </button>
+      </div>
     </div>
   );
 }

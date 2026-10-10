@@ -13,10 +13,19 @@ import (
 )
 
 type App struct {
-	ID        int64
-	ServerID  int64
-	Name      string
-	Image     string
+	ID       int64
+	ServerID int64
+	Name     string
+	Source   string // "image" or "git"
+	Image    string // for source "image"
+	Git      GitSettings
+	// Deploy key (encrypted OpenSSH private key and its public line) and
+	// webhook secret (encrypted) of a git app; nil until generated.
+	DeployKey       []byte
+	DeployKeyPublic string
+	WebhookSecret   []byte
+	AutoDeploy      bool
+
 	Port      int
 	EnvSealed []byte // encrypted JSON object; nil when empty
 	Volumes   []agentproto.AppVolume
@@ -28,9 +37,25 @@ type App struct {
 	CreatedAt time.Time
 }
 
+// GitSettings locate the Dockerfile an app is built from.
+type GitSettings struct {
+	URL        string
+	Branch     string
+	Dockerfile string // path in the repository
+	Context    string // build context directory in the repository
+}
+
+const (
+	SourceImage = "image"
+	SourceGit   = "git"
+)
+
 // AppSettings are the fields an app is deployed with, other than env.
+// Source is fixed when the app is created.
 type AppSettings struct {
+	Source   string
 	Image    string
+	Git      GitSettings
 	Port     int
 	Volumes  []agentproto.AppVolume
 	MemoryMB int
@@ -52,13 +77,18 @@ func (db *DB) CreateApp(ctx context.Context, serverID int64, name string, st App
 	if err != nil {
 		return nil, err
 	}
-	a := &App{ServerID: serverID, Name: name, Image: st.Image, Port: st.Port, Volumes: st.Volumes,
-		MemoryMB: st.MemoryMB, CPUs: st.CPUs, Domains: domains, TLS: tls}
+	if st.Source == "" {
+		st.Source = SourceImage
+	}
+	a := &App{ServerID: serverID, Name: name, Source: st.Source, Image: st.Image, Git: st.Git, Port: st.Port,
+		Volumes: st.Volumes, MemoryMB: st.MemoryMB, CPUs: st.CPUs, Domains: domains, TLS: tls}
 	var created int64
 	err = tx.QueryRowContext(ctx,
-		`INSERT INTO apps (server_id, name, image, port, volumes, memory_mb, cpus) VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO apps (server_id, name, source, image, git_url, git_branch, git_dockerfile, git_context,
+		 port, volumes, memory_mb, cpus) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id, created_at`,
-		serverID, name, st.Image, st.Port, vols, st.MemoryMB, st.CPUs).Scan(&a.ID, &created)
+		serverID, name, st.Source, st.Image, st.Git.URL, st.Git.Branch, st.Git.Dockerfile, st.Git.Context,
+		st.Port, vols, st.MemoryMB, st.CPUs).Scan(&a.ID, &created)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: apps.name") {
 			return nil, ErrNameTaken
@@ -89,8 +119,9 @@ func marshalVolumes(v []agentproto.AppVolume) (string, error) {
 	return string(b), err
 }
 
-const appQuery = `SELECT a.id, a.server_id, a.name, a.image, a.port, a.env, a.volumes, a.memory_mb, a.cpus,
-	a.created_at, r.id, r.tls, COALESCE(d.domain, '')
+const appQuery = `SELECT a.id, a.server_id, a.name, a.source, a.image, a.git_url, a.git_branch, a.git_dockerfile,
+	a.git_context, a.deploy_key, a.deploy_key_public, a.webhook_secret, a.auto_deploy,
+	a.port, a.env, a.volumes, a.memory_mb, a.cpus, a.created_at, r.id, r.tls, COALESCE(d.domain, '')
 	FROM apps a JOIN proxy_routes r ON r.app_id = a.id
 	LEFT JOIN proxy_route_domains d ON d.route_id = r.id`
 
@@ -101,8 +132,9 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 		var a App
 		var created int64
 		var vols, domain string
-		if err := rows.Scan(&a.ID, &a.ServerID, &a.Name, &a.Image, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB,
-			&a.CPUs, &created, &a.RouteID, &a.TLS, &domain); err != nil {
+		if err := rows.Scan(&a.ID, &a.ServerID, &a.Name, &a.Source, &a.Image, &a.Git.URL, &a.Git.Branch,
+			&a.Git.Dockerfile, &a.Git.Context, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
+			&a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &created, &a.RouteID, &a.TLS, &domain); err != nil {
 			return nil, err
 		}
 		if n := len(out); n > 0 && out[n-1].ID == a.ID {
@@ -170,8 +202,19 @@ func (db *DB) UpdateAppSettings(ctx context.Context, id int64, st AppSettings) e
 		return err
 	}
 	return db.execOne(ctx,
-		`UPDATE apps SET image = ?, port = ?, volumes = ?, memory_mb = ?, cpus = ? WHERE id = ?`,
-		st.Image, st.Port, vols, st.MemoryMB, st.CPUs, id)
+		`UPDATE apps SET image = ?, git_url = ?, git_branch = ?, git_dockerfile = ?, git_context = ?,
+		 port = ?, volumes = ?, memory_mb = ?, cpus = ? WHERE id = ?`,
+		st.Image, st.Git.URL, st.Git.Branch, st.Git.Dockerfile, st.Git.Context, st.Port, vols, st.MemoryMB, st.CPUs, id)
+}
+
+// SetAppDeployKey stores a new deploy key (private half encrypted).
+func (db *DB) SetAppDeployKey(ctx context.Context, id int64, sealed []byte, public string) error {
+	return db.execOne(ctx, `UPDATE apps SET deploy_key = ?, deploy_key_public = ? WHERE id = ?`, sealed, public, id)
+}
+
+// SetAppWebhook stores the webhook secret (encrypted) and the auto-deploy switch.
+func (db *DB) SetAppWebhook(ctx context.Context, id int64, sealed []byte, autoDeploy bool) error {
+	return db.execOne(ctx, `UPDATE apps SET webhook_secret = ?, auto_deploy = ? WHERE id = ?`, sealed, autoDeploy, id)
 }
 
 // SetAppEnv stores the encrypted environment (nil clears it).
@@ -232,16 +275,18 @@ func (db *DB) DeleteApp(ctx context.Context, id int64) error {
 // --- deployments ---
 
 type Deployment struct {
-	ID          int64
-	AppID       int64
-	Image       string
-	Status      string // running, succeeded, failed
-	Error       string
-	Log         string
-	ImageDigest string
-	ActorID     *int64
-	CreatedAt   time.Time
-	FinishedAt  *time.Time
+	ID            int64
+	AppID         int64
+	Image         string
+	CommitSHA     string // git apps
+	CommitMessage string
+	Status        string // running, succeeded, failed
+	Error         string
+	Log           string
+	ImageDigest   string
+	ActorID       *int64
+	CreatedAt     time.Time
+	FinishedAt    *time.Time
 }
 
 // CreateDeployment records a running deployment, or returns
@@ -262,15 +307,26 @@ func (db *DB) CreateDeployment(ctx context.Context, appID int64, image string, a
 	return d, nil
 }
 
+// DeploymentResult is the outcome of a deployment.
+type DeploymentResult struct {
+	OK            bool
+	Error         string
+	Log           string
+	ImageDigest   string
+	CommitSHA     string
+	CommitMessage string
+}
+
 // FinishDeployment records the outcome of a running deployment.
-func (db *DB) FinishDeployment(ctx context.Context, id int64, ok bool, errMsg, log, digest string) error {
+func (db *DB) FinishDeployment(ctx context.Context, id int64, r DeploymentResult) error {
 	status := "failed"
-	if ok {
+	if r.OK {
 		status = "succeeded"
 	}
 	return db.execOne(ctx,
-		`UPDATE deployments SET status = ?, error = ?, log = ?, image_digest = ?, finished_at = unixepoch()
-		 WHERE id = ? AND status = 'running'`, status, errMsg, log, digest, id)
+		`UPDATE deployments SET status = ?, error = ?, log = ?, image_digest = ?, commit_sha = ?, commit_message = ?,
+		 finished_at = unixepoch() WHERE id = ? AND status = 'running'`,
+		status, r.Error, r.Log, r.ImageDigest, r.CommitSHA, r.CommitMessage, id)
 }
 
 // FailUnfinishedDeployments marks deployments interrupted by a panel
@@ -285,13 +341,15 @@ func (db *DB) FailUnfinishedDeployments(ctx context.Context) (int64, error) {
 	return res.RowsAffected()
 }
 
-const deploymentColumns = `id, app_id, image, status, error, log, image_digest, actor_id, created_at, finished_at`
+const deploymentColumns = `id, app_id, image, commit_sha, commit_message, status, error, log, image_digest, actor_id,
+	created_at, finished_at`
 
 func scanDeployment(row interface{ Scan(...any) error }) (*Deployment, error) {
 	var d Deployment
 	var created int64
 	var finished sql.NullInt64
-	err := row.Scan(&d.ID, &d.AppID, &d.Image, &d.Status, &d.Error, &d.Log, &d.ImageDigest, &d.ActorID, &created, &finished)
+	err := row.Scan(&d.ID, &d.AppID, &d.Image, &d.CommitSHA, &d.CommitMessage, &d.Status, &d.Error, &d.Log,
+		&d.ImageDigest, &d.ActorID, &created, &finished)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

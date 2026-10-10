@@ -91,6 +91,11 @@ func (s *AppSpec) Validate() error {
 	if err := ValidateImageRefs(s.PruneImages); err != nil {
 		return err
 	}
+	if s.Git != nil {
+		if err := s.Git.Validate(); err != nil {
+			return err
+		}
+	}
 	return ValidateVolumes(s.Volumes)
 }
 

@@ -68,6 +68,7 @@ type Agent struct {
 	ProxyUser     string
 	MySQLSocket   string
 	DockerSocket  string
+	GitCAFile     string
 	PanelDomain   string
 	PanelUpstream string
 }
@@ -170,6 +171,7 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs.StringVar(&cfg.PanelUpstream, "panel-upstream", env("PANEL_UPSTREAM", "127.0.0.1:8080"), "address of the panel's HTTP listener")
 	fs.StringVar(&cfg.MySQLSocket, "mysql-socket", env("MYSQL_SOCKET", "/run/mysqld/mysqld.sock"), "local MariaDB/MySQL socket (empty disables databases)")
 	fs.StringVar(&cfg.DockerSocket, "docker-socket", env("DOCKER_SOCKET", "/var/run/docker.sock"), "local Docker Engine socket (empty disables apps)")
+	fs.StringVar(&cfg.GitCAFile, "git-ca-file", env("GIT_CA_FILE", ""), "extra CA certificates (PEM) trusted for https git repositories")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}

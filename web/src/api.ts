@@ -134,11 +134,22 @@ export interface AppVolume {
   path: string;
 }
 
+export interface GitSettings {
+  url: string;
+  branch: string;
+  dockerfile: string;
+  context: string;
+}
+
 export interface App {
   id: number;
   server_id: number;
   name: string;
+  source: "image" | "git";
   image: string;
+  git?: GitSettings;
+  deploy_key?: string;
+  auto_deploy: boolean;
   port: number;
   domains: string[];
   tls: "auto" | "internal";
@@ -150,6 +161,7 @@ export interface App {
 
 export interface AppSettings {
   image: string;
+  git?: Partial<GitSettings>;
   port: number;
   volumes: AppVolume[];
   memory_mb: number;
@@ -159,6 +171,8 @@ export interface AppSettings {
 export interface Deployment {
   id: number;
   image: string;
+  commit?: string;
+  commit_message?: string;
   status: "running" | "succeeded" | "failed";
   error?: string;
   image_digest?: string;
@@ -176,6 +190,12 @@ export interface AppStatus {
   exit_code?: number;
   oom_killed?: boolean;
   error?: string;
+}
+
+export interface Webhook {
+  path: string;
+  secret: string;
+  auto_deploy: boolean;
 }
 
 export interface Registry {
@@ -310,13 +330,17 @@ export const api = {
 
   apps: () => get<{ apps: App[] }>("/api/v1/apps"),
   app: (id: number) => get<{ app: App; sync: Sync }>(`/api/v1/apps/${id}`),
-  createApp: (b: AppSettings & { server_id: number; name: string; domains: string[]; tls: string }) =>
+  createApp: (b: AppSettings & { source: string; server_id: number; name: string; domains: string[]; tls: string }) =>
     post<{ app: App; sync: Sync }>("/api/v1/apps", b),
   updateApp: (id: number, b: AppSettings) => put<{ app: App }>(`/api/v1/apps/${id}`, b),
   deleteApp: (id: number, volumes: boolean) =>
     del<{ sync: Sync; cleanup_error?: string }>(`/api/v1/apps/${id}${volumes ? "?volumes=1" : ""}`),
   setAppDomains: (id: number, domains: string[]) =>
     put<{ app: App; sync: Sync }>(`/api/v1/apps/${id}/domains`, { domains }),
+  regenerateDeployKey: (id: number) => post<{ app: App }>(`/api/v1/apps/${id}/deploy-key`),
+  appWebhook: (id: number) => get<{ webhook: Webhook }>(`/api/v1/apps/${id}/webhook`),
+  setAppWebhook: (id: number, b: { auto_deploy: boolean; regenerate?: boolean }) =>
+    put<{ webhook: Webhook }>(`/api/v1/apps/${id}/webhook`, b),
   appEnv: (id: number) => get<{ env: Record<string, string> }>(`/api/v1/apps/${id}/env`),
   setAppEnv: (id: number, env: Record<string, string>) => put<{ ok: boolean }>(`/api/v1/apps/${id}/env`, { env }),
   deployApp: (id: number, rollbackTo?: number) =>

@@ -23,10 +23,16 @@ const (
 )
 
 type appView struct {
-	ID        int64                  `json:"id"`
-	ServerID  int64                  `json:"server_id"`
-	Name      string                 `json:"name"`
-	Image     string                 `json:"image"`
+	ID       int64    `json:"id"`
+	ServerID int64    `json:"server_id"`
+	Name     string   `json:"name"`
+	Source   string   `json:"source"` // image or git
+	Image    string   `json:"image"`
+	Git      *gitView `json:"git,omitempty"`
+	// DeployKey is the public key to grant read access to the repository.
+	DeployKey  string `json:"deploy_key,omitempty"`
+	AutoDeploy bool   `json:"auto_deploy"`
+
 	Port      int                    `json:"port"`
 	Domains   []string               `json:"domains"`
 	TLS       proxy.TLSMode          `json:"tls"`
@@ -41,23 +47,38 @@ func viewApp(a *store.App) appView {
 	if vols == nil {
 		vols = []agentproto.AppVolume{}
 	}
-	return appView{ID: a.ID, ServerID: a.ServerID, Name: a.Name, Image: a.Image, Port: a.Port, Domains: a.Domains,
-		TLS: a.TLS, Volumes: vols, MemoryMB: a.MemoryMB, CPUs: a.CPUs, CreatedAt: a.CreatedAt}
+	v := appView{ID: a.ID, ServerID: a.ServerID, Name: a.Name, Source: a.Source, Image: a.Image, Port: a.Port,
+		Domains: a.Domains, TLS: a.TLS, Volumes: vols, MemoryMB: a.MemoryMB, CPUs: a.CPUs, CreatedAt: a.CreatedAt}
+	if a.Source == store.SourceGit {
+		v.Git = &gitView{URL: a.Git.URL, Branch: a.Git.Branch, Dockerfile: a.Git.Dockerfile, Context: a.Git.Context}
+		v.DeployKey, v.AutoDeploy = a.DeployKeyPublic, a.AutoDeploy
+	}
+	return v
+}
+
+type gitView struct {
+	URL        string `json:"url"`
+	Branch     string `json:"branch"`
+	Dockerfile string `json:"dockerfile"`
+	Context    string `json:"context"`
 }
 
 type deploymentView struct {
-	ID          int64      `json:"id"`
-	Image       string     `json:"image"`
-	Status      string     `json:"status"`
-	Error       string     `json:"error,omitempty"`
-	ImageDigest string     `json:"image_digest,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
-	FinishedAt  *time.Time `json:"finished_at,omitempty"`
-	Log         *string    `json:"log,omitempty"`
+	ID            int64      `json:"id"`
+	Image         string     `json:"image"`
+	Commit        string     `json:"commit,omitempty"`
+	CommitMessage string     `json:"commit_message,omitempty"`
+	Status        string     `json:"status"`
+	Error         string     `json:"error,omitempty"`
+	ImageDigest   string     `json:"image_digest,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	FinishedAt    *time.Time `json:"finished_at,omitempty"`
+	Log           *string    `json:"log,omitempty"`
 }
 
 func viewDeployment(d *store.Deployment, withLog bool) deploymentView {
-	v := deploymentView{ID: d.ID, Image: d.Image, Status: d.Status, Error: d.Error, ImageDigest: d.ImageDigest,
+	v := deploymentView{ID: d.ID, Image: d.Image, Commit: d.CommitSHA, CommitMessage: d.CommitMessage,
+		Status: d.Status, Error: d.Error, ImageDigest: d.ImageDigest,
 		CreatedAt: d.CreatedAt, FinishedAt: d.FinishedAt}
 	if withLog {
 		v.Log = &d.Log
@@ -97,21 +118,48 @@ func (s *Server) appEnv(a *store.App) (map[string]string, error) {
 	return env, json.Unmarshal(b, &env)
 }
 
-// appSettingsRequest is shared by create and update.
+// appSettingsRequest is shared by create and update. Image is for apps
+// from an image, Git for apps built from a repository.
 type appSettingsRequest struct {
 	Image    string                 `json:"image"`
+	Git      *gitView               `json:"git"`
 	Port     int                    `json:"port"`
 	Volumes  []agentproto.AppVolume `json:"volumes"`
 	MemoryMB int                    `json:"memory_mb"`
 	CPUs     float64                `json:"cpus"`
 }
 
-func (req appSettingsRequest) settings() (store.AppSettings, error) {
-	st := store.AppSettings{Image: strings.TrimSpace(req.Image), Port: req.Port, Volumes: req.Volumes,
-		MemoryMB: req.MemoryMB, CPUs: req.CPUs}
+func (req appSettingsRequest) settings(source string) (store.AppSettings, error) {
+	st := store.AppSettings{Source: source, Port: req.Port, Volumes: req.Volumes, MemoryMB: req.MemoryMB, CPUs: req.CPUs}
+	switch source {
+	case store.SourceImage:
+		st.Image = strings.TrimSpace(req.Image)
+		if !docker.ValidRef(st.Image) {
+			return st, errors.New("image must be a valid reference, e.g. nginx:1.27 or ghcr.io/org/app:v1")
+		}
+	case store.SourceGit:
+		if req.Git == nil {
+			return st, errors.New("git repository settings are required")
+		}
+		g := agentproto.GitSource{URL: strings.TrimSpace(req.Git.URL), Branch: strings.TrimSpace(req.Git.Branch),
+			Dockerfile: strings.TrimSpace(req.Git.Dockerfile), Context: strings.TrimSpace(req.Git.Context)}
+		if g.Branch == "" {
+			g.Branch = "main"
+		}
+		if g.Dockerfile == "" {
+			g.Dockerfile = "Dockerfile"
+		}
+		if g.Context == "" {
+			g.Context = "."
+		}
+		if err := g.Validate(); err != nil {
+			return st, err
+		}
+		st.Git = store.GitSettings{URL: g.URL, Branch: g.Branch, Dockerfile: g.Dockerfile, Context: g.Context}
+	default:
+		return st, errors.New(`source must be "image" or "git"`)
+	}
 	switch {
-	case !docker.ValidRef(st.Image):
-		return st, errors.New("image must be a valid reference, e.g. nginx:1.27 or ghcr.io/org/app:v1")
 	case st.Port < 0 || st.Port > 65535:
 		return st, errors.New("port must be between 1 and 65535, or 0 if the app serves no HTTP")
 	case st.MemoryMB != 0 && (st.MemoryMB < 16 || st.MemoryMB > 1<<20):
@@ -124,6 +172,7 @@ func (req appSettingsRequest) settings() (store.AppSettings, error) {
 
 type createAppRequest struct {
 	appSettingsRequest
+	Source   string        `json:"source"`
 	ServerID int64         `json:"server_id"`
 	Name     string        `json:"name"`
 	Domains  []string      `json:"domains"`
@@ -161,7 +210,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 		writeError(w, http.StatusUnprocessableEntity, "name must be 1-63 characters: letters, digits, dot, dash, underscore")
 		return
 	}
-	st, err := req.settings()
+	if req.Source == "" {
+		req.Source = store.SourceImage
+	}
+	st, err := req.settings(req.Source)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -196,7 +248,19 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 		s.internalError(w, r, "create app", err)
 		return
 	}
-	s.audit(r, &p.user.ID, "app.created", map[string]any{"app_id": app.ID, "name": app.Name, "image": app.Image})
+	if app.Source == store.SourceGit {
+		// Deploy key and webhook secret come with the app, so the
+		// repository can be connected right away.
+		if err := s.newDeployKey(r.Context(), app); err != nil {
+			s.internalError(w, r, "create deploy key", err)
+			return
+		}
+		if err := s.newWebhookSecret(r.Context(), app, true); err != nil {
+			s.internalError(w, r, "create webhook secret", err)
+			return
+		}
+	}
+	s.audit(r, &p.user.ID, "app.created", map[string]any{"app_id": app.ID, "name": app.Name, "image": app.Image, "git": app.Git.URL})
 	s.PushProxy(r.Context(), app.ServerID)
 	writeJSON(w, http.StatusCreated, map[string]any{"app": viewApp(app), "sync": s.proxySync(r.Context(), app.ServerID)})
 }
@@ -231,7 +295,7 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *prin
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	st, err := req.settings()
+	st, err := req.settings(app.Source)
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -244,8 +308,8 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *prin
 		s.internalError(w, r, "update app", err)
 		return
 	}
-	s.audit(r, &p.user.ID, "app.updated", map[string]any{"app_id": app.ID, "image": st.Image, "port": st.Port})
-	app.Image, app.Port, app.Volumes, app.MemoryMB, app.CPUs = st.Image, st.Port, st.Volumes, st.MemoryMB, st.CPUs
+	s.audit(r, &p.user.ID, "app.updated", map[string]any{"app_id": app.ID, "image": st.Image, "git": st.Git.URL, "port": st.Port})
+	app.Image, app.Git, app.Port, app.Volumes, app.MemoryMB, app.CPUs = st.Image, st.Git, st.Port, st.Volumes, st.MemoryMB, st.CPUs
 	writeJSON(w, http.StatusOK, map[string]any{"app": viewApp(app)})
 }
 
@@ -348,88 +412,23 @@ func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request, p *prin
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	image := app.Image
+	trigger := "manual"
 	if req.RollbackTo > 0 {
-		prev, err := s.db.DeploymentByID(r.Context(), app.ID, req.RollbackTo)
-		if err != nil || prev.Status != "succeeded" {
-			writeError(w, http.StatusUnprocessableEntity, "only a successful deployment of this app can be rolled back to")
-			return
-		}
-		image = prev.Image
-		if docker.ValidRef(prev.ImageDigest) && strings.Contains(prev.ImageDigest, "@sha256:") {
-			image = prev.ImageDigest
-		}
+		trigger = "rollback"
 	}
-	if !s.agents.Connected(app.ServerID) {
-		writeError(w, http.StatusConflict, "the server is offline")
-		return
-	}
-	env, err := s.appEnv(app)
-	if err != nil {
-		s.internalError(w, r, "decrypt app env", err)
-		return
-	}
-	auth, err := s.registryAuth(r.Context(), image)
-	if err != nil {
-		s.internalError(w, r, "load registry credentials", err)
-		return
-	}
-	previous, err := s.db.SucceededImages(r.Context(), app.ID)
-	if err != nil {
-		s.internalError(w, r, "list deployed images", err)
-		return
-	}
-	dep, err := s.db.CreateDeployment(r.Context(), app.ID, image, &p.user.ID)
-	if errors.Is(err, store.ErrDeployInProgress) {
-		writeError(w, http.StatusConflict, err.Error())
-		return
-	}
-	if err != nil {
-		s.internalError(w, r, "create deployment", err)
-		return
-	}
-	s.audit(r, &p.user.ID, "app.deploy_started", map[string]any{"app_id": app.ID, "deployment_id": dep.ID, "image": image})
-	spec := agentproto.AppSpec{
-		AppID: app.ID, DeploymentID: dep.ID, Image: image, Port: app.Port, Env: env,
-		Volumes: app.Volumes, MemoryMB: app.MemoryMB, CPUs: app.CPUs,
-		RegistryAuth: auth, PruneImages: imagesToPrune(previous, s.imagesKept),
-	}
-	// The deployment outlives the request; a panel restart marks it failed.
-	// Its output can be followed live from now on.
-	live := s.live.start(dep.ID)
-	go s.runDeployment(app.ServerID, dep.ID, spec, live)
-	writeJSON(w, http.StatusAccepted, map[string]any{"deployment": viewDeployment(dep, false)})
-}
-
-func (s *Server) runDeployment(serverID, depID int64, spec agentproto.AppSpec, live *liveLog) {
-	ctx, cancel := context.WithTimeout(context.Background(), deployTimeout)
-	defer cancel()
-	var resp agentproto.AppDeployResponse
-	err := s.agents.Stream(ctx, serverID, agentproto.TypeAppDeploy, spec, &resp, func(raw json.RawMessage) error {
-		var c agentproto.LogChunk
-		if json.Unmarshal(raw, &c) == nil {
-			live.append(c.Text)
-		}
-		return nil
+	dep, err := s.startDeployment(r.Context(), app, deployOptions{
+		actorID: &p.user.ID, ip: clientIP(r), rollbackTo: req.RollbackTo, trigger: trigger,
 	})
+	var de *deployError
+	if errors.As(err, &de) {
+		writeError(w, de.status, de.msg)
+		return
+	}
 	if err != nil {
-		resp = agentproto.AppDeployResponse{Error: "server unreachable: " + err.Error()}
+		s.internalError(w, r, "start deployment", err)
+		return
 	}
-	if err := s.db.FinishDeployment(context.Background(), depID, resp.OK, resp.Error, resp.Log, resp.ImageDigest); err != nil {
-		s.log.Error("record deployment", "err", err, "deployment_id", depID)
-	}
-	// Followers now read the outcome from the database.
-	s.live.end(depID)
-	action := "app.deploy_failed"
-	if resp.OK {
-		action = "app.deployed"
-	}
-	if err := s.db.Audit(context.Background(), nil, action, "", map[string]any{
-		"app_id": spec.AppID, "deployment_id": depID, "error": resp.Error,
-	}); err != nil {
-		s.log.Error("write audit log", "err", err)
-	}
-	s.log.Info("deployment finished", "app_id", spec.AppID, "deployment_id", depID, "ok", resp.OK)
+	writeJSON(w, http.StatusAccepted, map[string]any{"deployment": viewDeployment(dep, false)})
 }
 
 func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request, p *principal) {

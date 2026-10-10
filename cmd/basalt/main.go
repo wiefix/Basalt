@@ -222,6 +222,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		ProxyUser:     cfg.ProxyUser,
 		MySQLSocket:   cfg.MySQLSocket,
 		DockerSocket:  cfg.DockerSocket,
+		GitCAFile:     cfg.GitCAFile,
 		PanelDomain:   cfg.PanelDomain,
 		PanelUpstream: cfg.PanelUpstream,
 	}, log)

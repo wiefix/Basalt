@@ -57,6 +57,9 @@ type Config struct {
 	MySQLSocket string
 	// DockerSocket is the local Docker Engine socket ("" disables apps).
 	DockerSocket string
+	// GitCAFile is an extra CA bundle trusted for https git remotes (a
+	// self-hosted git server with a private CA).
+	GitCAFile string
 	// PanelDomain and PanelUpstream publish the panel itself through this
 	// host's proxy (set on the panel's own host). The route exists even
 	// before the panel has sent any state, so the UI is reachable at once.

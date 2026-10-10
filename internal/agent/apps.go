@@ -37,7 +37,7 @@ const (
 	// just before the switch finish before that container is stopped.
 	appDrainDelay = 2 * time.Second
 	appRefreshGap = 10 * time.Second
-	maxDeployLog  = 64 << 10
+	maxDeployLog  = 256 << 10
 	maxAppLogs    = 1 << 20
 	maxLogTail    = 5000
 )
@@ -68,12 +68,17 @@ type appsManager struct {
 	umu       sync.Mutex
 	upstreams map[int64]string
 	lastErr   string
+
+	dataDir   string        // builds and known hosts live here
+	gitCAFile string        // extra CA bundle for https git remotes
+	builds    chan struct{} // limits concurrent builds
 }
 
 func newAppsManager(cfg Config, log *slog.Logger) *appsManager {
 	m := &appsManager{
 		log: log, socket: cfg.DockerSocket, publish: runtime.GOOS != "linux",
 		locks: map[int64]*sync.Mutex{}, upstreams: map[int64]string{}, onChange: func() {},
+		dataDir: cfg.DataDir, gitCAFile: cfg.GitCAFile, builds: make(chan struct{}, maxConcurrentBuilds),
 	}
 	if cfg.DockerSocket != "" {
 		m.dc = docker.New(cfg.DockerSocket)
@@ -128,9 +133,17 @@ func (l *deployLog) printf(format string, args ...any) {
 }
 
 func (l *deployLog) write(s string) {
-	if l.Len() >= maxDeployLog {
+	if l.full() {
 		return
 	}
+	l.forceWrite(s)
+}
+
+func (l *deployLog) full() bool { return l.Len() >= maxDeployLog }
+
+// forceWrite appends even to a full log, for the final lines that explain
+// the outcome.
+func (l *deployLog) forceWrite(s string) {
 	l.WriteString(s)
 	if l.stream != nil {
 		// A lost frame only affects the live view; the full log is in the reply.
@@ -145,7 +158,7 @@ func (l *deployLog) write(s string) {
 func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec, stream func(any) error) agentproto.AppDeployResponse {
 	lg := deployLog{stream: stream}
 	fail := func(err error) agentproto.AppDeployResponse {
-		lg.printf("Deployment failed: %v", err)
+		lg.forceWrite(fmt.Sprintf("%s Deployment failed: %v\n", time.Now().UTC().Format("15:04:05"), err))
 		return agentproto.AppDeployResponse{Error: err.Error(), Log: lg.String()}
 	}
 	if err := spec.Validate(); err != nil {
@@ -157,8 +170,17 @@ func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec, strea
 	}
 	defer m.lock(spec.AppID)()
 
-	digest, imageID, err := m.pull(ctx, dc, spec.Image, spec.RegistryAuth, &lg)
-	if err != nil {
+	var digest, imageID, commit, subject string
+	if spec.Git != nil {
+		if commit, subject, err = m.buildImage(ctx, dc, spec, &lg); err != nil {
+			return fail(err)
+		}
+		info, err := dc.ImageInspect(ctx, spec.Image)
+		if err != nil {
+			return fail(err)
+		}
+		digest, imageID = info.ID, info.ID
+	} else if digest, imageID, err = m.pull(ctx, dc, spec.Image, spec.RegistryAuth, &lg); err != nil {
 		return fail(err)
 	}
 	if err := m.ensureNetwork(ctx, dc, spec.AppID); err != nil {
@@ -205,7 +227,8 @@ func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec, strea
 		lg.printf("Removed %d image(s) of older deployments", n)
 	}
 	lg.printf("Deployment succeeded")
-	return agentproto.AppDeployResponse{OK: true, Log: lg.String(), ContainerID: id, ImageDigest: digest}
+	return agentproto.AppDeployResponse{OK: true, Log: lg.String(), ContainerID: id, ImageDigest: digest,
+		Commit: commit, CommitMessage: subject}
 }
 
 // pull fetches the image unless it is pinned by digest and already present.

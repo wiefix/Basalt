@@ -27,10 +27,10 @@ func TestDeploymentsOneAtATime(t *testing.T) {
 	if _, err := db.CreateDeployment(ctx, app.ID, "nginx:1.27", nil); !errors.Is(err, ErrDeployInProgress) {
 		t.Fatalf("second concurrent deployment: %v", err)
 	}
-	if err := db.FinishDeployment(ctx, d1.ID, true, "", "log", "nginx@sha256:x"); err != nil {
+	if err := db.FinishDeployment(ctx, d1.ID, DeploymentResult{OK: true, Log: "log", ImageDigest: "nginx@sha256:x"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.FinishDeployment(ctx, d1.ID, false, "late", "", ""); !errors.Is(err, ErrNotFound) {
+	if err := db.FinishDeployment(ctx, d1.ID, DeploymentResult{Error: "late"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("finished twice: %v", err)
 	}
 	d2, err := db.CreateDeployment(ctx, app.ID, "nginx:1.28", nil)

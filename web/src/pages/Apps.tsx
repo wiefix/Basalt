@@ -43,7 +43,7 @@ export function AppsPage({ user }: { user: User }) {
             <thead>
               <tr>
                 <th>App</th>
-                <th>Image</th>
+                <th>Source</th>
                 <th>Domains</th>
                 <th>Server</th>
                 <th>Created</th>
@@ -57,7 +57,7 @@ export function AppsPage({ user }: { user: User }) {
                       <strong>{a.name}</strong>
                     </Link>
                   </td>
-                  <td className="mono muted">{a.image}</td>
+                  <td className="mono muted">{a.source === "git" ? `${a.git?.url} · ${a.git?.branch}` : a.image}</td>
                   <td>
                     {a.domains.length === 0 ? (
                       <span className="faint">—</span>
@@ -88,14 +88,21 @@ export function AppsPage({ user }: { user: User }) {
   );
 }
 
+// SSH repositories need the app's deploy key added before the first build.
+const isSSH = (url: string) => !url.trim().startsWith("https://");
+
 function NewAppModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
   const withDocker = servers.data?.servers.filter((s) => s.docker) ?? [];
   const [serverId, setServerId] = useState<number | "">("");
+  const [source, setSource] = useState<"image" | "git">("image");
   const [name, setName] = useState("");
   const [image, setImage] = useState("");
+  const [repo, setRepo] = useState("");
+  const [branch, setBranch] = useState("main");
+  const [dockerfile, setDockerfile] = useState("Dockerfile");
   const [port, setPort] = useState("80");
   const [domains, setDomains] = useState("");
   const [tls, setTls] = useState("auto");
@@ -104,7 +111,9 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
       const r = await api.createApp({
         server_id: Number(serverId || withDocker[0]?.id),
         name: name.trim(),
-        image: image.trim(),
+        source,
+        image: source === "image" ? image.trim() : "",
+        git: source === "git" ? { url: repo.trim(), branch: branch.trim(), dockerfile: dockerfile.trim() } : undefined,
         port: Number(port) || 0,
         domains: domains.split(/[\s,]+/).filter(Boolean),
         tls,
@@ -112,13 +121,14 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
         memory_mb: 0,
         cpus: 0,
       });
+      const waitForKey = source === "git" && isSSH(repo);
       // Start the first deployment right away; it runs in the background.
-      await api.deployApp(r.app.id).catch(() => {});
-      return r;
+      if (!waitForKey) await api.deployApp(r.app.id).catch(() => {});
+      return { ...r, waitForKey };
     },
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["apps"] });
-      navigate(`/apps/${r.app.id}`);
+      navigate(r.waitForKey ? `/apps/${r.app.id}/source` : `/apps/${r.app.id}`);
     },
   });
 
@@ -132,7 +142,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
             Cancel
           </button>
           <button className="btn primary" form="new-app" disabled={create.isPending || withDocker.length === 0}>
-            Create and deploy
+            {source === "git" && isSSH(repo) && repo ? "Create" : "Create and deploy"}
           </button>
         </>
       }
@@ -157,17 +167,44 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
           <Field label="Name">
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-api" required autoFocus />
           </Field>
-          <Field
-            label="Image"
-            help={
-              <>
-                e.g. nginx:1.27 or ghcr.io/org/app:v1. Pin a version rather than latest. Private images need credentials
-                under <Link to="/registries">Registries</Link>.
-              </>
-            }
-          >
-            <input className="input mono" value={image} onChange={(e) => setImage(e.target.value)} placeholder="traefik/whoami:v1.10" required />
-          </Field>
+          <div className="segmented">
+            <button type="button" className={source === "image" ? "active" : ""} onClick={() => setSource("image")}>
+              Docker image
+            </button>
+            <button type="button" className={source === "git" ? "active" : ""} onClick={() => setSource("git")}>
+              Git repository
+            </button>
+          </div>
+          {source === "image" ? (
+            <Field
+              label="Image"
+              help={
+                <>
+                  e.g. nginx:1.27 or ghcr.io/org/app:v1. Pin a version rather than latest. Private images need credentials
+                  under <Link to="/registries">Registries</Link>.
+                </>
+              }
+            >
+              <input className="input mono" value={image} onChange={(e) => setImage(e.target.value)} placeholder="traefik/whoami:v1.10" required />
+            </Field>
+          ) : (
+            <>
+              <Field
+                label="Repository"
+                help="https://… for public repositories; git@host:org/repo.git for private ones (you add the app's deploy key next)."
+              >
+                <input className="input mono" value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="git@github.com:org/app.git" required />
+              </Field>
+              <div className="grid-2">
+                <Field label="Branch">
+                  <input className="input mono" value={branch} onChange={(e) => setBranch(e.target.value)} required />
+                </Field>
+                <Field label="Dockerfile" help="Path in the repository.">
+                  <input className="input mono" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} required />
+                </Field>
+              </div>
+            </>
+          )}
           <Field label="HTTP port" help="The port the app listens on inside the container. 0 for background workers.">
             <input className="input mono" type="number" min={0} max={65535} value={port} onChange={(e) => setPort(e.target.value)} />
           </Field>

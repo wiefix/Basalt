@@ -42,6 +42,7 @@ echo "### add node1 with the one-line command from the panel"
 CMD=$($API -d '{"name":"node1"}' http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print(json.load(sys.stdin)["enrollment"]["install_command"])')
 docker exec basalt-node1 sh -c "$CMD --with-php --with-mariadb --with-docker"
 docker exec basalt-node1 systemctl is-active basalt-proxy basalt-agent
+docker exec basalt-node1 sh -c 'git --version && docker buildx version | cut -d" " -f1-2' 
 docker exec basalt-node1 ps -o user=,comm= -C basalt | sort | uniq -c
 
 for i in $(seq 30); do

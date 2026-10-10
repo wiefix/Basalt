@@ -71,10 +71,15 @@ trap 'rm -rf "$TMP"' EXIT
 PKGS="ca-certificates curl"
 [ "$WITH_PHP" -eq 1 ] && PKGS="$PKGS php-fpm php-mysql php-curl php-gd php-intl php-mbstring php-xml php-zip"
 [ "$WITH_DB" -eq 1 ] && PKGS="$PKGS mariadb-server"
-[ "$WITH_DOCKER" -eq 1 ] && PKGS="$PKGS docker.io"
-say "Installing packages: $PKGS"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
+if [ "$WITH_DOCKER" -eq 1 ]; then
+	# git and ssh clone repositories of apps built from source; buildx gives
+	# the docker command BuildKit (older releases lack the package).
+	PKGS="$PKGS docker.io git openssh-client"
+	apt-cache show docker-buildx >/dev/null 2>&1 && PKGS="$PKGS docker-buildx"
+fi
+say "Installing packages: $PKGS"
 # shellcheck disable=SC2086
 apt-get install -y -qq $PKGS >/dev/null
 # Packages do not always start their services (e.g. policy-rc.d in images).

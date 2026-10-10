@@ -65,8 +65,11 @@ type Server struct {
 	ipLimiter    *auth.Limiter // all credential endpoints, per client IP
 	emailLimiter *auth.Limiter // password attempts, per account
 	mfaLimiter   *auth.Limiter // second-factor attempts, per account
+	hookLimiter  *auth.Limiter // webhook deliveries, per app
 
 	live     *liveLogs // output of running deployments
+	pendMu   sync.Mutex
+	pending  map[int64]string // per app: commit pushed while a deployment ran
 	streamMu sync.Mutex
 	streams  map[int64]int // open event streams per user
 }
@@ -94,7 +97,9 @@ func New(o Options) *Server {
 		ipLimiter:     auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
 		emailLimiter:  auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
 		mfaLimiter:    auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
+		hookLimiter:   auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
 		live:          &liveLogs{m: map[int64]*liveLog{}},
+		pending:       map[int64]string{},
 		streams:       map[int64]int{},
 	}
 }
@@ -162,6 +167,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/apps/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateApp))
 	mux.Handle("DELETE /api/v1/apps/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteApp))
 	mux.Handle("PUT /api/v1/apps/{id}/domains", s.requireRole(store.RoleAdmin, s.handleSetAppDomains))
+	mux.Handle("POST /api/v1/apps/{id}/deploy-key", s.requireRole(store.RoleAdmin, s.handleRegenerateDeployKey))
+	mux.Handle("GET /api/v1/apps/{id}/webhook", s.requireRole(store.RoleAdmin, s.handleGetWebhook))
+	mux.Handle("PUT /api/v1/apps/{id}/webhook", s.requireRole(store.RoleAdmin, s.handleSetWebhook))
+	// Authenticated by the delivery's signature, not a session.
+	mux.HandleFunc("POST /api/v1/webhooks/apps/{id}", s.handleWebhook)
 	mux.Handle("GET /api/v1/apps/{id}/env", s.requireRole(store.RoleAdmin, s.handleGetAppEnv))
 	mux.Handle("PUT /api/v1/apps/{id}/env", s.requireRole(store.RoleAdmin, s.handleSetAppEnv))
 	mux.Handle("POST /api/v1/apps/{id}/deploy", s.requireRole(store.RoleMember, s.handleDeployApp))

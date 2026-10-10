@@ -194,6 +194,8 @@ type AppSpec struct {
 	// PruneImages are images of earlier deployments to remove once this
 	// one has succeeded.
 	PruneImages []ImageRef `json:"prune_images,omitempty"`
+	// Git, when set, builds Image from a repository instead of pulling it.
+	Git *GitSource `json:"git,omitempty"`
 }
 
 // ImageRef is an image an app was deployed from: the reference used and
@@ -217,6 +219,9 @@ type AppDeployResponse struct {
 	Log         string `json:"log"`
 	ContainerID string `json:"container_id,omitempty"`
 	ImageDigest string `json:"image_digest,omitempty"`
+	// The commit a git deployment was built from.
+	Commit        string `json:"commit,omitempty"`
+	CommitMessage string `json:"commit_message,omitempty"`
 }
 
 type AppRequest struct {
