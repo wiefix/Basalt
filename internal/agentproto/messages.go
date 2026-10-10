@@ -29,6 +29,11 @@ const (
 	TypeFiles      = "files"
 	TypeSFTPApply  = "sftp_apply"
 	TypeDatabase   = "database"
+	TypeAppDeploy  = "app_deploy"
+	TypeAppDelete  = "app_delete"
+	TypeAppStatus  = "app_status"
+	TypeAppLogs    = "app_logs"
+	TypeAppsSync   = "apps_sync"
 )
 
 // EnrollRequest is posted once, authenticated by the one-time token.
@@ -64,6 +69,9 @@ type Hello struct {
 	Isolated bool `json:"isolated,omitempty"`
 	// MariaDB is the version of the local database server ("" if absent).
 	MariaDB string `json:"mariadb,omitempty"`
+	// Docker is the version of the local Docker Engine ("" if absent or
+	// too old for the API Basalt uses).
+	Docker string `json:"docker,omitempty"`
 }
 
 type Metrics struct {
@@ -163,4 +171,63 @@ type DatabaseRequest struct {
 	Name     string `json:"name"`
 	User     string `json:"user"`
 	Password string `json:"password,omitempty"`
+}
+
+// AppSpec is everything needed to run one deployment of an app. The agent
+// derives container, network and volume names from the IDs.
+type AppSpec struct {
+	AppID        int64             `json:"app_id"`
+	DeploymentID int64             `json:"deployment_id"`
+	Image        string            `json:"image"`
+	Port         int               `json:"port,omitempty"` // HTTP port inside the container (0: not served)
+	Env          map[string]string `json:"env,omitempty"`
+	Volumes      []AppVolume       `json:"volumes,omitempty"`
+	MemoryMB     int               `json:"memory_mb,omitempty"`
+	CPUs         float64           `json:"cpus,omitempty"`
+}
+
+// AppVolume is a persistent named volume mounted at Path.
+type AppVolume struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// AppDeployResponse reports a deployment. A failed deployment is a normal
+// response (OK false), so its log reaches the panel.
+type AppDeployResponse struct {
+	OK          bool   `json:"ok"`
+	Error       string `json:"error,omitempty"`
+	Log         string `json:"log"`
+	ContainerID string `json:"container_id,omitempty"`
+	ImageDigest string `json:"image_digest,omitempty"`
+}
+
+type AppRequest struct {
+	AppID int64 `json:"app_id"`
+	// DeleteVolumes also removes the app's persistent data (app_delete).
+	DeleteVolumes bool `json:"delete_volumes,omitempty"`
+	// Tail is the number of log lines to return (app_logs).
+	Tail int `json:"tail,omitempty"`
+}
+
+// AppStatus describes the container currently serving an app.
+type AppStatus struct {
+	State        string    `json:"state"` // missing, created, running, restarting, exited, ...
+	Health       string    `json:"health,omitempty"`
+	DeploymentID int64     `json:"deployment_id,omitempty"`
+	StartedAt    time.Time `json:"started_at,omitzero"`
+	RestartCount int       `json:"restart_count,omitempty"`
+	ExitCode     int       `json:"exit_code,omitempty"`
+	OOMKilled    bool      `json:"oom_killed,omitempty"`
+	Error        string    `json:"error,omitempty"`
+}
+
+type AppLogsResponse struct {
+	Log string `json:"log"`
+}
+
+// AppsSync lists every app the panel knows on this server; the agent
+// removes containers of apps not in the list (deleted while it was offline).
+type AppsSync struct {
+	AppIDs []int64 `json:"app_ids"`
 }

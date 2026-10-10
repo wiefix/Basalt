@@ -297,7 +297,7 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 			Hostname: clean(m.Hostname), OS: clean(m.OS), Arch: clean(m.Arch), Kernel: clean(m.Kernel),
 			Distro: clean(m.Distro), AgentVersion: clean(m.AgentVersion),
 			CPUCount: max(0, m.CPUCount), MemTotal: m.MemTotal, LastIP: ip, LastSeen: &now,
-			PHPVersions: cleanVersions(m.PHPVersions), Isolated: m.Isolated,
+			PHPVersions: cleanVersions(m.PHPVersions), Isolated: m.Isolated, Docker: clean(m.Docker),
 		})
 	case agentproto.TypeMetrics:
 		var m agentproto.Metrics

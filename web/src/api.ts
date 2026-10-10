@@ -31,6 +31,7 @@ export interface Server {
   enroll_expires?: string;
   php_versions: string[];
   isolated: boolean;
+  docker: string;
   created_at: string;
 }
 

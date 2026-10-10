@@ -173,6 +173,7 @@ func TestAgentLifecycle(t *testing.T) {
 	// window makes it rotate its certificate on connect.
 	a, err := agent.New(agent.Config{
 		DataDir: agentDir, ProxyDir: t.TempDir(), SitesRoot: t.TempDir(), HTTPPort: 80, HTTPSPort: 443,
+		DockerSocket: fakeDocker(t, "28.1.1"),
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
@@ -187,6 +188,9 @@ func TestAgentLifecycle(t *testing.T) {
 		s := p.server(id)
 		return s["status"] == "online" && s["hostname"] != nil && s["os"] != nil
 	})
+	if d := p.server(id)["docker"]; d != "28.1.1" {
+		t.Fatalf("docker version = %v", d)
+	}
 	eventually(t, "metrics stored", func() bool {
 		m := p.call(200, "GET", "/api/v1/servers/"+id+"/metrics?minutes=5", nil)["metrics"].([]any)
 		return len(m) >= 2 && m[0].(map[string]any)["disk_total"].(float64) > 0
@@ -252,6 +256,28 @@ func TestConnectRequiresTrustedClientCertificate(t *testing.T) {
 	if code := connect(&tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}); code != -1 {
 		t.Fatalf("foreign certificate: %d; want handshake failure", code)
 	}
+}
+
+// fakeDocker serves the Docker Engine version endpoint on a unix socket.
+func fakeDocker(t *testing.T, version string) string {
+	t.Helper()
+	dir, _ := os.MkdirTemp("/tmp", "bd")
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "docker.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1.44/version" {
+			http.NotFound(w, r)
+			return
+		}
+		io.WriteString(w, `{"Version":"`+version+`","ApiVersion":"1.49"}`)
+	})}
+	go srv.Serve(ln)
+	t.Cleanup(func() { srv.Close() })
+	return sock
 }
 
 func certFP(t *testing.T, db *store.DB, id int64) string {

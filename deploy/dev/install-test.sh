@@ -40,14 +40,14 @@ $API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; [print(
 
 echo "### add node1 with the one-line command from the panel"
 CMD=$($API -d '{"name":"node1"}' http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print(json.load(sys.stdin)["enrollment"]["install_command"])')
-docker exec basalt-node1 sh -c "$CMD --with-php --with-mariadb"
+docker exec basalt-node1 sh -c "$CMD --with-php --with-mariadb --with-docker"
 docker exec basalt-node1 systemctl is-active basalt-proxy basalt-agent
 docker exec basalt-node1 ps -o user=,comm= -C basalt | sort | uniq -c
 
 for i in $(seq 30); do
   $API http://127.0.0.1:8080/api/v1/servers | grep -q '"name":"node1","status":"online"' && break; sleep 1
 done
-$API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; [print(" ", s["name"], s["status"], "php:", s["php_versions"], "isolated:", s["isolated"]) for s in json.load(sys.stdin)["servers"]]'
+$API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; [print(" ", s["name"], s["status"], "php:", s["php_versions"], "isolated:", s["isolated"], "docker:", s["docker"]) for s in json.load(sys.stdin)["servers"]]'
 NODE=$($API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print([s["id"] for s in json.load(sys.stdin)["servers"] if s["name"]=="node1"][0])')
 PHPV=$($API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print([s["php_versions"][0] for s in json.load(sys.stdin)["servers"] if s["name"]=="node1"][0])')
 

@@ -167,6 +167,10 @@ func routeHandlers(r Route) (handlers []any, fsEntry obj) {
 		}
 		return append(handlers, obj{"handler": "subroute", "routes": phpRoutes(r, fsName, static)}), fsEntry
 	case KindReverseProxy:
+		if r.Upstream == "" {
+			// An app with no running container.
+			return append(handlers, obj{"handler": "static_response", "status_code": 502}), nil
+		}
 		handlers = append(handlers, obj{
 			"handler":   "reverse_proxy",
 			"upstreams": []any{obj{"dial": r.Upstream}},

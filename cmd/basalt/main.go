@@ -216,6 +216,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		Isolate:       cfg.Isolate == "on" || (cfg.Isolate == "auto" && runtime.GOOS == "linux" && os.Geteuid() == 0),
 		ProxyUser:     cfg.ProxyUser,
 		MySQLSocket:   cfg.MySQLSocket,
+		DockerSocket:  cfg.DockerSocket,
 		PanelDomain:   cfg.PanelDomain,
 		PanelUpstream: cfg.PanelUpstream,
 	}, log)

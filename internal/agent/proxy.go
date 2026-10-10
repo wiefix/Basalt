@@ -31,6 +31,7 @@ type proxyManager struct {
 	opts      proxy.BuildOptions
 	admin     *proxy.Admin
 	sites     *sitesManager
+	apps      *appsManager
 	panel     *proxy.Route
 
 	applyMu sync.Mutex // serialises Apply calls
@@ -40,7 +41,7 @@ type proxyManager struct {
 	lastErr string
 }
 
-func newProxyManager(cfg Config, sites *sitesManager, log *slog.Logger) *proxyManager {
+func newProxyManager(cfg Config, sites *sitesManager, apps *appsManager, log *slog.Logger) *proxyManager {
 	var panel *proxy.Route
 	if cfg.PanelDomain != "" && cfg.PanelUpstream != "" {
 		panel = &proxy.Route{Kind: proxy.KindReverseProxy, Domains: []string{cfg.PanelDomain},
@@ -50,6 +51,7 @@ func newProxyManager(cfg Config, sites *sitesManager, log *slog.Logger) *proxyMa
 		panel:     panel,
 		log:       log,
 		sites:     sites,
+		apps:      apps,
 		stateFile: filepath.Join(cfg.DataDir, fileProxyDesired),
 		sitesRoot: cfg.SitesRoot,
 		opts: proxy.BuildOptions{
@@ -95,7 +97,7 @@ func (m *proxyManager) Apply(ctx context.Context, d proxy.Desired) (string, erro
 		return id, err
 	}
 
-	m.resolveSites(&d)
+	m.resolve(&d)
 	if err := d.Validate(m.sitesRoot); err != nil {
 		return "", err
 	}
@@ -141,17 +143,21 @@ func (m *proxyManager) withPanel(d proxy.Desired) proxy.Desired {
 	return out
 }
 
-// resolveSites fills in the served directory of site routes. A root sent by
-// the panel for a site route is ignored: only the agent decides where a
-// site lives.
-func (m *proxyManager) resolveSites(d *proxy.Desired) {
+// resolve fills in what only the agent knows: the served directory of site
+// routes and the current container of app routes. Values sent by the panel
+// for these are ignored: only the agent decides where a site or app lives.
+func (m *proxyManager) resolve(d *proxy.Desired) {
 	for i := range d.Routes {
-		if r := &d.Routes[i]; r.Kind == proxy.KindStatic && r.SiteID > 0 {
+		r := &d.Routes[i]
+		switch {
+		case r.Kind == proxy.KindStatic && r.SiteID > 0:
 			r.Root = m.sites.PublicDir(r.SiteID)
 			r.PHPSocket = ""
 			if r.PHP {
 				r.PHPSocket = m.sites.php.Socket(r.SiteID)
 			}
+		case r.Kind == proxy.KindReverseProxy && r.AppID > 0:
+			r.Upstream = m.apps.Upstream(r.AppID)
 		}
 	}
 }
@@ -174,18 +180,23 @@ func (m *proxyManager) persist(d proxy.Desired, cfg []byte) error {
 }
 
 // reconcile re-applies the desired state if the proxy is not running it,
-// e.g. after the proxy process restarted.
+// e.g. after the proxy process restarted or an app moved to a new container.
 func (m *proxyManager) reconcile(ctx context.Context) {
+	m.applyMu.Lock()
+	defer m.applyMu.Unlock()
 	m.mu.Lock()
-	d := m.desired
-	m.mu.Unlock()
-	if d == nil {
-		if m.panel == nil {
-			return
-		}
-		d = &proxy.Desired{} // nothing from the panel yet: still publish the panel
+	var d proxy.Desired // nothing from the panel yet: still publish the panel
+	have := m.desired != nil
+	if have {
+		d = *m.desired
+		d.Routes = slices.Clone(d.Routes)
 	}
-	cfg, id, err := proxy.Build(m.withPanel(*d), m.opts)
+	m.mu.Unlock()
+	if !have && m.panel == nil {
+		return
+	}
+	m.resolve(&d)
+	cfg, id, err := proxy.Build(m.withPanel(d), m.opts)
 	if err != nil {
 		m.report(err)
 		return

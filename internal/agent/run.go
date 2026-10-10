@@ -20,6 +20,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/buildinfo"
+	"github.com/wiefix/basalt/internal/docker"
 	"github.com/wiefix/basalt/internal/mariadb"
 	"github.com/wiefix/basalt/internal/pki"
 )
@@ -54,6 +55,8 @@ type Config struct {
 	PHPRunDir string
 	// MySQLSocket is the local MariaDB/MySQL socket ("" disables databases).
 	MySQLSocket string
+	// DockerSocket is the local Docker Engine socket ("" disables apps).
+	DockerSocket string
 	// PanelDomain and PanelUpstream publish the panel itself through this
 	// host's proxy (set on the panel's own host). The route exists even
 	// before the panel has sent any state, so the UI is reachable at once.
@@ -62,12 +65,14 @@ type Config struct {
 }
 
 type Agent struct {
-	dir   string
-	log   *slog.Logger
-	proxy *proxyManager
-	sites *sitesManager
-	sftp  *sftpManager
-	mysql string
+	dir    string
+	log    *slog.Logger
+	proxy  *proxyManager
+	sites  *sitesManager
+	sftp   *sftpManager
+	apps   *appsManager
+	mysql  string
+	docker string
 
 	mu sync.Mutex
 	id *identity
@@ -97,12 +102,17 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+	apps := newAppsManager(cfg, log.With("subsystem", "apps"))
+	proxy := newProxyManager(cfg, sites, apps, log.With("subsystem", "proxy"))
+	apps.onChange = func() { proxy.reconcile(context.Background()) }
 	return &Agent{
 		dir: cfg.DataDir, log: log, id: id,
 		sites:           sites,
 		sftp:            sftp,
+		apps:            apps,
 		mysql:           cfg.MySQLSocket,
-		proxy:           newProxyManager(cfg, sites, log.With("subsystem", "proxy")),
+		docker:          cfg.DockerSocket,
+		proxy:           proxy,
 		MetricsInterval: metricsInterval,
 		RenewBefore:     renewBefore,
 		collector:       newCollector(),
@@ -124,6 +134,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.proxy.run(ctx)
 	go a.sites.janitor(ctx)
 	go a.sftp.run(ctx)
+	go a.apps.run(ctx)
 
 	backoff := minBackoff
 	for {
@@ -202,6 +213,7 @@ func (a *Agent) session(ctx context.Context) error {
 	hello.SFTPPort, hello.SFTPFingerprint = a.sftp.Port(), a.sftp.Fingerprint()
 	hello.PHPVersions, hello.Isolated = a.sites.PHPVersions(), a.sites.isolate
 	hello.MariaDB = a.mariadbVersion(ctx)
+	hello.Docker = a.dockerVersion(ctx)
 	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
 		return err
 	}
@@ -246,6 +258,31 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return struct{}{}, a.database(ctx, req)
+	case agentproto.TypeAppDeploy:
+		var spec agentproto.AppSpec
+		if err := json.Unmarshal(payload, &spec); err != nil {
+			return nil, err
+		}
+		return a.apps.Deploy(ctx, spec), nil
+	case agentproto.TypeAppDelete, agentproto.TypeAppStatus, agentproto.TypeAppLogs:
+		var req agentproto.AppRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		switch typ {
+		case agentproto.TypeAppDelete:
+			return struct{}{}, a.apps.Delete(ctx, req.AppID, req.DeleteVolumes)
+		case agentproto.TypeAppStatus:
+			return a.apps.Status(ctx, req.AppID)
+		}
+		log, err := a.apps.Logs(ctx, req.AppID, req.Tail)
+		return agentproto.AppLogsResponse{Log: log}, err
+	case agentproto.TypeAppsSync:
+		var req agentproto.AppsSync
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.apps.Sync(ctx, req.AppIDs)
 	case agentproto.TypeFiles:
 		var req agentproto.FilesRequest
 		if err := json.Unmarshal(payload, &req); err != nil {
@@ -349,6 +386,20 @@ func (a *Agent) mariadbVersion(ctx context.Context) string {
 		return ""
 	}
 	return v
+}
+
+func (a *Agent) dockerVersion(ctx context.Context) string {
+	if a.docker == "" || !docker.Available(a.docker) {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	v, err := docker.New(a.docker).Version(ctx)
+	if err != nil {
+		a.log.Warn("Docker socket present but not usable", "err", err)
+		return ""
+	}
+	return v.Version
 }
 
 func (a *Agent) database(ctx context.Context, req agentproto.DatabaseRequest) error {

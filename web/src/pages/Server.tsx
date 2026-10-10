@@ -169,6 +169,8 @@ export function ServerPage({ user }: { user: User }) {
               <dd>{s.isolated ? "per-site system users" : "off (agent not running as root on Linux)"}</dd>
               <dt>PHP</dt>
               <dd>{s.php_versions?.length ? s.php_versions.join(", ") : "not installed"}</dd>
+              <dt>Docker</dt>
+              <dd>{s.docker || "not installed"}</dd>
               <dt>Agent version</dt>
               <dd className="mono">{s.agent_version || "—"}</dd>
               <dt>Address</dt>

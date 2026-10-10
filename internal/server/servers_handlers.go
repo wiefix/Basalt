@@ -44,6 +44,7 @@ type serverView struct {
 	EnrollExpires *time.Time `json:"enroll_expires,omitempty"`
 	PHPVersions   []string   `json:"php_versions"`
 	Isolated      bool       `json:"isolated"`
+	Docker        string     `json:"docker"`
 	CreatedAt     time.Time  `json:"created_at"`
 }
 
@@ -60,7 +61,7 @@ func (s *Server) viewServer(srv *store.Server) serverView {
 		Arch: srv.Arch, Kernel: srv.Kernel, Distro: srv.Distro, AgentVersion: srv.AgentVersion,
 		CPUCount: srv.CPUCount, MemTotal: srv.MemTotal, LastSeen: srv.LastSeen, LastIP: srv.LastIP,
 		CertExpires: srv.CertExpires, EnrollExpires: srv.EnrollExpires, CreatedAt: srv.CreatedAt,
-		PHPVersions: srv.PHPVersions, Isolated: srv.Isolated,
+		PHPVersions: srv.PHPVersions, Isolated: srv.Isolated, Docker: srv.Docker,
 	}
 }
 

@@ -7,7 +7,7 @@ LDFLAGS := -s -w -X $(PKG).Version=$(VERSION) -X $(PKG).Commit=$(COMMIT) -X $(PK
 GOFLAGS := -trimpath
 export CGO_ENABLED := 0
 
-.PHONY: build build-linux test test-linux test-install lint run clean web web-dev
+.PHONY: build build-linux test test-docker test-linux test-install lint run clean web web-dev
 
 build:
 	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o bin/basalt ./cmd/basalt
@@ -18,6 +18,10 @@ build-linux:
 
 test:
 	CGO_ENABLED=1 go test -race ./...
+
+# Against the local Docker daemon (pulls a small image).
+test-docker:
+	BASALT_DOCKER_TESTS=1 go test -count=1 -run Live -v ./internal/docker
 
 # Real system users, PHP-FPM and MariaDB in a Debian container (needs Docker).
 test-linux:

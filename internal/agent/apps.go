@@ -1,0 +1,615 @@
+package agent
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"maps"
+	"net"
+	"runtime"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/docker"
+)
+
+// Container labels. Docker is the source of truth for what runs on the
+// host: the agent rebuilds its view from these after any restart.
+const (
+	labelApp        = "basalt.app"
+	labelDeployment = "basalt.deployment"
+	labelPort       = "basalt.port"
+	labelVolume     = "basalt.volume"
+)
+
+const (
+	appReadyTimeout = 2 * time.Minute
+	appStopTimeout  = 10 * time.Second
+	appRefreshGap   = 10 * time.Second
+	maxDeployLog    = 64 << 10
+	maxAppLogs      = 1 << 20
+	maxLogTail      = 5000
+)
+
+// Capabilities dropped from Docker's default set: none are needed by web
+// apps, and they help attacks on the host network or devices.
+var appCapDrop = []string{"NET_RAW", "MKNOD", "AUDIT_WRITE", "SETFCAP"}
+
+// appsManager runs apps as Docker containers, one container per app at a
+// time (two during a deployment). Each app has its own bridge network, so
+// apps cannot reach each other; the proxy reaches the current container on
+// that network, without publishing ports on the host.
+type appsManager struct {
+	log    *slog.Logger
+	socket string
+	dc     *docker.Client
+	// publish binds app ports to 127.0.0.1 instead of dialling container
+	// IPs, for development hosts (Docker Desktop) whose container networks
+	// are not routable from the host.
+	publish bool
+	// onChange is called when the upstream of any app changes.
+	onChange func()
+
+	lmu   sync.Mutex
+	locks map[int64]*sync.Mutex
+
+	umu       sync.Mutex
+	upstreams map[int64]string
+	lastErr   string
+}
+
+func newAppsManager(cfg Config, log *slog.Logger) *appsManager {
+	m := &appsManager{
+		log: log, socket: cfg.DockerSocket, publish: runtime.GOOS != "linux",
+		locks: map[int64]*sync.Mutex{}, upstreams: map[int64]string{}, onChange: func() {},
+	}
+	if cfg.DockerSocket != "" {
+		m.dc = docker.New(cfg.DockerSocket)
+	}
+	return m
+}
+
+func appNetwork(appID int64) string { return "basalt-app-" + strconv.FormatInt(appID, 10) }
+
+func appContainer(appID, deploymentID int64) string {
+	return appNetwork(appID) + "-d" + strconv.FormatInt(deploymentID, 10)
+}
+
+func appVolume(appID int64, name string) string { return appNetwork(appID) + "-" + name }
+
+func (m *appsManager) client() (*docker.Client, error) {
+	if m.dc == nil || !docker.Available(m.socket) {
+		return nil, errors.New("Docker is not available on this server")
+	}
+	return m.dc, nil
+}
+
+// lock serialises operations on one app.
+func (m *appsManager) lock(appID int64) func() {
+	m.lmu.Lock()
+	l := m.locks[appID]
+	if l == nil {
+		l = &sync.Mutex{}
+		m.locks[appID] = l
+	}
+	m.lmu.Unlock()
+	l.Lock()
+	return l.Unlock
+}
+
+// Upstream is the dial address of the app's current container ("" if none).
+func (m *appsManager) Upstream(appID int64) string {
+	m.umu.Lock()
+	defer m.umu.Unlock()
+	return m.upstreams[appID]
+}
+
+// deployLog collects the messages shown to the user, bounded in size.
+type deployLog struct{ bytes.Buffer }
+
+func (l *deployLog) printf(format string, args ...any) {
+	if l.Len() >= maxDeployLog {
+		return
+	}
+	fmt.Fprintf(l, time.Now().UTC().Format("15:04:05")+" "+format+"\n", args...)
+}
+
+// Deploy starts a new container for spec and, once it is ready, switches
+// the proxy to it and stops the previous one. If the new container fails,
+// the previous one keeps serving.
+func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec) agentproto.AppDeployResponse {
+	var lg deployLog
+	fail := func(err error) agentproto.AppDeployResponse {
+		lg.printf("Deployment failed: %v", err)
+		return agentproto.AppDeployResponse{Error: err.Error(), Log: lg.String()}
+	}
+	if err := spec.Validate(); err != nil {
+		return fail(err)
+	}
+	dc, err := m.client()
+	if err != nil {
+		return fail(err)
+	}
+	defer m.lock(spec.AppID)()
+
+	digest, err := m.pull(ctx, dc, spec.Image, &lg)
+	if err != nil {
+		return fail(err)
+	}
+	if err := m.ensureNetwork(ctx, dc, spec.AppID); err != nil {
+		return fail(err)
+	}
+	for _, v := range spec.Volumes {
+		labels := map[string]string{labelApp: strconv.FormatInt(spec.AppID, 10), labelVolume: v.Name}
+		if err := dc.VolumeCreate(ctx, appVolume(spec.AppID, v.Name), labels); err != nil {
+			return fail(fmt.Errorf("create volume %s: %w", v.Name, err))
+		}
+	}
+
+	name := appContainer(spec.AppID, spec.DeploymentID)
+	// A container left by an earlier attempt of the same deployment.
+	if err := dc.ContainerRemove(ctx, name, true); err != nil {
+		return fail(err)
+	}
+	id, err := dc.ContainerCreate(ctx, name, m.containerConfig(spec))
+	if err != nil {
+		return fail(fmt.Errorf("create container: %w", err))
+	}
+	lg.printf("Starting container %s", name)
+	if err := dc.ContainerStart(ctx, id); err != nil {
+		dc.ContainerRemove(context.WithoutCancel(ctx), id, true)
+		return fail(fmt.Errorf("start container: %w", err))
+	}
+	if err := m.waitReady(ctx, dc, spec, id, &lg); err != nil {
+		lg.printf("Last output of the new container:")
+		lg.WriteString(m.tail(context.WithoutCancel(ctx), dc, id, 50))
+		dc.ContainerRemove(context.WithoutCancel(ctx), id, true)
+		return fail(err)
+	}
+
+	// The new container has the highest deployment ID, so it becomes the
+	// upstream; the proxy switches before the old one stops.
+	m.refresh(ctx)
+	lg.printf("Traffic switched to the new container")
+	m.removeOlder(ctx, dc, spec.AppID, spec.DeploymentID, &lg)
+	lg.printf("Deployment succeeded")
+	return agentproto.AppDeployResponse{OK: true, Log: lg.String(), ContainerID: id, ImageDigest: digest}
+}
+
+// pull fetches the image unless it is pinned by digest and already present.
+// It returns the repository digest of the image.
+func (m *appsManager) pull(ctx context.Context, dc *docker.Client, ref string, lg *deployLog) (string, error) {
+	present := false
+	if strings.Contains(ref, "@sha256:") {
+		_, err := dc.ImageInspect(ctx, ref)
+		present = err == nil
+	}
+	if present {
+		lg.printf("Image %s is already present", ref)
+	} else {
+		lg.printf("Pulling %s", ref)
+		layers := 0
+		err := dc.Pull(ctx, ref, func(p docker.PullProgress) {
+			switch {
+			case p.Status == "Pull complete":
+				layers++
+			case strings.HasPrefix(p.Status, "Digest:"), strings.HasPrefix(p.Status, "Status:"):
+				lg.printf("%s", p.Status)
+			}
+		})
+		if err != nil {
+			return "", fmt.Errorf("pull %s: %w", ref, err)
+		}
+		if layers > 0 {
+			lg.printf("Downloaded %d layers", layers)
+		}
+	}
+	info, err := dc.ImageInspect(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	if len(info.RepoDigests) > 0 {
+		return info.RepoDigests[0], nil
+	}
+	return info.ID, nil
+}
+
+func (m *appsManager) ensureNetwork(ctx context.Context, dc *docker.Client, appID int64) error {
+	name := appNetwork(appID)
+	if _, err := dc.NetworkInspect(ctx, name); err == nil {
+		return nil
+	} else if !errors.Is(err, docker.ErrNotFound) {
+		return err
+	}
+	_, err := dc.NetworkCreate(ctx, docker.NetworkConfig{
+		Name: name, Labels: map[string]string{labelApp: strconv.FormatInt(appID, 10)},
+	})
+	if errors.Is(err, docker.ErrConflict) {
+		return nil // created concurrently
+	}
+	return err
+}
+
+func (m *appsManager) containerConfig(spec agentproto.AppSpec) docker.ContainerConfig {
+	env := make([]string, 0, len(spec.Env))
+	for _, k := range slices.Sorted(maps.Keys(spec.Env)) {
+		env = append(env, k+"="+spec.Env[k])
+	}
+	init, pids := true, int64(4096)
+	hc := &docker.HostConfig{
+		NetworkMode:   appNetwork(spec.AppID),
+		RestartPolicy: docker.RestartPolicy{Name: "unless-stopped"},
+		CapDrop:       appCapDrop,
+		SecurityOpt:   []string{"no-new-privileges:true"},
+		Init:          &init,
+		PidsLimit:     &pids,
+		Memory:        int64(spec.MemoryMB) << 20,
+		NanoCPUs:      int64(spec.CPUs * 1e9),
+		LogConfig:     &docker.LogConfig{Type: "local", Config: map[string]string{"max-size": "10m", "max-file": "3"}},
+	}
+	for _, v := range spec.Volumes {
+		hc.Mounts = append(hc.Mounts, docker.Mount{Type: "volume", Source: appVolume(spec.AppID, v.Name), Target: v.Path})
+	}
+	cfg := docker.ContainerConfig{
+		Image: spec.Image,
+		Env:   env,
+		Labels: map[string]string{
+			labelApp:        strconv.FormatInt(spec.AppID, 10),
+			labelDeployment: strconv.FormatInt(spec.DeploymentID, 10),
+			labelPort:       strconv.Itoa(spec.Port),
+		},
+		HostConfig: hc,
+		NetworkingConfig: &docker.NetworkingConfig{EndpointsConfig: map[string]*docker.EndpointSettings{
+			appNetwork(spec.AppID): {Aliases: []string{"app"}},
+		}},
+	}
+	if m.publish && spec.Port > 0 {
+		p := strconv.Itoa(spec.Port) + "/tcp"
+		cfg.ExposedPorts = map[string]struct{}{p: {}}
+		hc.PortBindings = map[string][]docker.PortBinding{p: {{HostIP: "127.0.0.1"}}}
+	}
+	return cfg
+}
+
+// waitReady waits until the container is healthy (when the image defines a
+// health check), accepts TCP connections on its port, or, without a port,
+// keeps running for a few seconds.
+func (m *appsManager) waitReady(ctx context.Context, dc *docker.Client, spec agentproto.AppSpec, id string, lg *deployLog) error {
+	ctx, cancel := context.WithTimeout(ctx, appReadyTimeout)
+	defer cancel()
+	start := time.Now()
+	logged := false
+	for {
+		info, err := dc.ContainerInspect(ctx, id)
+		if err != nil {
+			return err
+		}
+		st := info.State
+		switch {
+		case st.Restarting || info.RestartCount > 0 || st.Status == "exited" || st.Status == "dead":
+			return fmt.Errorf("the container stopped (exit code %d)", st.ExitCode)
+		case st.Health != nil:
+			if !logged {
+				lg.printf("Waiting for the image's health check")
+				logged = true
+			}
+			if st.Health.Status == "healthy" {
+				lg.printf("Container is healthy")
+				return nil
+			}
+			if st.Health.Status == "unhealthy" {
+				return errors.New("the container's health check failed")
+			}
+		case spec.Port > 0:
+			if !logged {
+				lg.printf("Waiting for port %d to accept connections", spec.Port)
+				logged = true
+			}
+			if addr := m.upstreamOf(info, spec.AppID, spec.Port); addr != "" {
+				if c, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "tcp", addr); err == nil {
+					c.Close()
+					lg.printf("Port %d is ready", spec.Port)
+					return nil
+				}
+			}
+		case time.Since(start) > 3*time.Second:
+			lg.printf("Container is running")
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("the container did not become ready within %s", appReadyTimeout)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+// upstreamOf returns where the proxy reaches port of a container.
+func (m *appsManager) upstreamOf(info *docker.ContainerInfo, appID int64, port int) string {
+	if m.publish {
+		for _, b := range info.NetworkSettings.Ports[strconv.Itoa(port)+"/tcp"] {
+			if b.HostPort != "" {
+				return net.JoinHostPort("127.0.0.1", b.HostPort)
+			}
+		}
+		return ""
+	}
+	if n, ok := info.NetworkSettings.Networks[appNetwork(appID)]; ok && n.IPAddress != "" {
+		return net.JoinHostPort(n.IPAddress, strconv.Itoa(port))
+	}
+	return ""
+}
+
+// containers returns the app's containers, newest deployment first.
+func (m *appsManager) containers(ctx context.Context, dc *docker.Client, appID int64) ([]docker.ContainerSummary, error) {
+	labels := map[string]string{labelApp: ""}
+	if appID > 0 {
+		labels[labelApp] = strconv.FormatInt(appID, 10)
+	}
+	list, err := dc.ContainerList(ctx, labels)
+	if err != nil {
+		return nil, err
+	}
+	slices.SortFunc(list, func(a, b docker.ContainerSummary) int {
+		return -cmpInt(labelInt(a.Labels, labelDeployment), labelInt(b.Labels, labelDeployment))
+	})
+	return list, nil
+}
+
+func labelInt(labels map[string]string, key string) int64 {
+	n, _ := strconv.ParseInt(labels[key], 10, 64)
+	return n
+}
+
+func cmpInt(a, b int64) int {
+	switch {
+	case a < b:
+		return -1
+	case a > b:
+		return 1
+	}
+	return 0
+}
+
+// removeOlder stops and removes containers of earlier deployments.
+func (m *appsManager) removeOlder(ctx context.Context, dc *docker.Client, appID, deploymentID int64, lg *deployLog) {
+	list, err := m.containers(ctx, dc, appID)
+	if err != nil {
+		lg.printf("Could not list old containers: %v", err)
+		return
+	}
+	for _, c := range list {
+		if labelInt(c.Labels, labelDeployment) >= deploymentID {
+			continue
+		}
+		if c.State == "running" {
+			lg.printf("Stopping the previous container")
+			if err := dc.ContainerStop(ctx, c.ID, appStopTimeout); err != nil {
+				lg.printf("Stop failed: %v", err)
+			}
+		}
+		if err := dc.ContainerRemove(ctx, c.ID, true); err != nil {
+			lg.printf("Remove failed: %v", err)
+		}
+	}
+}
+
+// refresh recomputes every app's upstream from Docker and notifies the
+// proxy when anything changed (e.g. container IPs after a Docker restart).
+func (m *appsManager) refresh(ctx context.Context) {
+	dc, err := m.client()
+	if err != nil {
+		return
+	}
+	list, err := m.containers(ctx, dc, 0)
+	if err != nil {
+		m.report(err)
+		return
+	}
+	next := map[int64]string{}
+	for _, c := range list { // newest deployment first
+		app := labelInt(c.Labels, labelApp)
+		port := int(labelInt(c.Labels, labelPort))
+		if _, done := next[app]; done || app <= 0 || port <= 0 || c.State != "running" {
+			continue
+		}
+		info, err := dc.ContainerInspect(ctx, c.ID)
+		if err != nil {
+			continue
+		}
+		if up := m.upstreamOf(info, app, port); up != "" {
+			next[app] = up
+		}
+	}
+	m.umu.Lock()
+	changed := !maps.Equal(next, m.upstreams)
+	m.upstreams = next
+	m.lastErr = ""
+	m.umu.Unlock()
+	if changed {
+		m.onChange()
+	}
+}
+
+func (m *appsManager) report(err error) {
+	m.umu.Lock()
+	defer m.umu.Unlock()
+	if err.Error() != m.lastErr {
+		m.lastErr = err.Error()
+		m.log.Warn("docker", "err", err)
+	}
+}
+
+func (m *appsManager) run(ctx context.Context) {
+	if m.dc == nil {
+		return
+	}
+	t := time.NewTicker(appRefreshGap)
+	defer t.Stop()
+	for {
+		m.refresh(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// current is the container serving the app: the newest running one, or
+// the newest of any state.
+func (m *appsManager) current(ctx context.Context, dc *docker.Client, appID int64) (*docker.ContainerSummary, error) {
+	list, err := m.containers(ctx, dc, appID)
+	if err != nil || len(list) == 0 {
+		return nil, err
+	}
+	for i := range list {
+		if list[i].State == "running" {
+			return &list[i], nil
+		}
+	}
+	return &list[0], nil
+}
+
+func (m *appsManager) Status(ctx context.Context, appID int64) (agentproto.AppStatus, error) {
+	dc, err := m.client()
+	if err != nil {
+		return agentproto.AppStatus{}, err
+	}
+	c, err := m.current(ctx, dc, appID)
+	if err != nil {
+		return agentproto.AppStatus{}, err
+	}
+	if c == nil {
+		return agentproto.AppStatus{State: "missing"}, nil
+	}
+	info, err := dc.ContainerInspect(ctx, c.ID)
+	if err != nil {
+		return agentproto.AppStatus{}, err
+	}
+	st := agentproto.AppStatus{
+		State: info.State.Status, DeploymentID: labelInt(info.Config.Labels, labelDeployment),
+		RestartCount: info.RestartCount, ExitCode: info.State.ExitCode, OOMKilled: info.State.OOMKilled,
+		Error: info.State.Error,
+	}
+	if info.State.Health != nil {
+		st.Health = info.State.Health.Status
+	}
+	if t, err := time.Parse(time.RFC3339Nano, info.State.StartedAt); err == nil && !t.IsZero() && t.Year() > 1 {
+		st.StartedAt = t
+	}
+	return st, nil
+}
+
+// Logs returns the last lines of the current container's output, stdout
+// and stderr interleaved.
+func (m *appsManager) Logs(ctx context.Context, appID int64, tail int) (string, error) {
+	dc, err := m.client()
+	if err != nil {
+		return "", err
+	}
+	c, err := m.current(ctx, dc, appID)
+	if err != nil || c == nil {
+		return "", err
+	}
+	return m.tail(ctx, dc, c.ID, min(max(tail, 1), maxLogTail)), nil
+}
+
+func (m *appsManager) tail(ctx context.Context, dc *docker.Client, id string, lines int) string {
+	rc, err := dc.ContainerLogs(ctx, id, docker.LogsOptions{Tail: lines, Timestamps: true})
+	if err != nil {
+		return fmt.Sprintf("(logs unavailable: %v)\n", err)
+	}
+	defer rc.Close()
+	var buf bytes.Buffer
+	w := &limitedWriter{w: &buf, n: maxAppLogs}
+	docker.Demux(rc, w, w)
+	return buf.String()
+}
+
+// limitedWriter keeps the first n bytes and silently drops the rest.
+type limitedWriter struct {
+	w io.Writer
+	n int
+}
+
+func (l *limitedWriter) Write(p []byte) (int, error) {
+	if l.n > 0 {
+		k := min(len(p), l.n)
+		l.w.Write(p[:k])
+		l.n -= k
+	}
+	return len(p), nil
+}
+
+// Delete removes the app's containers and network, and its volumes when
+// asked to.
+func (m *appsManager) Delete(ctx context.Context, appID int64, volumes bool) error {
+	if appID <= 0 {
+		return errors.New("invalid app id")
+	}
+	dc, err := m.client()
+	if err != nil {
+		return err
+	}
+	defer m.lock(appID)()
+	list, err := m.containers(ctx, dc, appID)
+	if err != nil {
+		return err
+	}
+	for _, c := range list {
+		if err := dc.ContainerRemove(ctx, c.ID, true); err != nil {
+			return err
+		}
+	}
+	if err := dc.NetworkRemove(ctx, appNetwork(appID)); err != nil {
+		return err
+	}
+	if volumes {
+		vols, err := dc.VolumeList(ctx, map[string]string{labelApp: strconv.FormatInt(appID, 10)})
+		if err != nil {
+			return err
+		}
+		for _, v := range vols {
+			if err := dc.VolumeRemove(ctx, v.Name); err != nil {
+				return err
+			}
+		}
+	}
+	m.log.Info("app removed", "app_id", appID, "volumes", volumes)
+	m.refresh(ctx)
+	return nil
+}
+
+// Sync removes containers of apps the panel no longer knows. Their volumes
+// are kept: data is never deleted implicitly.
+func (m *appsManager) Sync(ctx context.Context, known []int64) error {
+	dc, err := m.client()
+	if err != nil {
+		return nil // nothing can be running
+	}
+	list, err := m.containers(ctx, dc, 0)
+	if err != nil {
+		return err
+	}
+	orphans := map[int64]bool{}
+	for _, c := range list {
+		if app := labelInt(c.Labels, labelApp); app > 0 && !slices.Contains(known, app) {
+			orphans[app] = true
+		}
+	}
+	for app := range orphans {
+		m.log.Warn("removing containers of an app deleted from the panel", "app_id", app)
+		if err := m.Delete(ctx, app, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}

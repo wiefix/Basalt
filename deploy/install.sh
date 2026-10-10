@@ -1,7 +1,7 @@
 #!/bin/sh
 # Basalt installer for Debian and Ubuntu (amd64, arm64).
 #
-#   Panel host:  sh install.sh panel [--domain panel.example.com] [--binary ./basalt] [--with-php] [--with-mariadb]
+#   Panel host:  sh install.sh panel [--domain panel.example.com] [--binary ./basalt] [--with-php] [--with-mariadb] [--with-docker]
 #   New server:  the one-line command shown in the panel ("Add server"), which runs
 #                sh install.sh agent --panel https://HOST:8443 --token TOKEN --ca-sha256 FINGERPRINT
 #
@@ -26,7 +26,7 @@ usage() {
 MODE=${1:-}
 [ -n "$MODE" ] || usage
 shift
-DOMAIN="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0
+DOMAIN="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--domain) DOMAIN=$2; shift 2 ;;
@@ -36,6 +36,7 @@ while [ $# -gt 0 ]; do
 	--ca-sha256) CA_SHA=$2; shift 2 ;;
 	--with-php) WITH_PHP=1; shift ;;
 	--with-mariadb) WITH_DB=1; shift ;;
+	--with-docker) WITH_DOCKER=1; shift ;;
 	-h | --help) usage ;;
 	*) die "unknown option $1" ;;
 	esac
@@ -70,6 +71,7 @@ trap 'rm -rf "$TMP"' EXIT
 PKGS="ca-certificates curl"
 [ "$WITH_PHP" -eq 1 ] && PKGS="$PKGS php-fpm php-mysql php-curl php-gd php-intl php-mbstring php-xml php-zip"
 [ "$WITH_DB" -eq 1 ] && PKGS="$PKGS mariadb-server"
+[ "$WITH_DOCKER" -eq 1 ] && PKGS="$PKGS docker.io"
 say "Installing packages: $PKGS"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null
@@ -82,6 +84,7 @@ if [ "$WITH_PHP" -eq 1 ]; then
 	done
 fi
 [ "$WITH_DB" -eq 1 ] && systemctl enable --now mariadb.service >/dev/null 2>&1
+[ "$WITH_DOCKER" -eq 1 ] && systemctl enable --now docker.service >/dev/null 2>&1
 
 # ---------- binary ----------
 

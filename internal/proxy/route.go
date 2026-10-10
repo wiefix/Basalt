@@ -45,11 +45,15 @@ type Route struct {
 	SiteID int64 `json:"site_id,omitempty"`
 	// PHP sends *.php requests of a site route to the site's PHP-FPM pool.
 	// PHPSocket is resolved by the agent; a value from the panel is ignored.
-	PHP       bool    `json:"php,omitempty"`
-	PHPSocket string  `json:"php_socket,omitempty"`
-	Upstream  string  `json:"upstream,omitempty"` // reverse_proxy, host:port
-	TLS       TLSMode `json:"tls"`
-	HSTS      bool    `json:"hsts,omitempty"`
+	PHP       bool   `json:"php,omitempty"`
+	PHPSocket string `json:"php_socket,omitempty"`
+	Upstream  string `json:"upstream,omitempty"` // reverse_proxy, host:port
+	// AppID marks a reverse_proxy route serving a managed app. The agent
+	// resolves Upstream to the app's current container; a value from the
+	// panel is ignored, and an app without a running container gets 502.
+	AppID int64   `json:"app_id,omitempty"`
+	TLS   TLSMode `json:"tls"`
+	HSTS  bool    `json:"hsts,omitempty"`
 }
 
 // Desired is the complete proxy state the panel wants on one host.
@@ -169,6 +173,9 @@ func (r *Route) Validate(sitesRoot string) error {
 		if r.SiteID < 0 {
 			return errors.New("invalid site id")
 		}
+		if r.AppID != 0 {
+			return errors.New("static route cannot serve an app")
+		}
 		if r.PHP && r.SiteID == 0 {
 			return errors.New("PHP is only available for sites")
 		}
@@ -182,6 +189,12 @@ func (r *Route) Validate(sitesRoot string) error {
 	case KindReverseProxy:
 		if r.Root != "" || r.SiteID != 0 || r.PHP {
 			return errors.New("reverse_proxy route cannot have a root, site or PHP")
+		}
+		if r.AppID < 0 {
+			return errors.New("invalid app id")
+		}
+		if r.AppID > 0 && r.Upstream == "" {
+			return nil // resolved by the agent
 		}
 		return ValidateUpstream(r.Upstream)
 	default:
