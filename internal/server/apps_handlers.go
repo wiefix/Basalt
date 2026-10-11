@@ -12,6 +12,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/docker"
+	"github.com/wiefix/basalt/internal/mailserver"
 	"github.com/wiefix/basalt/internal/proxy"
 	"github.com/wiefix/basalt/internal/store"
 )
@@ -187,6 +188,9 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 	case store.SourceDatabase:
 		// The engine (checked on creation) sets everything but the limits.
 		st.Port, st.Volumes, st.ReadOnly = 0, nil, false
+	case store.SourceMail:
+		// Basalt defines the mail server; only its limits are settings.
+		st.Image, st.Port, st.Volumes, st.ReadOnly = mailserver.Image, mailserver.HTTPPort, nil, false
 	default:
 		return st, errors.New(`source must be "image", "git", "compose" or "database"`)
 	}
@@ -251,6 +255,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 	}
 	if req.Source == "" {
 		req.Source = store.SourceImage
+	}
+	if req.Source == store.SourceMail {
+		writeError(w, http.StatusUnprocessableEntity, "set up the mail server under Mail")
+		return
 	}
 	st, err := req.settings(req.Source)
 	if err != nil {
@@ -392,6 +400,9 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *prin
 	if app.Source == store.SourceDatabase {
 		st.Engine, st.EngineVersion, st.Image = app.Engine, app.EngineVersion, app.Image
 	}
+	if app.Source == store.SourceMail {
+		st.Hostname, st.Image = app.Hostname, app.Image
+	}
 	if err := s.db.UpdateAppSettings(r.Context(), app.ID, st); err != nil {
 		s.internalError(w, r, "update app", err)
 		return
@@ -466,6 +477,10 @@ func (s *Server) handleSetAppEnv(w http.ResponseWriter, r *http.Request, p *prin
 	if app.Source == store.SourceDatabase {
 		// The image applies credentials only when it creates the database.
 		writeError(w, http.StatusUnprocessableEntity, "a database's credentials are set when it is created")
+		return
+	}
+	if app.Source == store.SourceMail {
+		writeError(w, http.StatusUnprocessableEntity, "the mail server's environment is managed by Basalt")
 		return
 	}
 	var req appEnvRequest
@@ -574,6 +589,9 @@ func (s *Server) handleAppStatus(w http.ResponseWriter, r *http.Request, p *prin
 	}
 	if service == "" && app.Source == store.SourceDatabase {
 		service = app.Name // its only service
+	}
+	if service == "" && app.Source == store.SourceMail {
+		service = mailserver.Service
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), appCallTimeout)
 	defer cancel()
@@ -743,6 +761,9 @@ func (s *Server) logService(w http.ResponseWriter, r *http.Request, app *store.A
 	}
 	if app.Source == store.SourceDatabase {
 		return app.Name, true
+	}
+	if app.Source == store.SourceMail {
+		return mailserver.Service, true
 	}
 	if app.Service != "" {
 		return app.Service, true

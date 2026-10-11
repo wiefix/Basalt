@@ -127,6 +127,51 @@ echo "$VALID" | grep -q "; fully validated" || { echo "$VALID"; exit 1; }
 NEG=$(docker exec basalt-panel delv @$NODEIP -a /tmp/anchor +root=zone.test nope.zone.test A 2>&1)
 echo "$NEG" | grep -E "validated|resolution failed" | sed 's/^/  nope.zone.test: /'
 echo "$NEG" | grep -q "negative response, fully validated" || { echo "$NEG"; exit 1; }
+echo "### mail server on node1: domain, mailbox, SMTP in, IMAPS out"
+MAIL=$($API -d "{\"server_id\":$NODE,\"hostname\":\"mail.shop.test\",\"memory_mb\":1024}" http://127.0.0.1:8080/api/v1/mail | python3 -c 'import sys,json; print(json.load(sys.stdin)["server"]["id"])')
+for i in $(seq 180); do
+  MST=$($API http://127.0.0.1:8080/api/v1/apps/$MAIL/deployments | python3 -c 'import sys,json; print(json.load(sys.stdin)["deployments"][0]["status"])')
+  [ "$MST" != running ] && break; sleep 2
+done
+echo "  mail deployment: $MST"
+[ "$MST" = succeeded ] || { $API http://127.0.0.1:8080/api/v1/apps/$MAIL/deployments | head -c 3000; exit 1; }
+for i in $(seq 30); do
+  MD=$($API -d '{"name":"shop.test"}' http://127.0.0.1:8080/api/v1/mail/domains | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("domain",{}).get("id",""))' 2>/dev/null)
+  [ -n "$MD" ] && break; sleep 2
+done
+[ -n "$MD" ] || { echo "mail domain not created"; exit 1; }
+$API -d '{"local":"alice","password":"installer mail pass"}' http://127.0.0.1:8080/api/v1/mail/domains/$MD/mailboxes >/dev/null
+for i in $(seq 30); do
+  [ "$(docker exec basalt-panel dig +short @$NODEIP shop.test MX)" = "10 mail.shop.test." ] && break; sleep 1
+done
+echo "  MX: $(docker exec basalt-panel dig +short @$NODEIP shop.test MX)"
+printf 'From: tester@example.net\r\nTo: alice@shop.test\r\nSubject: installer test\r\n\r\nHello.\r\n' | docker exec -i basalt-panel sh -c 'cat >/tmp/mail.txt'
+for i in $(seq 30); do
+  docker exec basalt-panel curl -sS --url "smtp://$NODEIP:25/client.example.net" --mail-from tester@example.net --mail-rcpt alice@shop.test -T /tmp/mail.txt && break; sleep 2
+done
+# A message from an unknown sender may land in Junk Mail: look in both.
+for i in $(seq 30); do
+  for BOX in INBOX Junk%20Mail; do
+    MSGS=$(docker exec basalt-panel curl -sSk --resolve mail.shop.test:993:$NODEIP -u 'alice@shop.test:installer mail pass' "imaps://mail.shop.test:993/$BOX" -X 'SEARCH SUBJECT "installer test"' 2>&1)
+    echo "$MSGS" | grep -q "SEARCH [0-9]" && break 2
+  done
+  sleep 2
+done
+echo "  folder: $BOX"
+echo "  IMAPS search: $MSGS"
+echo "$MSGS" | grep -q "SEARCH [0-9]" || { echo "mail not delivered"; exit 1; }
+# Deliverability checks run on node1 with the host's resolvers (the
+# test zones are not public, so only their completeness is checked).
+$API -d '{}' http://127.0.0.1:8080/api/v1/mail/checks | python3 -c '
+import sys, json
+c = json.load(sys.stdin)["checks"]
+assert not c.get("error"), c["error"]
+for r in c["results"]:
+    print("  check %-14s %-8s %s" % (r.get("domain", "") + " " + r["check"], r["status"], r["detail"][:90]))
+got = {r.get("domain", "") + " " + r["check"] for r in c["results"]}
+want = {" outbound_smtp", " hostname", " ptr", " blocklist"} | {"shop.test " + k for k in ("mx", "spf", "dkim", "dmarc")}
+assert got == want, got
+'
 echo "### panel backup, then recovery from it"
 ST=$($API -d '{"name":"local","kind":"local","path":"/var/backups/basalt"}' http://127.0.0.1:8080/api/v1/backup-storages | python3 -c 'import sys,json; print(json.load(sys.stdin)["storage"]["id"])')
 $API -X PUT -d "{\"storage_id\":$ST,\"schedule\":\"daily\",\"at_minute\":0,\"keep_last\":3}" http://127.0.0.1:8080/api/v1/panel-backup/policy >/dev/null

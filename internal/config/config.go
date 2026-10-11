@@ -39,6 +39,9 @@ type Server struct {
 	// agents on other architectures.
 	BinariesDir string
 	Restic      string
+	// MailPorts publishes mail ports elsewhere on the host, e.g.
+	// "25:2525,993:2993" (development; default: the standard ports).
+	MailPorts map[int]int
 }
 
 // LocalEnroll configures `basalt server local-enroll`.
@@ -66,6 +69,7 @@ type Agent struct {
 	ACMEDirectory string
 	ACMECARoot    string
 	ACMEResolvers string
+	Resolvers     string
 	SFTPListen    string
 	DNSListen     string
 	Isolate       string // "auto", "on", "off"
@@ -132,6 +136,7 @@ func ParseServer(args []string, output io.Writer) (Server, error) {
 	fs.StringVar(&cfg.AgentURL, "agent-url", env("AGENT_URL", ""), "URL agents use to reach the agent channel (default https://<hostname>:<agent port>)")
 	fs.StringVar(&cfg.TrustedProxies, "trusted-proxies", env("TRUSTED_PROXIES", ""), "comma-separated IPs/CIDRs of reverse proxies allowed to set X-Forwarded-For")
 	fs.StringVar(&cfg.Restic, "restic", env("RESTIC", "restic"), "restic binary used for backups of the panel")
+	mailPorts := fs.String("mail-ports", env("MAIL_PORTS", ""), "publish mail ports on other host ports, e.g. 25:2525,993:2993 (development)")
 	fs.StringVar(&cfg.BinariesDir, "binaries-dir", env("BINARIES_DIR", ""), "directory with basalt-<os>-<arch> binaries to serve to agents")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
@@ -141,6 +146,18 @@ func ParseServer(args []string, output io.Writer) (Server, error) {
 	}
 	if err := cfg.validate(); err != nil {
 		return cfg, err
+	}
+	if *mailPorts != "" {
+		cfg.MailPorts = map[int]int{}
+		for item := range strings.SplitSeq(*mailPorts, ",") {
+			c, h, ok := strings.Cut(strings.TrimSpace(item), ":")
+			cp, err1 := strconv.Atoi(c)
+			hp, err2 := strconv.Atoi(h)
+			if !ok || err1 != nil || err2 != nil || hp < 1 || hp > 65535 {
+				return cfg, fmt.Errorf("invalid --mail-ports entry %q (want container:host)", item)
+			}
+			cfg.MailPorts[cp] = hp
+		}
 	}
 	_, agentPort, err := net.SplitHostPort(cfg.AgentListen)
 	if err != nil {
@@ -172,6 +189,7 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs.StringVar(&cfg.ACMEDirectory, "acme-directory", env("ACME_DIRECTORY", ""), "ACME directory URL override (e.g. Let's Encrypt staging)")
 	fs.StringVar(&cfg.ACMECARoot, "acme-ca-root", env("ACME_CA_ROOT", ""), "PEM file trusted for the ACME server's certificate (a private CA)")
 	fs.StringVar(&cfg.ACMEResolvers, "acme-resolvers", env("ACME_RESOLVERS", ""), "comma-separated DNS servers (host:port) used to find DNS-01 challenge zones")
+	fs.StringVar(&cfg.Resolvers, "resolvers", env("RESOLVERS", ""), "comma-separated recursive DNS servers (host:port) for mail deliverability checks (default: /etc/resolv.conf)")
 	fs.StringVar(&cfg.SFTPListen, "sftp-listen", env("SFTP_LISTEN", ":2222"), "SFTP listen address (empty disables SFTP)")
 	fs.StringVar(&cfg.DNSListen, "dns-listen", env("DNS_LISTEN", ""), "authoritative DNS listen address, UDP and TCP (e.g. :53; empty disables DNS)")
 	fs.StringVar(&cfg.Isolate, "isolate", env("ISOLATE", "auto"), "per-site system users: auto (on when root on Linux), on, off")

@@ -7,7 +7,7 @@ import { ErrorBox, Field, Icon, Loading, Modal, formatDate } from "../components
 export function AppsPage({ user }: { user: User }) {
   const apps = useQuery({ queryKey: ["apps"], queryFn: api.apps });
   // Databases have their own page.
-  const list = apps.data?.apps.filter((a) => a.source !== "database") ?? [];
+  const list = apps.data?.apps.filter((a) => a.source !== "database" && a.source !== "mail") ?? [];
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
   const [adding, setAdding] = useState(false);
   const serverName = (id: number) => servers.data?.servers.find((s) => s.id === id)?.name ?? `#${id}`;

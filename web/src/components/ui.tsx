@@ -44,6 +44,12 @@ export const errorMessage = (e: unknown) =>
 // ---------- icons (inline SVG, no icon font) ----------
 
 const paths: Record<string, ReactNode> = {
+  mail: (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="m3 7 9 6 9-6" />
+    </>
+  ),
   server: (
     <>
       <rect x="3" y="4" width="18" height="7" rx="2" />

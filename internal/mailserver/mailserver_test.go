@@ -1,0 +1,175 @@
+package mailserver
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/dns"
+)
+
+// zoneFile is what Stalwart v0.16.25 returned for a new domain.
+const zoneFile = `v1-ed25519-20261011._domainkey.example.test. IN TXT "v=DKIM1; k=ed25519; h=sha256; p=VCncmVsA++DEozUscdjeXqTEAS41xx2jR/B9eSgpwYY="
+v1-rsa-20261011._domainkey.example.test. IN TXT (
+    "v=DKIM1; k=rsa; h=sha256; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1n6KfOWzK894EFAtS+LgEcRo71JSBTZQgWy4hlb8JDYwpzUmVjtxL3GGj0NBFKHTeJ3i/TimPha9TbT/44Ug7XlXskEksfYNPAAB1tuUhPEQf+FsSWf+CMptFhH1U/7fhR2YCzqyx9lwks+UQZNn/oHGZWdOJDIC8fQ8gw9Gj2X/JDNbQXVL3yu"
+    "5mgbuky9VTwOULYCk/MCNJE+NbgZ1FIn/uK5y16Lxp2LrZ9lKmeyfDA7mfspusUmmI+FBGp48lZiccbjWARE6fIsLteMTM1qzcL4q6E2GXxYYfxSlGKi7hpTGlj+o5LIwBWE/bpTn+FnjLj1vlokumAftps6zeQIDAQAB"
+)
+mail.example.test. IN TXT "v=spf1 a -all"
+example.test. IN TXT "v=spf1 mx -all"
+example.test. IN MX 10 mail.example.test.
+_dmarc.example.test. IN TXT "v=DMARC1; p=reject; rua=mailto:postmaster@example.test"
+_caldavs._tcp.example.test. IN SRV 0 1 443 mail.example.test.
+_imaps._tcp.example.test. IN SRV 0 1 993 mail.example.test.
+_submissions._tcp.example.test. IN SRV 0 1 465 mail.example.test.
+mta-sts.example.test. IN CNAME mail.example.test.
+_mta-sts.example.test. IN TXT "v=STSv1; id=8430040749345519133"
+autoconfig.example.test. IN CNAME mail.example.test.
+weird.example.test. IN A 192.0.2.1
+`
+
+func TestParseZone(t *testing.T) {
+	recs := ParseZone(zoneFile)
+	got := map[string]dns.Record{}
+	for _, r := range recs {
+		got[r.Name+" "+r.Type] = r
+	}
+	if len(recs) != 12 {
+		t.Fatalf("%d records: %+v", len(recs), recs)
+	}
+	if r := got["example.test MX"]; r.Priority != 10 || r.Value != "mail.example.test" {
+		t.Fatalf("MX %+v", r)
+	}
+	rsa := got["v1-rsa-20261011._domainkey.example.test TXT"].Value
+	if !strings.HasPrefix(rsa, "v=DKIM1; k=rsa; h=sha256; p=MIIB") || !strings.HasSuffix(rsa, "IDAQAB") || strings.ContainsAny(rsa, "\" \n\t") && strings.Contains(rsa, "\"") {
+		t.Fatalf("DKIM joined wrongly: %q", rsa)
+	}
+	if r := got["_imaps._tcp.example.test SRV"]; r.Port != 993 || r.Weight != 1 || r.Value != "mail.example.test" {
+		t.Fatalf("SRV %+v", r)
+	}
+	if _, ok := got["weird.example.test A"]; ok {
+		t.Fatal("A record taken from the mail server")
+	}
+	// They fit a zone.
+	z := dns.Zone{Name: "example.test"}
+	auto := dns.ServiceRecords(&z, []string{"example.test"}, recs, "mail", nil)
+	for _, r := range auto {
+		z.Records = append(z.Records, r.Record)
+	}
+	if len(auto) != 12 || z.Validate() != nil {
+		t.Fatalf("%d records, %v", len(auto), z.Validate())
+	}
+}
+
+func TestServiceSpec(t *testing.T) {
+	env := NewEnv()
+	user, pass, err := Credentials(env)
+	if err != nil || user != AdminUser || len(pass) < 20 {
+		t.Fatal(user, pass, err)
+	}
+	svc, err := ServiceSpec(env, "mail.example.com", map[int]int{25: 2525}, Limits{MemoryMB: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := agentproto.AppSpec{AppID: 1, DeploymentID: 1, Services: []agentproto.ServiceSpec{svc},
+		ComposeVolumes: Volumes, Mail: true}
+	if err := spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if svc.HostPorts[0] != (agentproto.HostPort{Container: 25, Host: 2525}) || svc.HostPorts[1].Host != 465 {
+		t.Fatalf("ports %+v", svc.HostPorts)
+	}
+	// Only the mail server may publish ports, and only mail ports.
+	spec.Mail = false
+	if spec.Validate() == nil {
+		t.Fatal("host ports accepted for an ordinary app")
+	}
+	spec.Mail = true
+	spec.Services[0].HostPorts = append(spec.Services[0].HostPorts, agentproto.HostPort{Container: 22, Host: 22})
+	if spec.Validate() == nil {
+		t.Fatal("port 22 accepted")
+	}
+	for _, bad := range []string{"localhost", "mail", "Mail.example.com", "-x.example.com", "mail.example.com."} {
+		if _, err := ServiceSpec(env, bad, nil, Limits{}); err == nil {
+			t.Errorf("hostname %q accepted", bad)
+		}
+	}
+	if _, err := ServiceSpec(map[string]string{}, "mail.example.com", nil, Limits{}); err == nil {
+		t.Fatal("no credentials accepted")
+	}
+}
+
+// fakeServer answers JMAP calls from a table of method handlers.
+type fakeServer map[string]func(args map[string]any) any
+
+func (f fakeServer) transport(ctx context.Context, body []byte) (int, []byte, error) {
+	var req struct {
+		Using       []string            `json:"using"`
+		MethodCalls [][]json.RawMessage `json:"methodCalls"`
+	}
+	json.Unmarshal(body, &req)
+	var name string
+	var args map[string]any
+	json.Unmarshal(req.MethodCalls[0][0], &name)
+	json.Unmarshal(req.MethodCalls[0][1], &args)
+	h := f[name]
+	var res any = map[string]any{"type": "unknownMethod"}
+	resName := name
+	if h == nil {
+		resName = "error"
+	} else {
+		res = h(args)
+	}
+	b, _ := json.Marshal(map[string]any{"methodResponses": []any{[]any{resName, res, "c"}}})
+	return 200, b, nil
+}
+
+func TestClient(t *testing.T) {
+	var created map[string]any
+	f := fakeServer{
+		"x:Account/set": func(a map[string]any) any {
+			if c, ok := a["create"].(map[string]any); ok {
+				created = c["n"].(map[string]any)
+				if created["name"] == "taken" {
+					return map[string]any{"notCreated": map[string]any{"n": map[string]any{"type": "alreadyExists", "description": "Account already exists"}}}
+				}
+				return map[string]any{"created": map[string]any{"n": map[string]any{"id": "acc1"}}}
+			}
+			return map[string]any{}
+		},
+		"x:Account/query": func(map[string]any) any { return map[string]any{"ids": []string{"a", "b", "g"}} },
+		"x:Account/get": func(map[string]any) any {
+			return map[string]any{"list": []any{
+				map[string]any{"id": "a", "@type": "User", "name": "alice", "domainId": "d1", "emailAddress": "alice@example.com",
+					"description": "Alice", "aliases": map[string]any{"0": map[string]any{"name": "info"}},
+					"quotas": map[string]any{"maxDiskQuota": 1 << 30}, "usedDiskQuota": 1 << 20},
+				map[string]any{"id": "b", "@type": "User", "name": "bob", "domainId": "d2", "emailAddress": "bob@example.org"},
+				map[string]any{"id": "g", "@type": "Group", "name": "team", "domainId": "d1"},
+			}}
+		},
+	}
+	c := NewClient(f.transport)
+	ctx := context.Background()
+	pw, q := "secret pass", int64(512)
+	id, err := c.CreateMailbox(ctx, "d1", "carol", MailboxChange{Password: &pw, QuotaMB: &q, Aliases: []string{"sales"}})
+	if err != nil || id != "acc1" {
+		t.Fatal(id, err)
+	}
+	b, _ := json.Marshal(created)
+	if !strings.Contains(string(b), `"credentials":{"0":{"@type":"Password","secret":"secret pass"}}`) ||
+		!strings.Contains(string(b), `"quotas":{"maxDiskQuota":536870912}`) || !strings.Contains(string(b), `"aliases":{"0":{"domainId":"d1","name":"sales"}}`) {
+		t.Fatalf("create %s", b)
+	}
+	if _, err := c.CreateMailbox(ctx, "d1", "taken", MailboxChange{}); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("refusal: %v", err)
+	}
+	list, err := c.Mailboxes(ctx, "d1")
+	if err != nil || len(list) != 1 || list[0].Address != "alice@example.com" || list[0].QuotaMB != 1024 ||
+		list[0].Name != "Alice" || list[0].Aliases[0] != "info" || list[0].UsedMB != 1 {
+		t.Fatalf("%+v %v", list, err)
+	}
+	if err := c.Configure(ctx, "mail.example.com", "d1"); err == nil {
+		t.Fatal("unknown method not reported")
+	}
+}

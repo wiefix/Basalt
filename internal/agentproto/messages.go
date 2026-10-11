@@ -47,6 +47,13 @@ const (
 	// TypeAppAttach sets which other apps' networks an app's containers
 	// join (a database reachable from apps).
 	TypeAppAttach = "app_attach"
+	// TypeMailAPI relays a management call to the mail server (MailAPI).
+	TypeMailAPI = "mail_api"
+	// TypeMailCert loads the proxy's certificate into the mail server.
+	TypeMailCert = "mail_cert"
+	// TypeMailCheck runs the deliverability checks of the mail server's
+	// host (MailCheck).
+	TypeMailCheck = "mail_check"
 )
 
 // EnrollRequest is posted once, authenticated by the one-time token.
@@ -263,6 +270,69 @@ type AppSpec struct {
 	// Attach lists apps whose networks the services join, reachable there
 	// by their service name (a database used by those apps).
 	Attach []int64 `json:"attach,omitempty"`
+	// Mail marks the mail server, the one app allowed to publish ports on
+	// the host (ServiceSpec.HostPorts).
+	Mail bool `json:"mail,omitempty"`
+}
+
+// MailAPI is a management call to the mail server of app AppID: the
+// agent posts Body to its JMAP endpoint with the credentials and returns
+// the answer. The agent keeps no credentials.
+type MailAPI struct {
+	AppID    int64  `json:"app_id"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+	Body     []byte `json:"body"`
+}
+
+// MailCert asks the agent to load the proxy's certificate for Hostname
+// into the mail server of app AppID (administrator credentials included).
+type MailCert struct {
+	AppID    int64  `json:"app_id"`
+	Hostname string `json:"hostname"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+}
+
+type MailCertResponse struct {
+	Installed bool      `json:"installed"`
+	NotAfter  time.Time `json:"not_after"`
+}
+
+// MailCheck asks the agent of the mail server's host to check what
+// decides whether its mail is delivered: outgoing port 25, reverse DNS and
+// blocklists of its public addresses, and the DNS records of each domain
+// as resolvers see them.
+type MailCheck struct {
+	Hostname string            `json:"hostname"`
+	IPs      []string          `json:"ips"`
+	Domains  []MailCheckDomain `json:"domains"`
+}
+
+// MailCheckDomain is a mail domain with the records the mail server wants
+// published (absolute names).
+type MailCheckDomain struct {
+	Name    string       `json:"name"`
+	Records []dns.Record `json:"records"`
+}
+
+// MailCheckResult is the outcome of one check. Domain is empty for the
+// checks of the server; Target is the address or name checked.
+type MailCheckResult struct {
+	Domain string `json:"domain,omitempty"`
+	Check  string `json:"check"`
+	Target string `json:"target,omitempty"`
+	Status string `json:"status"` // ok, warn, fail, unknown
+	Detail string `json:"detail"`
+}
+
+type MailCheckResponse struct {
+	Results []MailCheckResult `json:"results"`
+}
+
+type MailAPIResponse struct {
+	Status int    `json:"status"`
+	Body   []byte `json:"body"`
 }
 
 // AppAttach replaces the networks of other apps an app's running

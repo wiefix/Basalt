@@ -176,3 +176,78 @@ func ChallengeRecords(z *Zone, zones []string, cs []Challenge) []AutoRecord {
 	}
 	return out
 }
+
+// ServiceRecords returns the records a service (the mail server) asks for
+// that zone z holds. recs have absolute names. Records the user already
+// decided on win: no CNAME on a name that has any record, nothing next to
+// a user's CNAME or ALIAS, no MX or SRV beside the user's own, and no TXT
+// of a kind the user published there (v=spf1, v=DMARC1, ...). taken are
+// automatic records already in the zone.
+func ServiceRecords(z *Zone, zones []string, recs []Record, source string, taken []AutoRecord) []AutoRecord {
+	type names struct {
+		types   map[string]bool
+		txtKind map[string]bool
+	}
+	at := map[string]*names{}
+	get := func(n string) *names {
+		if at[n] == nil {
+			at[n] = &names{types: map[string]bool{}, txtKind: map[string]bool{}}
+		}
+		return at[n]
+	}
+	var cuts []string
+	for _, r := range z.Records {
+		e := get(r.Name)
+		e.types[r.Type] = true
+		if r.Type == TypeTXT {
+			e.txtKind[txtKind(r.Value)] = true
+		}
+		if r.Type == TypeNS && r.Name != "@" {
+			cuts = append(cuts, r.Name)
+		}
+	}
+	autoAt := map[string]bool{}
+	for _, r := range taken {
+		autoAt[r.Name] = true
+	}
+	var out []AutoRecord
+	for _, r := range recs {
+		if ZoneOf(r.Name, zones) != z.Name {
+			continue
+		}
+		name := "@"
+		if r.Name != z.Name {
+			name = strings.TrimSuffix(r.Name, "."+z.Name)
+		}
+		r.Name = name
+		e := get(name)
+		switch {
+		case delegated(name, cuts):
+			continue
+		case r.Type == TypeCNAME && (len(e.types) > 0 || autoAt[name] || name == "@"):
+			continue
+		case e.types[TypeCNAME] || e.types[TypeALIAS]:
+			continue
+		case (r.Type == TypeMX || r.Type == TypeSRV) && e.types[r.Type]:
+			continue
+		case r.Type == TypeTXT && e.txtKind[txtKind(r.Value)] && txtKind(r.Value) != "":
+			continue
+		}
+		if r.Validate(z.Name) != nil {
+			continue
+		}
+		out = append(out, AutoRecord{Record: r, Source: source})
+		autoAt[name] = true
+	}
+	return out
+}
+
+// txtKind is the version tag a TXT record starts with ("v=spf1"), or "".
+func txtKind(v string) string {
+	tag, _, _ := strings.Cut(strings.TrimSpace(v), ";")
+	tag, _, _ = strings.Cut(tag, " ")
+	if !strings.HasPrefix(strings.ToLower(tag), "v=") {
+		return ""
+	}
+	return strings.ToLower(tag)
+}

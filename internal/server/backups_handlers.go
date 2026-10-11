@@ -19,6 +19,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/dbengine"
+	"github.com/wiefix/basalt/internal/mailserver"
 	"github.com/wiefix/basalt/internal/store"
 )
 
@@ -447,6 +448,10 @@ func (s *Server) items(ctx context.Context, t *backupTarget) ([]agentproto.Backu
 	switch app.Source {
 	case store.SourceCompose:
 		for _, v := range app.Summary.Volumes {
+			volume(v)
+		}
+	case store.SourceMail:
+		for _, v := range mailserver.Volumes {
 			volume(v)
 		}
 	case store.SourceDatabase:

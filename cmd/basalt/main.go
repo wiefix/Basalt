@@ -189,6 +189,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		SetupTokenFile: setupFile,
 		DataDir:        cfg.DataDir,
 		Restic:         cfg.Restic,
+		MailHostPorts:  cfg.MailPorts,
 	})
 	hub.OnConnect(api.SyncSites)
 	hub.OnACMEChallenge(api.ACMEChallenge)
@@ -237,6 +238,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		ACMEDirectory: cfg.ACMEDirectory,
 		ACMECARoots:   splitList(cfg.ACMECARoot),
 		ACMEResolvers: splitList(cfg.ACMEResolvers),
+		Resolvers:     splitList(cfg.Resolvers),
 		SFTPListen:    cfg.SFTPListen,
 		DNSListen:     cfg.DNSListen,
 		Isolate:       cfg.Isolate == "on" || (cfg.Isolate == "auto" && runtime.GOOS == "linux" && os.Geteuid() == 0),

@@ -521,6 +521,10 @@ func autoDNS(ctx context.Context, q queryer, zones []dns.Zone) ([][]dns.AutoReco
 	if err != nil {
 		return nil, err
 	}
+	mail, err := mailDNS(ctx, q)
+	if err != nil {
+		return nil, err
+	}
 	names := make([]string, len(zones))
 	for i, z := range zones {
 		names[i] = z.Name
@@ -528,6 +532,7 @@ func autoDNS(ctx context.Context, q queryer, zones []dns.Zone) ([][]dns.AutoReco
 	out := make([][]dns.AutoRecord, len(zones))
 	for i := range zones {
 		out[i] = append(dns.AutoRecords(&zones[i], names, targets), dns.ChallengeRecords(&zones[i], names, challenges)...)
+		out[i] = append(out[i], dns.ServiceRecords(&zones[i], names, mail, "mail", out[i])...)
 		if room := dns.MaxRecords - len(zones[i].Records); len(out[i]) > room {
 			out[i] = out[i][:max(room, 0)]
 		}
@@ -585,7 +590,7 @@ func autoHash(recs []dns.AutoRecord) string {
 	}
 	h := sha256.New()
 	for _, r := range recs {
-		fmt.Fprintf(h, "%s %s %s\n", r.Name, r.Type, r.Value)
+		fmt.Fprintf(h, "%s %s %d %d %d %d %s %q\n", r.Name, r.Type, r.TTL, r.Priority, r.Weight, r.Port, r.Tag, r.Value)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

@@ -60,7 +60,20 @@ type ServiceSpec struct {
 	// Job marks a service that runs to completion (others depend on it
 	// with condition "completed"); it runs again on every deployment.
 	Job bool `json:"job,omitempty"`
+	// HostPorts are published on all of the host's addresses. Only the
+	// mail server gets them (AppSpec.Mail), and only for mail ports.
+	HostPorts []HostPort `json:"host_ports,omitempty"`
 }
+
+// HostPort publishes container TCP port Container on the host's port Host.
+type HostPort struct {
+	Container int `json:"container"`
+	Host      int `json:"host"`
+}
+
+// MailPorts are the container ports a mail server may publish: SMTP,
+// submission (implicit TLS and STARTTLS) and IMAP over TLS.
+var MailPorts = []int{25, 465, 587, 993}
 
 // ServiceMount mounts one of the app's named volumes.
 type ServiceMount struct {
@@ -216,6 +229,13 @@ func (s *ServiceSpec) Validate(volumes map[string]bool) error {
 			return fail("invalid capability %q", c)
 		}
 	}
+	seenPorts := map[int]bool{}
+	for _, p := range s.HostPorts {
+		if !slices.Contains(MailPorts, p.Container) || p.Host < 1 || p.Host > 65535 || seenPorts[p.Host] {
+			return fail("invalid host port %d:%d", p.Host, p.Container)
+		}
+		seenPorts[p.Host] = true
+	}
 	for _, h := range s.ExtraHosts {
 		if !extraHostRE.MatchString(h) {
 			return fail("invalid extra_hosts entry %q", h)
@@ -247,6 +267,9 @@ func (s *AppSpec) ValidateCompose() error {
 		svc := &s.Services[i]
 		if err := svc.Validate(vols); err != nil {
 			return err
+		}
+		if len(svc.HostPorts) > 0 && (!s.Mail || len(s.Services) != 1) {
+			return fmt.Errorf("service %s: only the mail server publishes host ports", svc.Name)
 		}
 		if names[svc.Name] {
 			return fmt.Errorf("service %s is defined twice", svc.Name)

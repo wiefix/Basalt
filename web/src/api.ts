@@ -165,7 +165,7 @@ export interface App {
   id: number;
   server_id: number;
   name: string;
-  source: "image" | "git" | "compose" | "database";
+  source: "image" | "git" | "compose" | "database" | "mail";
   image: string;
   git?: GitSettings;
   deploy_key?: string;
@@ -395,6 +395,56 @@ export interface DNSServer {
   error?: string;
 }
 
+export interface MailDomain {
+  id: number;
+  name: string;
+  dns_records: DNSRecordInput[]; // absolute names
+  managed_dns: boolean;
+  created_at: string;
+}
+
+export interface Mailbox {
+  id: string;
+  address: string;
+  name: string;
+  aliases: string[];
+  quota_mb: number;
+  used_mb: number;
+}
+
+export type CheckStatus = "ok" | "warn" | "fail" | "unknown";
+
+export interface MailCheckResult {
+  domain?: string;
+  check: "outbound_smtp" | "hostname" | "ptr" | "blocklist" | "mx" | "spf" | "dkim" | "dmarc";
+  target?: string;
+  status: CheckStatus;
+  detail: string;
+}
+
+export interface MailChecks {
+  at: string;
+  results: MailCheckResult[];
+  error?: string;
+}
+
+export interface MailOverview {
+  server: App | null;
+  hostname?: string;
+  domains: MailDomain[];
+  ports: number[];
+  tls?: { not_after?: string; error?: string };
+  checks?: MailChecks | null;
+}
+
+export interface MailboxInput {
+  local?: string;
+  name?: string;
+  password?: string;
+  quota_mb?: number;
+  aliases?: string[];
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -530,6 +580,20 @@ export const api = {
     put<{ record: DNSRecord }>(`/api/v1/dns/zones/${zoneId}/records/${id}`, r),
   deleteRecord: (zoneId: number, id: number) => del<void>(`/api/v1/dns/zones/${zoneId}/records/${id}`),
 
+  mail: () => get<MailOverview>("/api/v1/mail"),
+  createMail: (b: { server_id: number; hostname: string; memory_mb: number }) =>
+    post<{ server: App; deploy_error?: string }>("/api/v1/mail", b),
+  mailChecks: () => post<{ checks: MailChecks }>("/api/v1/mail/checks", {}),
+  createMailDomain: (name: string) => post<{ domain: MailDomain }>("/api/v1/mail/domains", { name }),
+  deleteMailDomain: (id: number) => del<void>(`/api/v1/mail/domains/${id}`),
+  mailboxes: (domainId: number) => get<{ mailboxes: Mailbox[] }>(`/api/v1/mail/domains/${domainId}/mailboxes`),
+  createMailbox: (domainId: number, b: MailboxInput) =>
+    post<{ mailbox: { id: string; address: string } }>(`/api/v1/mail/domains/${domainId}/mailboxes`, b),
+  updateMailbox: (domainId: number, id: string, b: MailboxInput) =>
+    put<void>(`/api/v1/mail/domains/${domainId}/mailboxes/${encodeURIComponent(id)}`, b),
+  deleteMailbox: (domainId: number, id: string) =>
+    del<void>(`/api/v1/mail/domains/${domainId}/mailboxes/${encodeURIComponent(id)}`),
+
   apps: () => get<{ apps: App[] }>("/api/v1/apps"),
   app: (id: number) => get<{ app: App; sync: Sync }>(`/api/v1/apps/${id}`),
   createApp: (
@@ -650,7 +714,9 @@ export const appPath = (a: Pick<App, "id" | "source">) => `/${a.source === "data
 
 // sourceLabel describes where an app comes from, for lists and headers.
 export const sourceLabel = (a: App) =>
-  a.source === "database"
+  a.source === "mail"
+    ? `mail server · ${a.image}`
+    : a.source === "database"
     ? `${engineNames[a.engine ?? ""] ?? a.engine} ${a.version}`
     : a.source === "git"
     ? `${a.git?.url} · ${a.git?.branch}`

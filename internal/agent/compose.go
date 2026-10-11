@@ -389,6 +389,19 @@ func (m *appsManager) serviceConfig(spec agentproto.AppSpec, svc agentproto.Serv
 		cfg.ExposedPorts = map[string]struct{}{p: {}}
 		hc.PortBindings = map[string][]docker.PortBinding{p: {{HostIP: "127.0.0.1"}}}
 	}
+	// The mail server's ports, on every address of the host. A container
+	// with host ports always has volumes, so the old one is stopped first.
+	for _, hp := range svc.HostPorts {
+		p := strconv.Itoa(hp.Container) + "/tcp"
+		if cfg.ExposedPorts == nil {
+			cfg.ExposedPorts = map[string]struct{}{}
+		}
+		if hc.PortBindings == nil {
+			hc.PortBindings = map[string][]docker.PortBinding{}
+		}
+		cfg.ExposedPorts[p] = struct{}{}
+		hc.PortBindings[p] = []docker.PortBinding{{HostPort: strconv.Itoa(hp.Host)}}
+	}
 	return cfg
 }
 

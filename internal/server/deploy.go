@@ -12,6 +12,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/docker"
+	"github.com/wiefix/basalt/internal/mailserver"
 	"github.com/wiefix/basalt/internal/store"
 )
 
@@ -44,7 +45,8 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		if err != nil || d.Status != "succeeded" {
 			return nil, &deployError{status: http.StatusUnprocessableEntity, msg: "only a successful deployment of this app can be rolled back to"}
 		}
-		if app.Source == store.SourceDatabase && d.Digests[app.Name] == "" {
+		if (app.Source == store.SourceDatabase && d.Digests[app.Name] == "") ||
+			(app.Source == store.SourceMail && d.Digests[mailserver.Service] == "") {
 			return nil, &deployError{status: http.StatusUnprocessableEntity, msg: "this deployment has no recorded image"}
 		}
 		if app.Source == store.SourceGit && d.CommitSHA == "" {
@@ -92,6 +94,15 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		}
 		spec = agentproto.AppSpec{AppID: app.ID}
 		if err := s.databaseSpec(app, pinned, &spec); err != nil {
+			return nil, &deployError{status: http.StatusUnprocessableEntity, msg: err.Error(), cause: err}
+		}
+	case store.SourceMail:
+		var pinned map[string]string
+		if prev != nil {
+			pinned = prev.Digests
+		}
+		spec = agentproto.AppSpec{AppID: app.ID}
+		if err := s.mailSpec(app, pinned, &spec); err != nil {
 			return nil, &deployError{status: http.StatusUnprocessableEntity, msg: err.Error(), cause: err}
 		}
 	case store.SourceGit:
@@ -235,6 +246,9 @@ func (s *Server) runDeployment(serverID, depID int64, spec agentproto.AppSpec, l
 		s.log.Error("write audit log", "err", err)
 	}
 	s.log.Info("deployment finished", "app_id", spec.AppID, "deployment_id", depID, "ok", resp.OK)
+	if resp.OK && spec.Mail {
+		s.configureMail(context.Background())
+	}
 	if hasQueued {
 		s.deployPush(spec.AppID, queued)
 	}

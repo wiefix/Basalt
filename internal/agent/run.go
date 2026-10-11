@@ -25,6 +25,7 @@ import (
 	"github.com/wiefix/basalt/internal/buildinfo"
 	"github.com/wiefix/basalt/internal/dns"
 	"github.com/wiefix/basalt/internal/docker"
+	"github.com/wiefix/basalt/internal/mailcheck"
 	"github.com/wiefix/basalt/internal/mariadb"
 	"github.com/wiefix/basalt/internal/pki"
 )
@@ -51,6 +52,12 @@ type Config struct {
 	// certificate; ACMEResolvers find DNS-01 zones (see proxy.BuildOptions).
 	ACMECARoots   []string
 	ACMEResolvers []string
+	// Resolvers are recursive DNS servers for mail deliverability checks
+	// (empty: the host's).
+	Resolvers []string
+	// MailCheckProbes replaces the SMTP servers the outgoing port 25 check
+	// connects to (tests).
+	MailCheckProbes []string
 	// SFTPListen is the SFTP server address; empty disables SFTP.
 	SFTPListen string
 	// DNSListen is the authoritative DNS address (UDP and TCP); empty
@@ -92,6 +99,9 @@ type Agent struct {
 	backups *backupManager
 	mysql   string
 	docker  string
+
+	mailCheck   *mailcheck.Checker
+	mailCheckMu sync.Mutex // one deliverability check at a time
 
 	mu sync.Mutex
 	id *identity
@@ -135,6 +145,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		sftp:            sftp,
 		dns:             newDNSManager(cfg, log.With("subsystem", "dns")),
 		acme:            newACMERelay(cfg, log.With("subsystem", "acme")),
+		mailCheck:       &mailcheck.Checker{Resolvers: cfg.Resolvers, SMTPProbes: cfg.MailCheckProbes},
 		apps:            apps,
 		backups:         backups,
 		mysql:           cfg.MySQLSocket,
@@ -285,6 +296,24 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return struct{}{}, a.sftp.Apply(st)
+	case agentproto.TypeMailAPI:
+		var req agentproto.MailAPI
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.apps.MailAPI(ctx, req)
+	case agentproto.TypeMailCheck:
+		var req agentproto.MailCheck
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.MailCheck(ctx, req)
+	case agentproto.TypeMailCert:
+		var req agentproto.MailCert
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.MailCert(ctx, req)
 	case agentproto.TypeDNSApply:
 		var st agentproto.DNSApply
 		if err := json.Unmarshal(payload, &st); err != nil {

@@ -103,3 +103,40 @@ func TestChallengeRecords(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestServiceRecords(t *testing.T) {
+	z := Zone{Name: "example.com", Records: []Record{
+		rec("@", TypeTXT, "v=spf1 include:_spf.google.com -all"), // the user's SPF stays
+		rec("autoconfig", TypeA, "192.0.2.5"),
+		rec("legacy", TypeCNAME, "elsewhere.example.org"),
+	}}
+	mx := rec("example.com", TypeMX, "mail.example.com")
+	mx.Priority = 10
+	srv := rec("_imaps._tcp.example.com", TypeSRV, "mail.example.com")
+	srv.Priority, srv.Weight, srv.Port = 0, 1, 993
+	want := []Record{
+		mx,
+		rec("example.com", TypeTXT, "v=spf1 mx -all"),
+		rec("_dmarc.example.com", TypeTXT, "v=DMARC1; p=reject"),
+		rec("v1-rsa-20261011._domainkey.example.com", TypeTXT, "v=DKIM1; k=rsa; p=MIIB"),
+		srv,
+		rec("autoconfig.example.com", TypeCNAME, "mail.example.com"),   // the user's A wins
+		rec("mta-sts.example.com", TypeCNAME, "mail.example.com"),      // an automatic A is there
+		rec("autodiscover.example.com", TypeCNAME, "mail.example.com"), // free
+		rec("legacy.example.com", TypeTXT, "v=spf1 -all"),              // beside a CNAME
+		rec("other.example.org", TypeTXT, "x"),                         // not this zone
+	}
+	taken := []AutoRecord{{Record: rec("mta-sts", TypeA, "192.0.2.1")}}
+	got := ServiceRecords(&z, []string{"example.com"}, want, "mail", taken)
+	var lines []string
+	for _, r := range got {
+		lines = append(lines, r.Name+" "+r.Type)
+		z.Records = append(z.Records, r.Record)
+	}
+	if strings.Join(lines, "|") != "@ MX|_dmarc TXT|v1-rsa-20261011._domainkey TXT|_imaps._tcp SRV|autodiscover CNAME" {
+		t.Fatalf("%v", lines)
+	}
+	if err := z.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

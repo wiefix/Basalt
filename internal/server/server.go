@@ -48,22 +48,34 @@ type Options struct {
 	// ImagesKept is how many images of recent deployments each app keeps
 	// on its server (default 3).
 	ImagesKept int
+	// MailHostPorts publishes mail ports elsewhere on the host (tests);
+	// by default port 25 is 25 and so on.
+	MailHostPorts map[int]int
+	// MailCheckEvery is how often the panel checks mail deliverability
+	// (default a day; negative: only on request).
+	MailCheckEvery time.Duration
 }
 
 type Server struct {
-	log           *slog.Logger
-	db            *store.DB
-	box           *secrets.Box
-	hasher        *auth.Hasher
-	secureCookies bool
-	trusted       []netip.Prefix
-	setupFile     string
-	agents        AgentHub
-	agentURL      string
-	now           func() time.Time
-	imagesKept    int
-	dataDir       string
-	restic        string
+	log            *slog.Logger
+	db             *store.DB
+	box            *secrets.Box
+	hasher         *auth.Hasher
+	secureCookies  bool
+	trusted        []netip.Prefix
+	setupFile      string
+	agents         AgentHub
+	agentURL       string
+	now            func() time.Time
+	imagesKept     int
+	mailPorts      map[int]int
+	mailMu         sync.Mutex // serializes changes to the mail server
+	mailTLSMu      sync.Mutex
+	mailTLS        mailTLSStatus // the last certificate sync
+	mailCheckMu    sync.Mutex    // one deliverability check at a time
+	mailCheckEvery time.Duration
+	dataDir        string
+	restic         string
 
 	setupMu    sync.Mutex
 	setupToken string
@@ -83,6 +95,9 @@ type Server struct {
 }
 
 func New(o Options) *Server {
+	if o.MailCheckEvery == 0 {
+		o.MailCheckEvery = 24 * time.Hour
+	}
 	if o.Now == nil {
 		o.Now = time.Now
 	}
@@ -93,28 +108,30 @@ func New(o Options) *Server {
 		o.ImagesKept = defaultImagesKept
 	}
 	return &Server{
-		log:           o.Log,
-		db:            o.DB,
-		box:           o.Box,
-		hasher:        o.Hasher,
-		secureCookies: o.SecureCookies,
-		trusted:       o.TrustedProxies,
-		setupFile:     o.SetupTokenFile,
-		agents:        o.Agents,
-		agentURL:      o.AgentURL,
-		now:           o.Now,
-		imagesKept:    o.ImagesKept,
-		dataDir:       o.DataDir,
-		restic:        o.Restic,
-		setupToken:    o.SetupToken,
-		ipLimiter:     auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
-		emailLimiter:  auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
-		mfaLimiter:    auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
-		hookLimiter:   auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
-		live:          &liveLogs{m: map[int64]*liveLog{}},
-		backupLive:    &liveLogs{m: map[int64]*liveLog{}},
-		pending:       map[int64]string{},
-		streams:       map[int64]int{},
+		log:            o.Log,
+		db:             o.DB,
+		box:            o.Box,
+		hasher:         o.Hasher,
+		secureCookies:  o.SecureCookies,
+		trusted:        o.TrustedProxies,
+		setupFile:      o.SetupTokenFile,
+		agents:         o.Agents,
+		agentURL:       o.AgentURL,
+		now:            o.Now,
+		imagesKept:     o.ImagesKept,
+		mailPorts:      o.MailHostPorts,
+		mailCheckEvery: o.MailCheckEvery,
+		dataDir:        o.DataDir,
+		restic:         o.Restic,
+		setupToken:     o.SetupToken,
+		ipLimiter:      auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
+		emailLimiter:   auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
+		mfaLimiter:     auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
+		hookLimiter:    auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
+		live:           &liveLogs{m: map[int64]*liveLog{}},
+		backupLive:     &liveLogs{m: map[int64]*liveLog{}},
+		pending:        map[int64]string{},
+		streams:        map[int64]int{},
 	}
 }
 
@@ -195,6 +212,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handlePutRecord))
 	mux.Handle("DELETE /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handleDeleteRecord))
 
+	mux.Handle("GET /api/v1/mail", s.requireRole(store.RoleViewer, s.handleMailOverview))
+	mux.Handle("POST /api/v1/mail", s.requireRole(store.RoleAdmin, s.handleCreateMail))
+	mux.Handle("POST /api/v1/mail/checks", s.requireRole(store.RoleAdmin, s.handleMailChecks))
+	mux.Handle("POST /api/v1/mail/domains", s.requireRole(store.RoleAdmin, s.handleCreateMailDomain))
+	mux.Handle("DELETE /api/v1/mail/domains/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteMailDomain))
+	mux.Handle("GET /api/v1/mail/domains/{id}/mailboxes", s.requireRole(store.RoleViewer, s.handleListMailboxes))
+	mux.Handle("POST /api/v1/mail/domains/{id}/mailboxes", s.requireRole(store.RoleAdmin, s.handleCreateMailbox))
+	mux.Handle("PUT /api/v1/mail/domains/{id}/mailboxes/{mid}", s.requireRole(store.RoleAdmin, s.handleUpdateMailbox))
+	mux.Handle("DELETE /api/v1/mail/domains/{id}/mailboxes/{mid}", s.requireRole(store.RoleAdmin, s.handleDeleteMailbox))
+
 	mux.Handle("GET /api/v1/registries", s.requireRole(store.RoleAdmin, s.handleListRegistries))
 	mux.Handle("POST /api/v1/registries", s.requireRole(store.RoleAdmin, s.handleCreateRegistry))
 	mux.Handle("PUT /api/v1/registries/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateRegistry))
@@ -269,6 +296,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go s.cleanupLoop(ctx)
 	go s.backupLoop(ctx)
 	go s.dnsLoop(ctx)
+	go s.refreshMailLoop(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

@@ -33,6 +33,7 @@ export function AppPage({ user }: { user: User }) {
   const server = servers.data?.servers.find((x) => x.id === a.server_id);
   const base = appPath(a);
   const isDB = a.source === "database";
+  const isMail = a.source === "mail";
   const tab = (to: string, label: string) => (
     <NavLink to={to} end className={({ isActive }) => (isActive ? "tab active" : "tab")}>
       {label}
@@ -70,8 +71,8 @@ export function AppPage({ user }: { user: User }) {
         {tab(base, "Overview")}
         {can(user, "member") && tab(`${base}/logs`, "Logs")}
         {isDB && can(user, "admin") && tab(`${base}/connection`, "Connection")}
-        {!isDB && can(user, "admin") && tab(`${base}/env`, "Environment")}
-        {!isDB && tab(`${base}/domains`, "Domains")}
+        {!isDB && !isMail && can(user, "admin") && tab(`${base}/env`, "Environment")}
+        {!isDB && !isMail && tab(`${base}/domains`, "Domains")}
         {a.source === "git" && can(user, "admin") && tab(`${base}/source`, "Source")}
         {a.source === "compose" && can(user, "admin") && tab(`${base}/compose`, "Compose")}
         {tab(`${base}/backups`, "Backups")}
@@ -162,7 +163,13 @@ function Overview({ app, user }: { app: App; user: User }) {
           )}
         </div>
         <p className="faint small" style={{ marginBottom: 0 }}>
-          {app.source === "database" ? (
+          {app.source === "mail" ? (
+            <>
+              A deployment pulls <span className="mono">{app.image}</span> and, if it changed (or the limits did),
+              restarts the mail server on it: it is stopped first, so incoming mail waits a few seconds (senders
+              retry). Mail and settings are kept. If the new container fails, the previous one is started again.
+            </>
+          ) : app.source === "database" ? (
             <>
               A deployment pulls the latest <span className="mono">{app.image}</span> and, if it changed (or the limits did),
               restarts the database on it: it is stopped first, so its data is never used twice. Without changes it keeps
@@ -185,14 +192,14 @@ function Overview({ app, user }: { app: App; user: User }) {
               A deployment pulls <span className="mono">{app.image}</span>,
             </>
           )}{" "}
-          {app.source !== "compose" && app.source !== "database" &&
+          {app.source !== "compose" && app.source !== "database" && app.source !== "mail" &&
             " starts a new container and switches traffic once it is ready. If the new container fails, the current one keeps serving."}
         </p>
       </div>
 
       {app.source === "compose" && <ServicesCard app={app} services={st?.services} />}
       <ResourcesCard app={app} running={st?.state === "running"} />
-      {app.source === "database" ? <LinksCard app={app} user={user} /> : <LinkedDatabases app={app} />}
+      {app.source === "database" ? <LinksCard app={app} user={user} /> : app.source !== "mail" && <LinkedDatabases app={app} />}
 
       <div className="card">
         <div className="card-head">
@@ -232,9 +239,9 @@ function Overview({ app, user }: { app: App; user: User }) {
                     <td>
                       <DeployBadge status={d.status} />
                     </td>
-                    {app.source === "database" ? (
-                      <td className="mono muted small" title={d.digests?.[app.name]}>
-                        {d.digests?.[app.name]?.split("@")[1]?.slice(0, 19) ?? "—"}
+                    {app.source === "database" || app.source === "mail" ? (
+                      <td className="mono muted small" title={d.digests?.[app.source === "mail" ? "stalwart" : app.name]}>
+                        {d.digests?.[app.source === "mail" ? "stalwart" : app.name]?.split("@")[1]?.slice(0, 19) ?? "—"}
                       </td>
                     ) : app.source === "compose" ? (
                       <td className="muted small">{d.digests ? Object.keys(d.digests).sort().join(", ") : "—"}</td>
@@ -263,7 +270,7 @@ function Overview({ app, user }: { app: App; user: User }) {
                             const ok = await confirm({
                               title: `Roll back to #${d.id}?`,
                               body:
-                                app.source === "database" ? (
+                                app.source === "database" || app.source === "mail" ? (
                                   <p>
                                     The image of deployment #{d.id} runs again on the current data. Going back to an older
                                     minor version is usually fine; check the engine's notes if unsure.
@@ -613,7 +620,7 @@ function SettingsTab({ app }: { app: App }) {
       toast("Saved. Deploy to apply.");
     },
   });
-  if (app.source === "database") {
+  if (app.source === "database" || app.source === "mail") {
     return (
       <div className="stack" style={{ maxWidth: 680 }}>
         <form
@@ -634,7 +641,8 @@ function SettingsTab({ app }: { app: App }) {
             </Field>
           </div>
           <p className="faint small" style={{ margin: 0 }}>
-            A deployment restarts the database with new limits: connections drop for a few seconds.
+            A deployment restarts the {app.source === "mail" ? "mail server" : "database"} with new limits: connections
+            drop for a few seconds.
           </p>
           <div>
             <button className="btn primary" disabled={save.isPending}>
@@ -710,14 +718,22 @@ function DeleteCard({ app }: { app: App }) {
   const [confirmName, setConfirmName] = useState("");
   const [volumes, setVolumes] = useState(false);
   const isDB = app.source === "database";
-  const volumeNames = isDB ? ["data"] : app.source === "compose" ? (app.compose?.volumes ?? []) : app.volumes.map((v) => v.name);
+  const isMail = app.source === "mail";
+  const volumeNames = isMail
+    ? ["etc", "data"]
+    : isDB
+      ? ["data"]
+      : app.source === "compose"
+        ? (app.compose?.volumes ?? [])
+        : app.volumes.map((v) => v.name);
   const del = useMutation({
     mutationFn: () => api.deleteApp(app.id, volumes),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["apps"] });
-      const what = isDB ? "Database" : "App";
+      const what = isMail ? "Mail server" : isDB ? "Database" : "App";
       toast(r.cleanup_error ? `${what} deleted; cleanup pending: ${r.cleanup_error}` : `${what} deleted`, !!r.cleanup_error);
-      navigate(isDB ? "/databases" : "/apps");
+      qc.invalidateQueries({ queryKey: ["mail"] });
+      navigate(isMail ? "/mail" : isDB ? "/databases" : "/apps");
     },
   });
   return (
