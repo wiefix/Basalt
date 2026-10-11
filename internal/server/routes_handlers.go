@@ -53,6 +53,8 @@ func (s *Server) proxySync(ctx context.Context, serverID int64) proxySyncView {
 // PushProxy sends the server's full desired proxy state to its agent and
 // records the outcome. Offline agents receive it when they reconnect.
 func (s *Server) PushProxy(ctx context.Context, serverID int64) {
+	// Domains may have changed: automatic DNS records follow them.
+	s.syncAutoDNS(ctx)
 	if !s.agents.Connected(serverID) {
 		return
 	}

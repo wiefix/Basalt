@@ -35,6 +35,11 @@ export interface Server {
   docker: string;
   // How Docker isolates containers (absent when unknown).
   docker_security?: { userns: boolean; rootless?: boolean; seccomp?: string; apparmor: boolean; selinux?: boolean; cgroup_v2: boolean };
+  // Addresses for automatic DNS records: found on the host, set by an
+  // admin (replacing them), and the ones in use.
+  detected_ips: string[];
+  public_ips: string[];
+  dns_ips: string[];
   created_at: string;
 }
 
@@ -374,6 +379,9 @@ export interface DNSRecord {
 
 export type DNSRecordInput = Omit<DNSRecord, "id">;
 
+// An automatic record: A/AAAA for a site's or app's domain.
+export type DNSAutoRecord = Omit<DNSRecord, "id"> & { source: string };
+
 export interface DNSServer {
   server_id: number;
   name: string;
@@ -468,6 +476,7 @@ export const api = {
   deleteServer: (id: number) => del<void>(`/api/v1/servers/${id}`),
   serverMetrics: (id: number, minutes: number) =>
     get<{ metrics: Metrics[] }>(`/api/v1/servers/${id}/metrics?minutes=${minutes}`),
+  setPublicIPs: (id: number, ips: string[]) => put<{ server: Server }>(`/api/v1/servers/${id}/public-ips`, { ips }),
   pingServer: (id: number) => post<{ rtt_ms: number; agent_time: string }>(`/api/v1/servers/${id}/ping`),
 
   routes: (serverId: number) => get<{ routes: Route[]; sync: Sync }>(`/api/v1/servers/${serverId}/routes`),
@@ -510,7 +519,8 @@ export const api = {
   dns: () => get<{ zones: DNSZone[]; nameservers: string[]; servers: DNSServer[] }>("/api/v1/dns"),
   setNameservers: (nameservers: string[]) => put<{ nameservers: string[] }>("/api/v1/dns/nameservers", { nameservers }),
   createZone: (name: string) => post<{ zone: DNSZone }>("/api/v1/dns/zones", { name }),
-  zone: (id: number) => get<{ zone: DNSZone; records: DNSRecord[]; types: string[] }>(`/api/v1/dns/zones/${id}`),
+  zone: (id: number) =>
+    get<{ zone: DNSZone; records: DNSRecord[]; auto: DNSAutoRecord[]; types: string[] }>(`/api/v1/dns/zones/${id}`),
   deleteZone: (id: number) => del<void>(`/api/v1/dns/zones/${id}`),
   createRecord: (zoneId: number, r: DNSRecordInput) => post<{ record: DNSRecord }>(`/api/v1/dns/zones/${zoneId}/records`, r),
   updateRecord: (zoneId: number, id: number, r: DNSRecordInput) =>

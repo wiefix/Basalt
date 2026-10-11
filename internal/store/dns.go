@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -263,24 +266,48 @@ func (db *DB) DeleteDNSZone(ctx context.Context, id int64) error {
 	return tx.Commit()
 }
 
-// DesiredDNS assembles every zone with its records.
+// DesiredDNS assembles every zone with its records, automatic ones included.
 func (db *DB) DesiredDNS(ctx context.Context) (rev int64, zones []dns.Zone, err error) {
 	tx, err := db.R.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer tx.Rollback()
-	var v string
-	switch err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, settingDNSRevision).Scan(&v); {
-	case errors.Is(err, sql.ErrNoRows):
-	case err != nil:
-		return 0, nil, err
-	default:
-		rev, _ = strconv.ParseInt(v, 10, 64)
-	}
-	rows, err := tx.QueryContext(ctx, `SELECT id, name, serial FROM dns_zones ORDER BY id`)
+	rev, zones, _, err = db.manualDNS(ctx, tx)
 	if err != nil {
 		return 0, nil, err
+	}
+	targets, err := DNSTargets(ctx, tx)
+	if err != nil {
+		return 0, nil, err
+	}
+	for i, auto := range withAuto(zones, targets) {
+		for _, r := range auto {
+			zones[i].Records = append(zones[i].Records, r.Record)
+		}
+	}
+	return rev, zones, nil
+}
+
+// manualDNS loads the revision and every zone with the records users made,
+// with the zone IDs.
+func (db *DB) manualDNS(ctx context.Context, q queryer) (rev int64, zones []dns.Zone, ids []int64, err error) {
+	var v string
+	rows, err := q.QueryContext(ctx, `SELECT value FROM settings WHERE key = ?`, settingDNSRevision)
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if rows.Next() {
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			return 0, nil, nil, err
+		}
+		rev, _ = strconv.ParseInt(v, 10, 64)
+	}
+	rows.Close()
+	rows, err = q.QueryContext(ctx, `SELECT id, name, serial FROM dns_zones ORDER BY id`)
+	if err != nil {
+		return 0, nil, nil, err
 	}
 	index := map[int64]int{}
 	for rows.Next() {
@@ -288,18 +315,19 @@ func (db *DB) DesiredDNS(ctx context.Context) (rev int64, zones []dns.Zone, err 
 		var z dns.Zone
 		if err := rows.Scan(&id, &z.Name, &z.Serial); err != nil {
 			rows.Close()
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		index[id] = len(zones)
 		zones = append(zones, z)
+		ids = append(ids, id)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
-	recs, err := dnsRecords(ctx, tx, 0)
+	recs, err := dnsRecords(ctx, q, 0)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	for _, r := range recs {
 		z := &zones[index[r.ZoneID]]
@@ -308,7 +336,7 @@ func (db *DB) DesiredDNS(ctx context.Context) (rev int64, zones []dns.Zone, err 
 	if zones == nil {
 		zones = []dns.Zone{}
 	}
-	return rev, zones, nil
+	return rev, zones, ids, nil
 }
 
 // DNSNameservers returns the host names new zones get NS records for.
@@ -378,4 +406,137 @@ func (db *DB) DNSServers(ctx context.Context) ([]DNSServerStatus, error) {
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// DNSTargets lists every proxied domain with the addresses of its server,
+// the input of automatic records.
+func DNSTargets(ctx context.Context, q queryer) ([]dns.AutoTarget, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT d.domain, s.public_ips, s.detected_ips, s.last_ip,
+		        CASE WHEN st.id IS NOT NULL THEN 'site ' || st.name
+		             WHEN a.id IS NOT NULL THEN 'app ' || a.name ELSE 'route' END
+		 FROM proxy_route_domains d
+		 JOIN proxy_routes r ON r.id = d.route_id
+		 JOIN servers s ON s.id = d.server_id
+		 LEFT JOIN sites st ON st.id = r.site_id
+		 LEFT JOIN apps a ON a.id = r.app_id
+		 WHERE s.enrolled_at IS NOT NULL
+		 ORDER BY d.domain, s.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []dns.AutoTarget
+	for rows.Next() {
+		var domain, public, detected, source string
+		var srv Server
+		if err := rows.Scan(&domain, &public, &detected, &srv.LastIP, &source); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(public), &srv.PublicIPs); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(detected), &srv.DetectedIPs); err != nil {
+			return nil, err
+		}
+		if ips := srv.DNSAddrs(); len(ips) > 0 {
+			out = append(out, dns.AutoTarget{Domain: domain, IPs: ips, Source: source})
+		}
+	}
+	return out, rows.Err()
+}
+
+// withAuto adds the automatic records to zones.
+func withAuto(zones []dns.Zone, targets []dns.AutoTarget) [][]dns.AutoRecord {
+	names := make([]string, len(zones))
+	for i, z := range zones {
+		names[i] = z.Name
+	}
+	out := make([][]dns.AutoRecord, len(zones))
+	for i := range zones {
+		out[i] = dns.AutoRecords(&zones[i], names, targets)
+	}
+	return out
+}
+
+func autoHash(recs []dns.AutoRecord) string {
+	if len(recs) == 0 {
+		return ""
+	}
+	h := sha256.New()
+	for _, r := range recs {
+		fmt.Fprintf(h, "%s %s %s\n", r.Name, r.Type, r.Value)
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// DNSZoneAuto returns the automatic records of one zone.
+func (db *DB) DNSZoneAuto(ctx context.Context, zoneID int64) ([]dns.AutoRecord, error) {
+	_, zones, ids, err := db.manualDNS(ctx, db.R)
+	if err != nil {
+		return nil, err
+	}
+	targets, err := DNSTargets(ctx, db.R)
+	if err != nil {
+		return nil, err
+	}
+	auto := withAuto(zones, targets)
+	for i, id := range ids {
+		if id == zoneID {
+			return auto[i], nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+// SyncAutoDNS bumps the serial (and the DNS revision) of every zone whose
+// automatic records changed since the last call. It reports whether any did.
+func (db *DB) SyncAutoDNS(ctx context.Context, now time.Time) (bool, error) {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	_, zones, ids, err := db.manualDNS(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	targets, err := DNSTargets(ctx, tx)
+	if err != nil {
+		return false, err
+	}
+	hashes := map[int64]string{}
+	rows, err := tx.QueryContext(ctx, `SELECT id, auto_hash FROM dns_zones`)
+	if err != nil {
+		return false, err
+	}
+	for rows.Next() {
+		var id int64
+		var h string
+		if err := rows.Scan(&id, &h); err != nil {
+			rows.Close()
+			return false, err
+		}
+		hashes[id] = h
+	}
+	rows.Close()
+	changed := false
+	for i, auto := range withAuto(zones, targets) {
+		h := autoHash(auto)
+		if h == hashes[ids[i]] {
+			continue
+		}
+		changed = true
+		if _, err := tx.ExecContext(ctx, `UPDATE dns_zones SET auto_hash = ?, serial = ?, updated_at = ? WHERE id = ?`,
+			h, nextSerial(zones[i].Serial, now), now.Unix(), ids[i]); err != nil {
+			return false, err
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := bumpDNSRevision(ctx, tx); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }

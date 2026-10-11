@@ -92,6 +92,14 @@ done
 docker exec basalt-panel dig +noall +answer @$NODEIP www.zone.test A
 [ "$(docker exec basalt-panel dig +short +tcp @$NODEIP www.zone.test A)" = 192.0.2.44 ] || { echo "no DNS answer from node1"; exit 1; }
 docker exec basalt-panel dig +noall +comments @$NODEIP example.com A | grep -q "status: REFUSED" || { echo "node1 answered for a foreign zone"; exit 1; }
+echo "### automatic record for the PHP site's domain (shop.test on node1)"
+$API -X PUT -d "{\"ips\":[\"$NODEIP\"]}" http://127.0.0.1:8080/api/v1/servers/$NODE/public-ips >/dev/null
+$API -d '{"name":"shop.test"}' http://127.0.0.1:8080/api/v1/dns/zones >/dev/null
+for i in $(seq 30); do
+  [ "$(docker exec basalt-panel dig +short @$NODEIP shop.test A)" = "$NODEIP" ] && break; sleep 1
+done
+docker exec basalt-panel dig +noall +answer @$NODEIP shop.test A
+[ "$(docker exec basalt-panel dig +short @$NODEIP shop.test A)" = "$NODEIP" ] || { echo "no automatic record"; exit 1; }
 echo "### panel backup, then recovery from it"
 ST=$($API -d '{"name":"local","kind":"local","path":"/var/backups/basalt"}' http://127.0.0.1:8080/api/v1/backup-storages | python3 -c 'import sys,json; print(json.load(sys.stdin)["storage"]["id"])')
 $API -X PUT -d "{\"storage_id\":$ST,\"schedule\":\"daily\",\"at_minute\":0,\"keep_last\":3}" http://127.0.0.1:8080/api/v1/panel-backup/policy >/dev/null

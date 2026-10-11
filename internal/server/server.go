@@ -145,6 +145,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/servers/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteServer))
 	mux.Handle("GET /api/v1/servers/{id}/metrics", s.requireRole(store.RoleViewer, s.handleServerMetrics))
 	mux.Handle("POST /api/v1/servers/{id}/ping", s.requireRole(store.RoleMember, s.handlePingServer))
+	mux.Handle("PUT /api/v1/servers/{id}/public-ips", s.requireRole(store.RoleAdmin, s.handleSetPublicIPs))
 	mux.Handle("POST /api/v1/servers/{id}/enroll-token", s.requireRole(store.RoleAdmin, s.handleResetEnrollToken))
 	mux.Handle("GET /api/v1/servers/{id}/routes", s.requireRole(store.RoleViewer, s.handleListRoutes))
 	mux.Handle("POST /api/v1/servers/{id}/routes", s.requireRole(store.RoleAdmin, s.handleCreateRoute))
@@ -266,6 +267,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 
 	go s.cleanupLoop(ctx)
 	go s.backupLoop(ctx)
+	go s.dnsLoop(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

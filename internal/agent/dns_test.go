@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strconv"
 	"testing"
 	"time"
@@ -74,5 +75,19 @@ func TestDNSManager(t *testing.T) {
 	busy := newDNSManager(Config{DataDir: t.TempDir(), DNSListen: addr}, quiet)
 	if port, listenErr := busy.Status(); port != 0 || listenErr == "" {
 		t.Fatalf("busy port: %d %q", port, listenErr)
+	}
+}
+
+func TestUnstableIPv6(t *testing.T) {
+	proc := `2a0100000000000000000000000000aa 02 40 00 80     eth0
+2a0100000000000000000000000000bb 02 40 00 01     eth0
+2a0100000000000000000000000000cc 02 40 00 20     eth0
+fe800000000000000000000000000001 02 40 20 80     eth0
+00000000000000000000000000000001 01 80 10 80       lo
+garbage
+`
+	got := unstableIPv6(proc)
+	if len(got) != 2 || !got[netip.MustParseAddr("2a01::bb")] || !got[netip.MustParseAddr("2a01::cc")] {
+		t.Fatalf("%v", got)
 	}
 }

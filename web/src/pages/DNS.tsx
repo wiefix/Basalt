@@ -228,7 +228,7 @@ function NameserversModal({ current, onClose }: { current: string[]; onClose: ()
 }
 
 // recordData shows a record's data the way zone files do.
-function recordData(r: DNSRecord): string {
+function recordData(r: DNSRecordInput): string {
   switch (r.type) {
     case "MX":
       return `${r.priority ?? 0} ${r.value}`;
@@ -264,9 +264,10 @@ export function ZonePage({ user }: { user: User }) {
   const z = zone.data.zone;
   const fqdn = (name: string) => (name === "@" ? z.name : `${name}.${z.name}`);
   const f = filter.trim().toLowerCase();
-  const records = zone.data.records.filter(
-    (r) => !f || fqdn(r.name).includes(f) || r.type.toLowerCase() === f || recordData(r).toLowerCase().includes(f),
-  );
+  const match = (r: DNSRecordInput) =>
+    !f || fqdn(r.name).includes(f) || r.type.toLowerCase() === f || recordData(r).toLowerCase().includes(f);
+  const records = zone.data.records.filter(match);
+  const auto = zone.data.auto.filter(match);
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["dns-zone", id] });
     qc.invalidateQueries({ queryKey: ["dns"] });
@@ -355,6 +356,22 @@ export function ZonePage({ user }: { user: User }) {
                 <td className="muted">1h</td>
                 {admin && <td />}
               </tr>
+              {auto.map((r) => (
+                <tr key={`auto ${r.name} ${r.type} ${r.value}`}>
+                  <td className="mono" style={{ overflowWrap: "anywhere" }}>
+                    {fqdn(r.name)}
+                  </td>
+                  <td>{r.type}</td>
+                  <td className="mono small" style={{ overflowWrap: "anywhere", maxWidth: 420 }}>
+                    {r.value}{" "}
+                    <span className="badge plain" title="Created for this domain automatically; add your own A, AAAA, CNAME or ALIAS record at this name to replace it">
+                      auto · {r.source}
+                    </span>
+                  </td>
+                  <td className="muted">{formatTTL(r.ttl)}</td>
+                  {admin && <td />}
+                </tr>
+              ))}
               {records.map((r) => (
                 <tr key={r.id}>
                   <td className="mono" style={{ overflowWrap: "anywhere" }}>
@@ -383,6 +400,10 @@ export function ZonePage({ user }: { user: User }) {
           </table>
         </div>
       </div>
+      <p className="faint small">
+        Sites and apps whose domains are in this zone get A/AAAA records for their server automatically (TTL 5
+        minutes). A record of your own at the same name replaces them.
+      </p>
       {editing && (
         <RecordModal
           zone={z.name}

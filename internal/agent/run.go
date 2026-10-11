@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,14 +13,17 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/buildinfo"
+	"github.com/wiefix/basalt/internal/dns"
 	"github.com/wiefix/basalt/internal/docker"
 	"github.com/wiefix/basalt/internal/mariadb"
 	"github.com/wiefix/basalt/internal/pki"
@@ -439,7 +443,59 @@ func hostFacts() agentproto.Hello {
 	}
 	h.Hostname, _ = os.Hostname()
 	h.Kernel, h.Distro, h.MemTotal = platformFacts()
+	h.PublicIPs = publicIPs()
 	return h
+}
+
+// publicIPs lists the public addresses on the host's interfaces. A server
+// behind NAT has none; the panel then uses the address it connects from,
+// or what an admin set.
+func publicIPs() []string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil
+	}
+	proc, _ := os.ReadFile("/proc/net/if_inet6")
+	unstable := unstableIPv6(string(proc))
+	var out []string
+	for _, a := range addrs {
+		ipn, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		if ip, ok := netip.AddrFromSlice(ipn.IP); ok && dns.PublicAddr(ip) && !unstable[ip.Unmap()] {
+			out = append(out, ip.Unmap().String())
+		}
+	}
+	return out
+}
+
+// unstableIPv6 parses /proc/net/if_inet6 (Linux) for addresses that must
+// not be published: temporary (privacy) addresses change every few hours,
+// deprecated ones are being replaced, and ones that failed duplicate
+// detection are not used.
+func unstableIPv6(proc string) map[netip.Addr]bool {
+	const (
+		ifaTemporary  = 0x01
+		ifaDADFailed  = 0x08
+		ifaDeprecated = 0x20
+	)
+	out := map[netip.Addr]bool{}
+	for line := range strings.Lines(proc) {
+		f := strings.Fields(line)
+		if len(f) < 6 || len(f[0]) != 32 {
+			continue
+		}
+		raw, err := hex.DecodeString(f[0])
+		flags, ferr := strconv.ParseUint(f[4], 16, 32)
+		if err != nil || ferr != nil {
+			continue
+		}
+		if flags&(ifaTemporary|ifaDADFailed|ifaDeprecated) != 0 {
+			out[netip.AddrFrom16([16]byte(raw))] = true
+		}
+	}
+	return out
 }
 
 func (a *Agent) mariadbVersion(ctx context.Context) string {

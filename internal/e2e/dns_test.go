@@ -166,3 +166,83 @@ func TestDNS(t *testing.T) {
 		t.Fatalf("audit entries: %d", audit)
 	}
 }
+
+func TestAutoDNS(t *testing.T) {
+	p := startPanel(t)
+	h := startHostWith(t, p, "", func(c *agent.Config) { c.DNSListen = "127.0.0.1:0" })
+	var addr string
+	for _, s := range p.call(200, "GET", "/api/v1/dns", nil)["servers"].([]any) {
+		s := s.(map[string]any)
+		addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(int(s["port"].(float64))))
+	}
+	srvPath := "/api/v1/servers/" + h.id
+	p.call(http.StatusUnprocessableEntity, "PUT", srvPath+"/public-ips", map[string]any{"ips": []string{"not-an-ip"}})
+	r := p.call(200, "PUT", srvPath+"/public-ips", map[string]any{"ips": []string{"203.0.113.10", "2001:db8::10"}})
+	if jsonString(r["server"].(map[string]any)["dns_ips"]) != `["203.0.113.10","2001:db8::10"]` {
+		t.Fatalf("server = %v", r)
+	}
+
+	zid := jsonID(p.call(http.StatusCreated, "POST", "/api/v1/dns/zones", map[string]string{"name": "example.test"})["zone"].(map[string]any)["id"])
+	base := "/api/v1/dns/zones/" + zid
+	serial := func() float64 { return p.call(200, "GET", base, nil)["zone"].(map[string]any)["serial"].(float64) }
+	s0 := serial()
+
+	// A site with domains in the zone gets A and AAAA records for its server.
+	site := p.call(http.StatusCreated, "POST", "/api/v1/sites", map[string]any{
+		"server_id": mustAtoi(h.id), "name": "blog", "domains": []string{"example.test", "www.example.test", "other.org"}, "tls": "internal",
+	})["site"].(map[string]any)
+	sid := jsonID(site["id"])
+	eventually(t, "automatic records served", func() bool {
+		_, a := dnsQuery(t, addr, "www.example.test.", mdns.TypeA)
+		_, aaaa := dnsQuery(t, addr, "example.test.", mdns.TypeAAAA)
+		return len(a) == 1 && strings.Contains(a[0], "300 IN A 203.0.113.10") && len(aaaa) == 1 && strings.Contains(aaaa[0], "2001:db8::10")
+	})
+	zone := p.call(200, "GET", base, nil)
+	if len(zone["auto"].([]any)) != 4 || len(zone["records"].([]any)) != 0 {
+		t.Fatalf("zone = %v", zone)
+	}
+	if a := zone["auto"].([]any)[0].(map[string]any); a["source"] != "site blog" {
+		t.Fatalf("auto source = %v", a)
+	}
+	s1 := serial()
+	if s1 <= s0 {
+		t.Fatalf("serial did not change: %v -> %v", s0, s1)
+	}
+
+	// A record of the user's own wins over the automatic one.
+	p.call(http.StatusCreated, "POST", base+"/records", map[string]any{"name": "www", "type": "CNAME", "value": "cdn.example.org"})
+	eventually(t, "manual record wins", func() bool {
+		_, a := dnsQuery(t, addr, "www.example.test.", mdns.TypeA)
+		return len(a) == 1 && strings.Contains(a[0], "CNAME cdn.example.org.")
+	})
+
+	// New addresses for the server move the records.
+	p.call(200, "PUT", srvPath+"/public-ips", map[string]any{"ips": []string{"203.0.113.20"}})
+	eventually(t, "records follow the server", func() bool {
+		_, a := dnsQuery(t, addr, "example.test.", mdns.TypeA)
+		_, aaaa := dnsQuery(t, addr, "example.test.", mdns.TypeAAAA)
+		return len(a) == 1 && strings.Contains(a[0], "203.0.113.20") && len(aaaa) == 0
+	})
+
+	// Domain changes and site removal remove them.
+	p.call(200, "PUT", "/api/v1/sites/"+sid+"/domains", map[string]any{"domains": []string{"shop.example.test"}})
+	eventually(t, "domain change", func() bool {
+		rcode, _ := dnsQuery(t, addr, "example.test.", mdns.TypeA)
+		_, shop := dnsQuery(t, addr, "shop.example.test.", mdns.TypeA)
+		return rcode == mdns.RcodeSuccess && len(shop) == 1
+	})
+	if _, a := dnsQuery(t, addr, "example.test.", mdns.TypeA); len(a) != 0 {
+		t.Fatalf("apex still has %v", a)
+	}
+	p.call(http.StatusOK, "DELETE", "/api/v1/sites/"+sid, nil)
+	eventually(t, "site removed", func() bool {
+		rcode, _ := dnsQuery(t, addr, "shop.example.test.", mdns.TypeA)
+		return rcode == mdns.RcodeNameError
+	})
+
+	// Back to the detected addresses (none here: the agent connects over loopback).
+	r = p.call(200, "PUT", srvPath+"/public-ips", map[string]any{"ips": []string{}})
+	if ips := r["server"].(map[string]any)["public_ips"].([]any); len(ips) != 0 {
+		t.Fatalf("public ips = %v", ips)
+	}
+}

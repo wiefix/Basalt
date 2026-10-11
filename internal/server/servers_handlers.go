@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/netip"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -50,7 +52,12 @@ type serverView struct {
 	Docker         string           `json:"docker"`
 	DockerSecurity *docker.Security `json:"docker_security,omitempty"`
 	Restic         string           `json:"restic"`
-	CreatedAt      time.Time        `json:"created_at"`
+	// Addresses for automatic DNS records: found on the host, set by an
+	// admin, and the ones in use.
+	DetectedIPs []string  `json:"detected_ips"`
+	PublicIPs   []string  `json:"public_ips"`
+	DNSIPs      []string  `json:"dns_ips"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 func (s *Server) viewServer(srv *store.Server) serverView {
@@ -61,6 +68,10 @@ func (s *Server) viewServer(srv *store.Server) serverView {
 	case s.agents.Connected(srv.ID):
 		status = "online"
 	}
+	dnsIPs := []string{}
+	for _, a := range srv.DNSAddrs() {
+		dnsIPs = append(dnsIPs, a.String())
+	}
 	return serverView{
 		ID: srv.ID, Name: srv.Name, Status: status, Hostname: srv.Hostname, OS: srv.OS,
 		Arch: srv.Arch, Kernel: srv.Kernel, Distro: srv.Distro, AgentVersion: srv.AgentVersion,
@@ -68,6 +79,7 @@ func (s *Server) viewServer(srv *store.Server) serverView {
 		CertExpires: srv.CertExpires, EnrollExpires: srv.EnrollExpires, CreatedAt: srv.CreatedAt,
 		PHPVersions: srv.PHPVersions, Isolated: srv.Isolated, Docker: srv.Docker,
 		DockerSecurity: srv.DockerSecurity, Restic: srv.Restic,
+		DetectedIPs: nonNil(srv.DetectedIPs), PublicIPs: nonNil(srv.PublicIPs), DNSIPs: dnsIPs,
 	}
 }
 
@@ -266,5 +278,46 @@ func (s *Server) handleDeleteServer(w http.ResponseWriter, r *http.Request, p *p
 	// reconnect; drop the live stream too.
 	s.agents.Disconnect(srv.ID)
 	s.audit(r, &p.user.ID, "server.deleted", map[string]any{"server_id": srv.ID, "name": srv.Name})
+	s.syncAutoDNS(r.Context())
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type publicIPsRequest struct {
+	IPs []string `json:"ips"`
+}
+
+// handleSetPublicIPs sets the addresses automatic DNS records use for a
+// server; an empty list goes back to the detected ones.
+func (s *Server) handleSetPublicIPs(w http.ResponseWriter, r *http.Request, p *principal) {
+	srv, ok := s.pathServer(w, r)
+	if !ok {
+		return
+	}
+	var req publicIPsRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.IPs) > 16 {
+		writeError(w, http.StatusUnprocessableEntity, "at most 16 addresses")
+		return
+	}
+	ips := []string{}
+	for _, v := range req.IPs {
+		a, err := netip.ParseAddr(strings.TrimSpace(v))
+		if err != nil || a.Zone() != "" || !a.Unmap().IsGlobalUnicast() && !a.Unmap().IsLoopback() {
+			writeError(w, http.StatusUnprocessableEntity, "invalid IP address "+strconv.Quote(v))
+			return
+		}
+		if s := a.Unmap().String(); !slices.Contains(ips, s) {
+			ips = append(ips, s)
+		}
+	}
+	if err := s.db.SetServerPublicIPs(r.Context(), srv.ID, ips); err != nil {
+		s.internalError(w, r, "set public addresses", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "server.public_ips_updated", map[string]any{"server_id": srv.ID, "ips": ips})
+	s.syncAutoDNS(r.Context())
+	srv.PublicIPs = ips
+	writeJSON(w, http.StatusOK, map[string]any{"server": s.viewServer(srv)})
 }

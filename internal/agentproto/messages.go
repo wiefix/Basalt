@@ -90,6 +90,9 @@ type Hello struct {
 	// disabled); DNSError says why it could not listen.
 	DNSPort  int    `json:"dns_port,omitempty"`
 	DNSError string `json:"dns_error,omitempty"`
+	// PublicIPs are the public addresses on the host's interfaces; the
+	// panel publishes them in automatic DNS records.
+	PublicIPs []string `json:"public_ips,omitempty"`
 }
 
 type Metrics struct {

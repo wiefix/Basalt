@@ -14,7 +14,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +24,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/auth"
+	"github.com/wiefix/basalt/internal/dns"
 	"github.com/wiefix/basalt/internal/docker"
 	"github.com/wiefix/basalt/internal/pki"
 	"github.com/wiefix/basalt/internal/store"
@@ -306,7 +309,7 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 			Distro: clean(m.Distro), AgentVersion: clean(m.AgentVersion),
 			CPUCount: max(0, m.CPUCount), MemTotal: m.MemTotal, LastIP: ip, LastSeen: &now,
 			PHPVersions: cleanVersions(m.PHPVersions), Isolated: m.Isolated, Docker: clean(m.Docker),
-			DockerSecurity: cleanSecurity(m.DockerSecurity),
+			DockerSecurity: cleanSecurity(m.DockerSecurity), DetectedIPs: cleanIPs(m.PublicIPs),
 		})
 	case agentproto.TypeMetrics:
 		var m agentproto.Metrics
@@ -459,4 +462,19 @@ func cleanSecurity(s *docker.Security) *docker.Security {
 		c.Seccomp = c.Seccomp[:64]
 	}
 	return &c
+}
+
+// cleanIPs keeps the public addresses an agent reported, normalized.
+func cleanIPs(list []string) []string {
+	out := []string{}
+	for _, v := range list {
+		a, err := netip.ParseAddr(v)
+		if err != nil || !dns.PublicAddr(a) || len(out) == 16 {
+			continue
+		}
+		if s := a.Unmap().String(); !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
 }

@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"strings"
 	"time"
 
+	"github.com/wiefix/basalt/internal/dns"
 	"github.com/wiefix/basalt/internal/docker"
 )
 
@@ -35,23 +37,54 @@ type Server struct {
 	// DockerSecurity is how the daemon isolates containers; nil if unknown.
 	DockerSecurity *docker.Security
 	Restic         string // restic version, "" if backups cannot run
-	CreatedAt      time.Time
+	// DetectedIPs are public addresses on the host's interfaces; PublicIPs
+	// are set by an admin and replace them when not empty.
+	DetectedIPs []string
+	PublicIPs   []string
+	CreatedAt   time.Time
+}
+
+// DNSAddrs are the addresses automatic DNS records point to: the ones an
+// admin set, else the public ones on the host, else the public address
+// the agent connects from (a server behind 1:1 NAT).
+func (s *Server) DNSAddrs() []netip.Addr {
+	parse := func(list []string) []netip.Addr {
+		var out []netip.Addr
+		for _, v := range list {
+			if a, err := netip.ParseAddr(v); err == nil {
+				out = append(out, a.Unmap())
+			}
+		}
+		return out
+	}
+	if len(s.PublicIPs) > 0 {
+		return parse(s.PublicIPs)
+	}
+	if len(s.DetectedIPs) > 0 {
+		return parse(s.DetectedIPs)
+	}
+	if a, err := netip.ParseAddr(s.LastIP); err == nil && dns.PublicAddr(a) {
+		return []netip.Addr{a.Unmap()}
+	}
+	return nil
 }
 
 var ErrNameTaken = errors.New("name already in use")
 
 const serverColumns = `id, name, enrolled_at IS NOT NULL, enroll_expires_at, COALESCE(cert_fp, ''),
 	COALESCE(prev_cert_fp, ''), cert_expires_at, hostname, os, arch, kernel, distro, agent_version,
-	cpu_count, mem_total, last_seen_at, last_ip, php_versions, isolated, docker, docker_security, restic, created_at`
+	cpu_count, mem_total, last_seen_at, last_ip, php_versions, isolated, docker, docker_security, restic,
+	detected_ips, public_ips, created_at`
 
 func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 	var s Server
 	var enrollExp, certExp, lastSeen sql.NullInt64
 	var created int64
-	var phpVersions, dockerSec string
+	var phpVersions, dockerSec, detected, public string
 	err := row.Scan(&s.ID, &s.Name, &s.Enrolled, &enrollExp, &s.CertFP, &s.PrevCertFP, &certExp,
 		&s.Hostname, &s.OS, &s.Arch, &s.Kernel, &s.Distro, &s.AgentVersion,
-		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &phpVersions, &s.Isolated, &s.Docker, &dockerSec, &s.Restic, &created)
+		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &phpVersions, &s.Isolated, &s.Docker, &dockerSec, &s.Restic,
+		&detected, &public, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -59,6 +92,12 @@ func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(phpVersions), &s.PHPVersions); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(detected), &s.DetectedIPs); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(public), &s.PublicIPs); err != nil {
 		return nil, err
 	}
 	if dockerSec != "" {
@@ -127,6 +166,10 @@ func (db *DB) UpdateServerHello(ctx context.Context, id int64, s Server) error {
 		s.PHPVersions = []string{}
 	}
 	php, _ := json.Marshal(s.PHPVersions)
+	if s.DetectedIPs == nil {
+		s.DetectedIPs = []string{}
+	}
+	detected, _ := json.Marshal(s.DetectedIPs)
 	sec := ""
 	if s.DockerSecurity != nil {
 		b, _ := json.Marshal(s.DockerSecurity)
@@ -135,9 +178,19 @@ func (db *DB) UpdateServerHello(ctx context.Context, id int64, s Server) error {
 	return db.execOne(ctx,
 		`UPDATE servers SET hostname = ?, os = ?, arch = ?, kernel = ?, distro = ?, agent_version = ?,
 		 cpu_count = ?, mem_total = ?, last_ip = ?, last_seen_at = ?, php_versions = ?, isolated = ?, docker = ?,
-		 docker_security = ? WHERE id = ?`,
+		 docker_security = ?, detected_ips = ? WHERE id = ?`,
 		s.Hostname, s.OS, s.Arch, s.Kernel, s.Distro, s.AgentVersion, s.CPUCount, s.MemTotal,
-		s.LastIP, s.LastSeen.Unix(), string(php), s.Isolated, s.Docker, sec, id)
+		s.LastIP, s.LastSeen.Unix(), string(php), s.Isolated, s.Docker, sec, string(detected), id)
+}
+
+// SetServerPublicIPs sets the addresses automatic DNS records use for the
+// server (empty: the detected ones).
+func (db *DB) SetServerPublicIPs(ctx context.Context, id int64, ips []string) error {
+	if ips == nil {
+		ips = []string{}
+	}
+	b, _ := json.Marshal(ips)
+	return db.execOne(ctx, `UPDATE servers SET public_ips = ? WHERE id = ?`, string(b), id)
 }
 
 func (db *DB) ServerByID(ctx context.Context, id int64) (*Server, error) {

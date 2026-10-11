@@ -181,8 +181,12 @@ export function ServerPage({ user }: { user: User }) {
               )}
               <dt>Agent version</dt>
               <dd className="mono">{s.agent_version || "—"}</dd>
-              <dt>Address</dt>
+              <dt>Connects from</dt>
               <dd className="mono">{s.last_ip || "—"}</dd>
+              <dt>Public addresses</dt>
+              <dd>
+                <PublicIPs server={s} canEdit={can(user, "admin")} />
+              </dd>
               <dt>Certificate</dt>
               <dd>renews automatically · expires {formatDate(s.cert_expires)}</dd>
               <dt>Added</dt>
@@ -192,6 +196,79 @@ export function ServerPage({ user }: { user: User }) {
 
           <RoutesCard serverId={id} user={user} />
         </>
+      )}
+    </div>
+  );
+}
+
+// PublicIPs shows (and lets admins set) the addresses automatic DNS
+// records point to.
+function PublicIPs({ server, canEdit }: { server: Server; canEdit: boolean }) {
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState("");
+  const save = useMutation({
+    mutationFn: () => api.setPublicIPs(server.id, text.split(/[\s,]+/).filter(Boolean)),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["server", server.id] });
+      setEditing(false);
+    },
+  });
+  const source =
+    server.public_ips.length > 0
+      ? "set by an admin"
+      : server.detected_ips.length > 0
+        ? "found on the server"
+        : server.dns_ips.length > 0
+          ? "the address it connects from"
+          : "";
+  return (
+    <div className="stack" style={{ gap: 6 }}>
+      <div className="row wrap">
+        {server.dns_ips.length ? (
+          server.dns_ips.map((ip) => (
+            <code key={ip}>{ip}</code>
+          ))
+        ) : (
+          <span className="muted">none known: automatic DNS records are not created for this server</span>
+        )}
+        {source && <span className="faint small">{source}</span>}
+        {canEdit && !editing && (
+          <button
+            className="btn sm ghost"
+            onClick={() => {
+              setText(server.public_ips.join("\n"));
+              setEditing(true);
+            }}
+          >
+            <Icon name="edit" size={14} /> Change
+          </button>
+        )}
+      </div>
+      {editing && (
+        <form
+          className="stack"
+          style={{ gap: 6 }}
+          onSubmit={(e: FormEvent) => {
+            e.preventDefault();
+            save.mutate();
+          }}
+        >
+          <ErrorBox error={save.error} />
+          <textarea className="input mono" rows={2} value={text} onChange={(e) => setText(e.target.value)} placeholder="203.0.113.10" autoFocus />
+          <div className="faint small">
+            Used for the A/AAAA records of sites and apps on this server whose domains are in your DNS zones. Leave empty
+            to use the public addresses found on the server{server.detected_ips.length ? ` (${server.detected_ips.join(", ")})` : ""}.
+          </div>
+          <div className="row">
+            <button className="btn sm primary" disabled={save.isPending}>
+              Save
+            </button>
+            <button type="button" className="btn sm" onClick={() => setEditing(false)}>
+              Cancel
+            </button>
+          </div>
+        </form>
       )}
     </div>
   );

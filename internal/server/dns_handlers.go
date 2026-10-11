@@ -75,6 +75,34 @@ func (s *Server) PushDNS(ctx context.Context, serverID int64) {
 	}
 }
 
+// syncAutoDNS brings the serials of zones in line with their automatic
+// records and, when any changed, sends the zones to every agent.
+func (s *Server) syncAutoDNS(ctx context.Context) {
+	changed, err := s.db.SyncAutoDNS(ctx, s.now())
+	if err != nil {
+		s.log.Error("sync automatic dns records", "err", err)
+		return
+	}
+	if changed {
+		s.pushDNSAll(ctx)
+	}
+}
+
+// dnsLoop catches changes no handler announces, such as a server reporting
+// new addresses when it reconnects.
+func (s *Server) dnsLoop(ctx context.Context) {
+	t := time.NewTicker(15 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.syncAutoDNS(ctx)
+		}
+	}
+}
+
 // pushDNSAll sends the zones to every connected agent, in parallel.
 func (s *Server) pushDNSAll(ctx context.Context) {
 	servers, err := s.db.DNSServers(ctx)
@@ -195,6 +223,7 @@ func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request, p *pri
 		return
 	}
 	s.audit(r, &p.user.ID, "dns_zone.created", map[string]any{"zone_id": z.ID, "name": z.Name})
+	s.syncAutoDNS(r.Context())
 	s.pushDNSAll(r.Context())
 	writeJSON(w, http.StatusCreated, map[string]any{"zone": viewDNSZone(z)})
 }
@@ -229,7 +258,15 @@ func (s *Server) handleGetZone(w http.ResponseWriter, r *http.Request, p *princi
 	for i, rec := range recs {
 		out[i] = dnsRecordView{ID: rec.ID, Record: rec.Record}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"zone": viewDNSZone(z), "records": out, "types": dns.Types})
+	auto, err := s.db.DNSZoneAuto(r.Context(), z.ID)
+	if err != nil {
+		s.internalError(w, r, "list automatic dns records", err)
+		return
+	}
+	if auto == nil {
+		auto = []dns.AutoRecord{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"zone": viewDNSZone(z), "records": out, "auto": auto, "types": dns.Types})
 }
 
 func (s *Server) handleDeleteZone(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -242,6 +279,7 @@ func (s *Server) handleDeleteZone(w http.ResponseWriter, r *http.Request, p *pri
 		return
 	}
 	s.audit(r, &p.user.ID, "dns_zone.deleted", map[string]any{"zone_id": z.ID, "name": z.Name})
+	s.syncAutoDNS(r.Context())
 	s.pushDNSAll(r.Context())
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -279,6 +317,7 @@ func (s *Server) handlePutRecord(w http.ResponseWriter, r *http.Request, p *prin
 	}
 	s.audit(r, &p.user.ID, event, map[string]any{"zone_id": z.ID, "zone": z.Name, "record_id": out.ID,
 		"name": rec.Name, "type": rec.Type, "value": rec.Value})
+	s.syncAutoDNS(r.Context())
 	s.pushDNSAll(r.Context())
 	writeJSON(w, status, map[string]any{"record": dnsRecordView{ID: out.ID, Record: out.Record}})
 }
@@ -298,6 +337,7 @@ func (s *Server) handleDeleteRecord(w http.ResponseWriter, r *http.Request, p *p
 		return
 	}
 	s.audit(r, &p.user.ID, "dns_record.deleted", map[string]any{"zone_id": z.ID, "zone": z.Name, "record_id": id})
+	s.syncAutoDNS(r.Context())
 	s.pushDNSAll(r.Context())
 	w.WriteHeader(http.StatusNoContent)
 }
