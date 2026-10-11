@@ -184,6 +184,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleAdmin, s.handleCreateSFTPUser))
 	mux.Handle("DELETE /api/v1/sites/{id}/sftp-users/{uid}", s.requireRole(store.RoleAdmin, s.handleDeleteSFTPUser))
 
+	mux.Handle("GET /api/v1/dns", s.requireRole(store.RoleViewer, s.handleDNSOverview))
+	mux.Handle("PUT /api/v1/dns/nameservers", s.requireRole(store.RoleAdmin, s.handleSetNameservers))
+	mux.Handle("POST /api/v1/dns/zones", s.requireRole(store.RoleAdmin, s.handleCreateZone))
+	mux.Handle("GET /api/v1/dns/zones/{id}", s.requireRole(store.RoleViewer, s.handleGetZone))
+	mux.Handle("DELETE /api/v1/dns/zones/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteZone))
+	mux.Handle("POST /api/v1/dns/zones/{id}/records", s.requireRole(store.RoleAdmin, s.handlePutRecord))
+	mux.Handle("PUT /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handlePutRecord))
+	mux.Handle("DELETE /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handleDeleteRecord))
+
 	mux.Handle("GET /api/v1/registries", s.requireRole(store.RoleAdmin, s.handleListRegistries))
 	mux.Handle("POST /api/v1/registries", s.requireRole(store.RoleAdmin, s.handleCreateRegistry))
 	mux.Handle("PUT /api/v1/registries/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateRegistry))

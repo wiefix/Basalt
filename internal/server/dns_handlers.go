@@ -1,0 +1,318 @@
+package server
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/dns"
+	"github.com/wiefix/basalt/internal/store"
+)
+
+type dnsZoneView struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Serial    uint32    `json:"serial"`
+	Records   int       `json:"records"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func viewDNSZone(z *store.DNSZone) dnsZoneView {
+	return dnsZoneView{ID: z.ID, Name: z.Name, Serial: z.Serial, Records: z.Records, CreatedAt: z.CreatedAt, UpdatedAt: z.UpdatedAt}
+}
+
+type dnsRecordView struct {
+	ID int64 `json:"id"`
+	dns.Record
+}
+
+type dnsServerView struct {
+	ServerID int64  `json:"server_id"`
+	Name     string `json:"name"`
+	Online   bool   `json:"online"`
+	// Port is the DNS port (0: this server does not serve DNS).
+	Port        int    `json:"port"`
+	ListenError string `json:"listen_error,omitempty"`
+	IP          string `json:"ip,omitempty"`
+	InSync      bool   `json:"in_sync"`
+	Error       string `json:"error,omitempty"`
+}
+
+// invalidZone marks a validation failure (422), as opposed to a store error.
+type invalidZone struct{ error }
+
+func checkZone(z *dns.Zone) error {
+	if err := z.Validate(); err != nil {
+		return invalidZone{err}
+	}
+	return nil
+}
+
+// PushDNS sends all zones to one agent and records the outcome.
+func (s *Server) PushDNS(ctx context.Context, serverID int64) {
+	if !s.agents.Connected(serverID) {
+		return
+	}
+	rev, zones, err := s.db.DesiredDNS(ctx)
+	if err != nil {
+		s.log.Error("build desired dns state", "err", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	applyErr := ""
+	if err := s.agents.Call(ctx, serverID, agentproto.TypeDNSApply, agentproto.DNSApply{Revision: rev, Zones: zones}, nil); err != nil {
+		applyErr = err.Error()
+		s.log.Warn("dns apply failed", "server_id", serverID, "revision", rev, "err", err)
+	}
+	if err := s.db.SetDNSStatus(context.WithoutCancel(ctx), serverID, rev, applyErr); err != nil {
+		s.log.Error("record dns status", "err", err)
+	}
+}
+
+// pushDNSAll sends the zones to every connected agent, in parallel.
+func (s *Server) pushDNSAll(ctx context.Context) {
+	servers, err := s.db.DNSServers(ctx)
+	if err != nil {
+		s.log.Error("list servers for dns push", "err", err)
+		return
+	}
+	var wg sync.WaitGroup
+	for _, srv := range servers {
+		wg.Go(func() { s.PushDNS(ctx, srv.ServerID) })
+	}
+	wg.Wait()
+}
+
+func (s *Server) handleDNSOverview(w http.ResponseWriter, r *http.Request, p *principal) {
+	ctx := r.Context()
+	zones, err := s.db.DNSZones(ctx)
+	if err != nil {
+		s.internalError(w, r, "list dns zones", err)
+		return
+	}
+	ns, err := s.db.DNSNameservers(ctx)
+	if err != nil {
+		s.internalError(w, r, "load nameservers", err)
+		return
+	}
+	rev, _, err := s.db.DesiredDNS(ctx)
+	if err != nil {
+		s.internalError(w, r, "load dns revision", err)
+		return
+	}
+	servers, err := s.db.DNSServers(ctx)
+	if err != nil {
+		s.internalError(w, r, "list dns servers", err)
+		return
+	}
+	zv := make([]dnsZoneView, len(zones))
+	for i, z := range zones {
+		zv[i] = viewDNSZone(z)
+	}
+	sv := make([]dnsServerView, len(servers))
+	for i, st := range servers {
+		sv[i] = dnsServerView{ServerID: st.ServerID, Name: st.Name, Online: s.agents.Connected(st.ServerID),
+			Port: st.Port, ListenError: st.ListenError, IP: st.LastIP,
+			InSync: st.AppliedRevision >= rev, Error: st.Error}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"zones": zv, "nameservers": ns, "servers": sv})
+}
+
+type nameserversRequest struct {
+	Nameservers []string `json:"nameservers"`
+}
+
+// handleSetNameservers sets the host names new zones get NS records for.
+func (s *Server) handleSetNameservers(w http.ResponseWriter, r *http.Request, p *principal) {
+	var req nameserversRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if len(req.Nameservers) > dns.MaxNameservers {
+		writeError(w, http.StatusUnprocessableEntity, "at most 8 nameservers")
+		return
+	}
+	hosts := []string{}
+	for _, h := range req.Nameservers {
+		rec := dns.Record{Name: "@", Type: dns.TypeNS, Value: h}
+		rec.Normalize()
+		if err := rec.Validate("example.com"); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, "nameserver "+strconv.Quote(h)+": "+err.Error())
+			return
+		}
+		hosts = append(hosts, rec.Value)
+	}
+	if err := s.db.SetDNSNameservers(r.Context(), hosts); err != nil {
+		s.internalError(w, r, "save nameservers", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "dns.nameservers_updated", map[string]any{"nameservers": hosts})
+	writeJSON(w, http.StatusOK, map[string]any{"nameservers": hosts})
+}
+
+type createZoneRequest struct {
+	Name string `json:"name"`
+}
+
+func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request, p *principal) {
+	var req createZoneRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	name := dns.NormalizeZoneName(req.Name)
+	if err := dns.ValidateZoneName(name); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	ns, err := s.db.DNSNameservers(r.Context())
+	if err != nil {
+		s.internalError(w, r, "load nameservers", err)
+		return
+	}
+	records := []dns.Record{}
+	for _, h := range ns {
+		rec := dns.Record{Name: "@", Type: dns.TypeNS, Value: h, TTL: 86400}
+		rec.Normalize()
+		records = append(records, rec)
+	}
+	z, err := s.db.CreateDNSZone(r.Context(), name, records, checkZone, s.now())
+	var invalid invalidZone
+	switch {
+	case errors.Is(err, store.ErrNameTaken):
+		writeError(w, http.StatusConflict, "this zone already exists")
+		return
+	case errors.As(err, &invalid):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	case err != nil:
+		s.internalError(w, r, "create dns zone", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "dns_zone.created", map[string]any{"zone_id": z.ID, "name": z.Name})
+	s.pushDNSAll(r.Context())
+	writeJSON(w, http.StatusCreated, map[string]any{"zone": viewDNSZone(z)})
+}
+
+func (s *Server) pathZone(w http.ResponseWriter, r *http.Request) (*store.DNSZone, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err == nil {
+		z, err := s.db.DNSZone(r.Context(), id)
+		if err == nil {
+			return z, true
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			s.internalError(w, r, "load dns zone", err)
+			return nil, false
+		}
+	}
+	writeError(w, http.StatusNotFound, "zone not found")
+	return nil, false
+}
+
+func (s *Server) handleGetZone(w http.ResponseWriter, r *http.Request, p *principal) {
+	z, ok := s.pathZone(w, r)
+	if !ok {
+		return
+	}
+	recs, err := s.db.DNSRecords(r.Context(), z.ID)
+	if err != nil {
+		s.internalError(w, r, "list dns records", err)
+		return
+	}
+	out := make([]dnsRecordView, len(recs))
+	for i, rec := range recs {
+		out[i] = dnsRecordView{ID: rec.ID, Record: rec.Record}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"zone": viewDNSZone(z), "records": out, "types": dns.Types})
+}
+
+func (s *Server) handleDeleteZone(w http.ResponseWriter, r *http.Request, p *principal) {
+	z, ok := s.pathZone(w, r)
+	if !ok {
+		return
+	}
+	if err := s.db.DeleteDNSZone(r.Context(), z.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.internalError(w, r, "delete dns zone", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "dns_zone.deleted", map[string]any{"zone_id": z.ID, "name": z.Name})
+	s.pushDNSAll(r.Context())
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handlePutRecord creates a record (POST) or replaces one (PUT …/{rid}).
+func (s *Server) handlePutRecord(w http.ResponseWriter, r *http.Request, p *principal) {
+	z, ok := s.pathZone(w, r)
+	if !ok {
+		return
+	}
+	var id int64
+	if v := r.PathValue("rid"); v != "" {
+		var err error
+		if id, err = strconv.ParseInt(v, 10, 64); err != nil || id <= 0 {
+			writeError(w, http.StatusNotFound, "record not found")
+			return
+		}
+	}
+	var rec dns.Record
+	if !decodeJSON(w, r, &rec) {
+		return
+	}
+	rec.Normalize()
+	if err := rec.Validate(z.Name); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	out, err := s.db.PutDNSRecord(r.Context(), z.ID, id, &rec, checkZone, s.now())
+	if s.recordError(w, r, err) {
+		return
+	}
+	event, status := "dns_record.created", http.StatusCreated
+	if id != 0 {
+		event, status = "dns_record.updated", http.StatusOK
+	}
+	s.audit(r, &p.user.ID, event, map[string]any{"zone_id": z.ID, "zone": z.Name, "record_id": out.ID,
+		"name": rec.Name, "type": rec.Type, "value": rec.Value})
+	s.pushDNSAll(r.Context())
+	writeJSON(w, status, map[string]any{"record": dnsRecordView{ID: out.ID, Record: out.Record}})
+}
+
+func (s *Server) handleDeleteRecord(w http.ResponseWriter, r *http.Request, p *principal) {
+	z, ok := s.pathZone(w, r)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("rid"), 10, 64)
+	if err != nil || id <= 0 {
+		writeError(w, http.StatusNotFound, "record not found")
+		return
+	}
+	_, err = s.db.PutDNSRecord(r.Context(), z.ID, id, nil, checkZone, s.now())
+	if s.recordError(w, r, err) {
+		return
+	}
+	s.audit(r, &p.user.ID, "dns_record.deleted", map[string]any{"zone_id": z.ID, "zone": z.Name, "record_id": id})
+	s.pushDNSAll(r.Context())
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) recordError(w http.ResponseWriter, r *http.Request, err error) bool {
+	var invalid invalidZone
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "record not found")
+	case errors.As(err, &invalid):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	default:
+		s.internalError(w, r, "save dns record", err)
+	}
+	return true
+}

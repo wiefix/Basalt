@@ -9,6 +9,7 @@ require (
 	github.com/caddyserver/caddy/v2 v2.11.7
 	github.com/compose-spec/compose-go/v2 v2.16.1
 	github.com/go-sql-driver/mysql v1.10.1
+	github.com/miekg/dns v1.1.73
 	github.com/pkg/sftp v1.13.11
 	github.com/sirupsen/logrus v1.10.2
 	golang.org/x/crypto v0.57.0
@@ -93,7 +94,6 @@ require (
 	github.com/mattn/go-shellwords v1.0.12 // indirect
 	github.com/mgutz/ansi v0.0.0-20200706080929-d51e80ef957d // indirect
 	github.com/mholt/acmez/v3 v3.1.7 // indirect
-	github.com/miekg/dns v1.1.73 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect

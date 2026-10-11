@@ -46,7 +46,11 @@ func startHostWith(t *testing.T, p *panel, dockerSocket string, configure ...fun
 	proxyDone := make(chan error, 1)
 	go func() { proxyDone <- caddyrun.Run(ctx, proxyDir, quiet) }()
 
-	created := p.call(http.StatusCreated, "POST", "/api/v1/servers", map[string]string{"name": "web"})
+	name := "web"
+	if n := len(p.call(http.StatusOK, "GET", "/api/v1/servers", nil)["servers"].([]any)); n > 0 {
+		name += "-" + strconv.Itoa(n+1)
+	}
+	created := p.call(http.StatusCreated, "POST", "/api/v1/servers", map[string]string{"name": name})
 	id := jsonID(created["server"].(map[string]any)["id"])
 	agentDir, sitesRoot := t.TempDir(), t.TempDir()
 	if _, err := agent.Enroll(ctx, agent.EnrollOptions{

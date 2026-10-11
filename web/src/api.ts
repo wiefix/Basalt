@@ -350,6 +350,41 @@ export interface Registry {
   updated_at: string;
 }
 
+export interface DNSZone {
+  id: number;
+  name: string;
+  serial: number;
+  records: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DNSRecord {
+  id: number;
+  name: string;
+  type: string;
+  ttl: number;
+  value: string;
+  priority?: number;
+  weight?: number;
+  port?: number;
+  flags?: number;
+  tag?: string;
+}
+
+export type DNSRecordInput = Omit<DNSRecord, "id">;
+
+export interface DNSServer {
+  server_id: number;
+  name: string;
+  online: boolean;
+  port: number;
+  listen_error?: string;
+  ip?: string;
+  in_sync: boolean;
+  error?: string;
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -471,6 +506,16 @@ export const api = {
   updateRegistry: (id: number, b: { username: string; password: string }) =>
     put<{ registry: Registry }>(`/api/v1/registries/${id}`, b),
   deleteRegistry: (id: number) => del<void>(`/api/v1/registries/${id}`),
+
+  dns: () => get<{ zones: DNSZone[]; nameservers: string[]; servers: DNSServer[] }>("/api/v1/dns"),
+  setNameservers: (nameservers: string[]) => put<{ nameservers: string[] }>("/api/v1/dns/nameservers", { nameservers }),
+  createZone: (name: string) => post<{ zone: DNSZone }>("/api/v1/dns/zones", { name }),
+  zone: (id: number) => get<{ zone: DNSZone; records: DNSRecord[]; types: string[] }>(`/api/v1/dns/zones/${id}`),
+  deleteZone: (id: number) => del<void>(`/api/v1/dns/zones/${id}`),
+  createRecord: (zoneId: number, r: DNSRecordInput) => post<{ record: DNSRecord }>(`/api/v1/dns/zones/${zoneId}/records`, r),
+  updateRecord: (zoneId: number, id: number, r: DNSRecordInput) =>
+    put<{ record: DNSRecord }>(`/api/v1/dns/zones/${zoneId}/records/${id}`, r),
+  deleteRecord: (zoneId: number, id: number) => del<void>(`/api/v1/dns/zones/${zoneId}/records/${id}`),
 
   apps: () => get<{ apps: App[] }>("/api/v1/apps"),
   app: (id: number) => get<{ app: App; sync: Sync }>(`/api/v1/apps/${id}`),

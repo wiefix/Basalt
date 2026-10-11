@@ -45,6 +45,9 @@ type Config struct {
 	ACMEDirectory string
 	// SFTPListen is the SFTP server address; empty disables SFTP.
 	SFTPListen string
+	// DNSListen is the authoritative DNS address (UDP and TCP); empty
+	// disables DNS.
+	DNSListen string
 	// Isolate runs each site as its own system user (Linux, root only).
 	Isolate bool
 	// WWWGroup is the group shared by site directories and the proxy.
@@ -75,6 +78,7 @@ type Agent struct {
 	proxy   *proxyManager
 	sites   *sitesManager
 	sftp    *sftpManager
+	dns     *dnsManager
 	apps    *appsManager
 	backups *backupManager
 	mysql   string
@@ -120,6 +124,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		dir: cfg.DataDir, log: log, id: id,
 		sites:           sites,
 		sftp:            sftp,
+		dns:             newDNSManager(cfg, log.With("subsystem", "dns")),
 		apps:            apps,
 		backups:         backups,
 		mysql:           cfg.MySQLSocket,
@@ -146,6 +151,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.proxy.run(ctx)
 	go a.sites.janitor(ctx)
 	go a.sftp.run(ctx)
+	go a.dns.run(ctx)
 	go a.apps.run(ctx)
 
 	backoff := minBackoff
@@ -227,6 +233,7 @@ func (a *Agent) session(ctx context.Context) error {
 	hello.MariaDB = a.mariadbVersion(ctx)
 	hello.Docker, hello.DockerSecurity = a.dockerVersion(ctx)
 	hello.Restic = a.backups.Version(ctx)
+	hello.DNSPort, hello.DNSError = a.dns.Status()
 	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
 		return err
 	}
@@ -265,6 +272,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return struct{}{}, a.sftp.Apply(st)
+	case agentproto.TypeDNSApply:
+		var st agentproto.DNSApply
+		if err := json.Unmarshal(payload, &st); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.dns.Apply(st)
 	case agentproto.TypeDatabase:
 		var req agentproto.DatabaseRequest
 		if err := json.Unmarshal(payload, &req); err != nil {

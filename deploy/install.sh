@@ -1,7 +1,7 @@
 #!/bin/sh
 # Basalt installer for Debian and Ubuntu (amd64, arm64).
 #
-#   Panel host:  sh install.sh panel [--domain panel.example.com] [--binary ./basalt] [--with-php] [--with-mariadb] [--with-docker]
+#   Panel host:  sh install.sh panel [--domain panel.example.com] [--binary ./basalt] [--with-php] [--with-mariadb] [--with-docker] [--with-dns]
 #   New server:  the one-line command shown in the panel ("Add server"), which runs
 #                sh install.sh agent --panel https://HOST:8443 --token TOKEN --ca-sha256 FINGERPRINT
 #
@@ -9,6 +9,8 @@
 #   is an unprivileged user on the host) when it installs Docker; for an
 #   existing Docker, --docker-userns turns them on (its current images and
 #   containers are hidden until turned off), --no-docker-userns leaves them off.
+#   --with-dns makes this server an authoritative nameserver (port 53, UDP
+#   and TCP); --no-dns turns that off again.
 #
 # Running it again upgrades the binary and restarts the services; existing
 # data and enrollment are kept.
@@ -27,14 +29,14 @@ say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
-	sed -n '2,15p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
+	sed -n '2,17p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
 	exit 2
 }
 
 MODE=${1:-}
 [ -n "$MODE" ] || usage
 shift
-DOMAIN="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0 USERNS=auto
+DOMAIN="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0 USERNS=auto WITH_DNS=keep
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--domain) DOMAIN=$2; shift 2 ;;
@@ -45,6 +47,8 @@ while [ $# -gt 0 ]; do
 	--with-php) WITH_PHP=1; shift ;;
 	--with-mariadb) WITH_DB=1; shift ;;
 	--with-docker) WITH_DOCKER=1; shift ;;
+	--with-dns) WITH_DNS=1; shift ;;
+	--no-dns) WITH_DNS=0; shift ;;
 	--docker-userns) USERNS=on; shift ;;
 	--no-docker-userns) USERNS=off; shift ;;
 	-h | --help) usage ;;
@@ -293,8 +297,14 @@ $HARDEN
 WantedBy=multi-user.target
 EOF
 
-PANEL_FLAGS=""
-[ "$MODE" = panel ] && PANEL_FLAGS="--panel-domain $ADDR --panel-upstream 127.0.0.1:8080"
+AGENT_FLAGS=""
+[ "$MODE" = panel ] && AGENT_FLAGS="--panel-domain $ADDR --panel-upstream 127.0.0.1:8080"
+# An upgrade keeps DNS as it was unless --with-dns or --no-dns says otherwise.
+if [ "$WITH_DNS" = keep ]; then
+	WITH_DNS=0
+	grep -q -- '--dns-listen' "$UNITS/basalt-agent.service" 2>/dev/null && WITH_DNS=1
+fi
+[ "$WITH_DNS" -eq 1 ] && AGENT_FLAGS="$AGENT_FLAGS --dns-listen :53"
 cat >"$UNITS/basalt-agent.service" <<EOF
 [Unit]
 Description=Basalt agent
@@ -303,7 +313,7 @@ Wants=network-online.target basalt-proxy.service
 
 [Service]
 Environment=HOME=$LIB/agent
-ExecStart=$BIN agent --data-dir $LIB/agent --proxy-dir $LIB/proxy --sites-root $SITES --proxy-user basalt-proxy $PANEL_FLAGS --log-format json
+ExecStart=$BIN agent --data-dir $LIB/agent --proxy-dir $LIB/proxy --sites-root $SITES --proxy-user basalt-proxy $AGENT_FLAGS --log-format json
 Restart=always
 RestartSec=2
 RuntimeDirectory=basalt

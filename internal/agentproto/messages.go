@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/wiefix/basalt/internal/dns"
 	"github.com/wiefix/basalt/internal/docker"
 	"github.com/wiefix/basalt/internal/files"
 	"github.com/wiefix/basalt/internal/proxy"
@@ -30,6 +31,7 @@ const (
 	TypeSiteDelete = "site_delete"
 	TypeFiles      = "files"
 	TypeSFTPApply  = "sftp_apply"
+	TypeDNSApply   = "dns_apply"
 	TypeDatabase   = "database"
 	TypeAppDeploy  = "app_deploy" // streams LogChunk frames when asked to
 	TypeAppDelete  = "app_delete"
@@ -84,6 +86,10 @@ type Hello struct {
 	DockerSecurity *docker.Security `json:"docker_security,omitempty"`
 	// Restic is the version of restic backups run with ("" if absent).
 	Restic string `json:"restic,omitempty"`
+	// DNSPort is the port the authoritative DNS server listens on (0:
+	// disabled); DNSError says why it could not listen.
+	DNSPort  int    `json:"dns_port,omitempty"`
+	DNSError string `json:"dns_error,omitempty"`
 }
 
 type Metrics struct {
@@ -184,6 +190,13 @@ type FilesResponse struct {
 type SFTPApply struct {
 	Revision int64        `json:"revision"`
 	Users    []sftpd.User `json:"users"`
+}
+
+// DNSApply is the complete set of DNS zones. Every agent keeps them; the
+// ones with a DNS listener serve them.
+type DNSApply struct {
+	Revision int64      `json:"revision"`
+	Zones    []dns.Zone `json:"zones"`
 }
 
 // Database operations.

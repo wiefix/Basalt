@@ -234,6 +234,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		HTTPSPort:     cfg.HTTPSPort,
 		ACMEDirectory: cfg.ACMEDirectory,
 		SFTPListen:    cfg.SFTPListen,
+		DNSListen:     cfg.DNSListen,
 		Isolate:       cfg.Isolate == "on" || (cfg.Isolate == "auto" && runtime.GOOS == "linux" && os.Geteuid() == 0),
 		ProxyUser:     cfg.ProxyUser,
 		MySQLSocket:   cfg.MySQLSocket,

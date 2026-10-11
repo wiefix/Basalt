@@ -40,7 +40,7 @@ $API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; [print(
 
 echo "### add node1 with the one-line command from the panel"
 CMD=$($API -d '{"name":"node1"}' http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print(json.load(sys.stdin)["enrollment"]["install_command"])')
-docker exec basalt-node1 sh -c "$CMD --with-php --with-mariadb --with-docker"
+docker exec basalt-node1 sh -c "$CMD --with-php --with-mariadb --with-docker --with-dns"
 docker exec basalt-node1 systemctl is-active basalt-proxy basalt-agent
 docker exec basalt-node1 sh -c 'git --version && docker buildx version | cut -d" " -f1-2' 
 docker exec basalt-node1 ps -o user=,comm= -C basalt | sort | uniq -c
@@ -83,6 +83,15 @@ for i in $(seq 30); do
   docker exec basalt-panel curl -sk --resolve who.test:443:$NODEIP https://who.test/ | grep -q basalt-on-node1 && break; sleep 1
 done
 docker exec basalt-panel curl -sk --resolve who.test:443:$NODEIP https://who.test/ | grep -E "^(Name|IP: 172)"
+echo "### node1 serves DNS (--with-dns), zones from the panel"
+ZONE=$($API -d '{"name":"zone.test"}' http://127.0.0.1:8080/api/v1/dns/zones | python3 -c 'import sys,json; print(json.load(sys.stdin)["zone"]["id"])')
+$API -d '{"name":"www","type":"A","value":"192.0.2.44"}' http://127.0.0.1:8080/api/v1/dns/zones/$ZONE/records >/dev/null
+for i in $(seq 30); do
+  [ "$(docker exec basalt-panel dig +short @$NODEIP www.zone.test A)" = 192.0.2.44 ] && break; sleep 1
+done
+docker exec basalt-panel dig +noall +answer @$NODEIP www.zone.test A
+[ "$(docker exec basalt-panel dig +short +tcp @$NODEIP www.zone.test A)" = 192.0.2.44 ] || { echo "no DNS answer from node1"; exit 1; }
+docker exec basalt-panel dig +noall +comments @$NODEIP example.com A | grep -q "status: REFUSED" || { echo "node1 answered for a foreign zone"; exit 1; }
 echo "### panel backup, then recovery from it"
 ST=$($API -d '{"name":"local","kind":"local","path":"/var/backups/basalt"}' http://127.0.0.1:8080/api/v1/backup-storages | python3 -c 'import sys,json; print(json.load(sys.stdin)["storage"]["id"])')
 $API -X PUT -d "{\"storage_id\":$ST,\"schedule\":\"daily\",\"at_minute\":0,\"keep_last\":3}" http://127.0.0.1:8080/api/v1/panel-backup/policy >/dev/null

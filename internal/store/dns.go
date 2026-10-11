@@ -1,0 +1,381 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/wiefix/basalt/internal/dns"
+)
+
+const (
+	settingDNSRevision    = "dns_revision"
+	settingDNSNameservers = "dns_nameservers"
+)
+
+type DNSZone struct {
+	ID        int64
+	Name      string
+	Serial    uint32
+	Records   int
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+type DNSRecord struct {
+	ID     int64
+	ZoneID int64
+	dns.Record
+	CreatedAt time.Time
+}
+
+// DNSCheck validates the records a zone would hold after a change.
+type DNSCheck func(z *dns.Zone) error
+
+// nextSerial is the zone serial after a change: today's YYYYMMDD00, or
+// one more than the current serial if that is already higher.
+func nextSerial(cur uint32, now time.Time) uint32 {
+	d, _ := strconv.ParseUint(now.UTC().Format("20060102")+"00", 10, 32)
+	return max(cur+1, uint32(d))
+}
+
+func bumpDNSRevision(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx,
+		`INSERT INTO settings (key, value) VALUES (?, '1')
+		 ON CONFLICT (key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT), updated_at = unixepoch()`,
+		settingDNSRevision)
+	return err
+}
+
+func (db *DB) CreateDNSZone(ctx context.Context, name string, records []dns.Record, check DNSCheck, now time.Time) (*DNSZone, error) {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	z := &DNSZone{Name: name, Serial: nextSerial(0, now), Records: len(records)}
+	if err := check(&dns.Zone{Name: name, Serial: z.Serial, Records: records}); err != nil {
+		return nil, err
+	}
+	var created int64
+	err = tx.QueryRowContext(ctx,
+		`INSERT INTO dns_zones (name, serial, created_at, updated_at) VALUES (?, ?, ?, ?) RETURNING id, created_at`,
+		name, z.Serial, now.Unix(), now.Unix()).Scan(&z.ID, &created)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: dns_zones.name") {
+			return nil, ErrNameTaken
+		}
+		return nil, err
+	}
+	z.CreatedAt, z.UpdatedAt = time.Unix(created, 0), time.Unix(created, 0)
+	for i := range records {
+		if _, err := insertDNSRecord(ctx, tx, z.ID, &records[i], now); err != nil {
+			return nil, err
+		}
+	}
+	if err := bumpDNSRevision(ctx, tx); err != nil {
+		return nil, err
+	}
+	return z, tx.Commit()
+}
+
+func insertDNSRecord(ctx context.Context, tx *sql.Tx, zoneID int64, r *dns.Record, now time.Time) (int64, error) {
+	var id int64
+	err := tx.QueryRowContext(ctx,
+		`INSERT INTO dns_records (zone_id, name, type, ttl, value, priority, weight, port, flags, tag, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		zoneID, r.Name, r.Type, r.TTL, r.Value, r.Priority, r.Weight, r.Port, r.Flags, r.Tag, now.Unix()).Scan(&id)
+	return id, err
+}
+
+const dnsZoneColumns = `z.id, z.name, z.serial, z.created_at, z.updated_at,
+	(SELECT COUNT(*) FROM dns_records r WHERE r.zone_id = z.id)`
+
+func scanDNSZone(row interface{ Scan(...any) error }) (*DNSZone, error) {
+	var z DNSZone
+	var created, updated int64
+	if err := row.Scan(&z.ID, &z.Name, &z.Serial, &created, &updated, &z.Records); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	z.CreatedAt, z.UpdatedAt = time.Unix(created, 0), time.Unix(updated, 0)
+	return &z, nil
+}
+
+func (db *DB) DNSZones(ctx context.Context) ([]*DNSZone, error) {
+	rows, err := db.R.QueryContext(ctx, `SELECT `+dnsZoneColumns+` FROM dns_zones z ORDER BY z.name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*DNSZone
+	for rows.Next() {
+		z, err := scanDNSZone(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, z)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) DNSZone(ctx context.Context, id int64) (*DNSZone, error) {
+	return scanDNSZone(db.R.QueryRowContext(ctx, `SELECT `+dnsZoneColumns+` FROM dns_zones z WHERE z.id = ?`, id))
+}
+
+const dnsRecordColumns = `id, zone_id, name, type, ttl, value, priority, weight, port, flags, tag, created_at`
+
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func dnsRecords(ctx context.Context, q queryer, zoneID int64) ([]*DNSRecord, error) {
+	query := `SELECT ` + dnsRecordColumns + ` FROM dns_records`
+	var args []any
+	if zoneID > 0 {
+		query += ` WHERE zone_id = ?`
+		args = append(args, zoneID)
+	}
+	// Apex first, then by name and type; insertion order within a set.
+	query += ` ORDER BY zone_id, name <> '@', name, type, id`
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*DNSRecord
+	for rows.Next() {
+		var r DNSRecord
+		var created int64
+		if err := rows.Scan(&r.ID, &r.ZoneID, &r.Name, &r.Type, &r.TTL, &r.Value, &r.Priority, &r.Weight,
+			&r.Port, &r.Flags, &r.Tag, &created); err != nil {
+			return nil, err
+		}
+		r.CreatedAt = time.Unix(created, 0)
+		out = append(out, &r)
+	}
+	return out, rows.Err()
+}
+
+func (db *DB) DNSRecords(ctx context.Context, zoneID int64) ([]*DNSRecord, error) {
+	return dnsRecords(ctx, db.R, zoneID)
+}
+
+// PutDNSRecord creates (id 0), replaces (rec set) or deletes (rec nil) one
+// record of a zone. check sees the whole zone as it would be after the
+// change, inside the write transaction, so concurrent edits cannot combine
+// into an invalid zone.
+func (db *DB) PutDNSRecord(ctx context.Context, zoneID, id int64, rec *dns.Record, check DNSCheck, now time.Time) (*DNSRecord, error) {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var name string
+	var serial uint32
+	if err := tx.QueryRowContext(ctx, `SELECT name, serial FROM dns_zones WHERE id = ?`, zoneID).Scan(&name, &serial); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	current, err := dnsRecords(ctx, tx, zoneID)
+	if err != nil {
+		return nil, err
+	}
+	zone := dns.Zone{Name: name, Serial: nextSerial(serial, now)}
+	found := id == 0
+	for _, r := range current {
+		if r.ID == id {
+			found = true
+			if rec == nil {
+				continue
+			}
+			zone.Records = append(zone.Records, *rec)
+			continue
+		}
+		zone.Records = append(zone.Records, r.Record)
+	}
+	if !found {
+		return nil, ErrNotFound
+	}
+	if id == 0 {
+		zone.Records = append(zone.Records, *rec)
+	}
+	if rec != nil {
+		if err := check(&zone); err != nil {
+			return nil, err
+		}
+	}
+	out := &DNSRecord{ID: id, ZoneID: zoneID, CreatedAt: now}
+	switch {
+	case rec == nil:
+		if _, err := tx.ExecContext(ctx, `DELETE FROM dns_records WHERE id = ?`, id); err != nil {
+			return nil, err
+		}
+	case id == 0:
+		if out.ID, err = insertDNSRecord(ctx, tx, zoneID, rec, now); err != nil {
+			return nil, err
+		}
+	default:
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE dns_records SET name = ?, type = ?, ttl = ?, value = ?, priority = ?, weight = ?, port = ?,
+			 flags = ?, tag = ? WHERE id = ?`,
+			rec.Name, rec.Type, rec.TTL, rec.Value, rec.Priority, rec.Weight, rec.Port, rec.Flags, rec.Tag, id); err != nil {
+			return nil, err
+		}
+	}
+	if rec != nil {
+		out.Record = *rec
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE dns_zones SET serial = ?, updated_at = ? WHERE id = ?`,
+		zone.Serial, now.Unix(), zoneID); err != nil {
+		return nil, err
+	}
+	if err := bumpDNSRevision(ctx, tx); err != nil {
+		return nil, err
+	}
+	return out, tx.Commit()
+}
+
+func (db *DB) DeleteDNSZone(ctx context.Context, id int64) error {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM dns_zones WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if err := bumpDNSRevision(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// DesiredDNS assembles every zone with its records.
+func (db *DB) DesiredDNS(ctx context.Context) (rev int64, zones []dns.Zone, err error) {
+	tx, err := db.R.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer tx.Rollback()
+	var v string
+	switch err := tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, settingDNSRevision).Scan(&v); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return 0, nil, err
+	default:
+		rev, _ = strconv.ParseInt(v, 10, 64)
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, name, serial FROM dns_zones ORDER BY id`)
+	if err != nil {
+		return 0, nil, err
+	}
+	index := map[int64]int{}
+	for rows.Next() {
+		var id int64
+		var z dns.Zone
+		if err := rows.Scan(&id, &z.Name, &z.Serial); err != nil {
+			rows.Close()
+			return 0, nil, err
+		}
+		index[id] = len(zones)
+		zones = append(zones, z)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, nil, err
+	}
+	recs, err := dnsRecords(ctx, tx, 0)
+	if err != nil {
+		return 0, nil, err
+	}
+	for _, r := range recs {
+		z := &zones[index[r.ZoneID]]
+		z.Records = append(z.Records, r.Record)
+	}
+	if zones == nil {
+		zones = []dns.Zone{}
+	}
+	return rev, zones, nil
+}
+
+// DNSNameservers returns the host names new zones get NS records for.
+func (db *DB) DNSNameservers(ctx context.Context) ([]string, error) {
+	v, err := db.Setting(ctx, settingDNSNameservers)
+	if errors.Is(err, ErrNotFound) {
+		return []string{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(v), &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (db *DB) SetDNSNameservers(ctx context.Context, hosts []string) error {
+	b, _ := json.Marshal(hosts)
+	return db.SetSetting(ctx, settingDNSNameservers, string(b))
+}
+
+// SetServerDNS records whether a server serves DNS (from its hello).
+func (db *DB) SetServerDNS(ctx context.Context, serverID int64, port int, listenErr string) error {
+	return db.execOne(ctx, `UPDATE servers SET dns_port = ?, dns_listen_error = ? WHERE id = ?`, port, listenErr, serverID)
+}
+
+// SetDNSStatus records the result of delivering revision rev.
+func (db *DB) SetDNSStatus(ctx context.Context, serverID, rev int64, applyErr string) error {
+	if applyErr != "" {
+		_, err := db.W.ExecContext(ctx, `UPDATE servers SET dns_error = ? WHERE id = ?`, applyErr, serverID)
+		return err
+	}
+	_, err := db.W.ExecContext(ctx,
+		`UPDATE servers SET dns_applied_revision = MAX(dns_applied_revision, ?), dns_error = '' WHERE id = ?`,
+		rev, serverID)
+	return err
+}
+
+// DNSServerStatus is how one server stands with DNS.
+type DNSServerStatus struct {
+	ServerID        int64
+	Name            string
+	Port            int
+	ListenError     string
+	AppliedRevision int64
+	Error           string
+	LastIP          string
+}
+
+// DNSServers lists enrolled servers with their DNS state.
+func (db *DB) DNSServers(ctx context.Context) ([]DNSServerStatus, error) {
+	rows, err := db.R.QueryContext(ctx,
+		`SELECT id, name, dns_port, dns_listen_error, dns_applied_revision, dns_error, last_ip
+		 FROM servers WHERE enrolled_at IS NOT NULL ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DNSServerStatus
+	for rows.Next() {
+		var s DNSServerStatus
+		if err := rows.Scan(&s.ServerID, &s.Name, &s.Port, &s.ListenError, &s.AppliedRevision, &s.Error, &s.LastIP); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
