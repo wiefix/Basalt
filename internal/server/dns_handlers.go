@@ -14,16 +14,80 @@ import (
 )
 
 type dnsZoneView struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	Serial    uint32    `json:"serial"`
-	Records   int       `json:"records"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        int64       `json:"id"`
+	Name      string      `json:"name"`
+	Serial    uint32      `json:"serial"`
+	Records   int         `json:"records"`
+	DNSSEC    *dnssecView `json:"dnssec,omitempty"`
+	CreatedAt time.Time   `json:"created_at"`
+	UpdatedAt time.Time   `json:"updated_at"`
+}
+
+// dnssecView is what the registrar needs: the DS record (or the key).
+type dnssecView struct {
+	KeyTag    uint16   `json:"key_tag"`
+	Algorithm int      `json:"algorithm"`
+	DS        []string `json:"ds"`
+	DNSKEY    string   `json:"dnskey"`
 }
 
 func viewDNSZone(z *store.DNSZone) dnsZoneView {
-	return dnsZoneView{ID: z.ID, Name: z.Name, Serial: z.Serial, Records: z.Records, CreatedAt: z.CreatedAt, UpdatedAt: z.UpdatedAt}
+	v := dnsZoneView{ID: z.ID, Name: z.Name, Serial: z.Serial, Records: z.Records, CreatedAt: z.CreatedAt, UpdatedAt: z.UpdatedAt}
+	if z.DNSKEY != "" {
+		tag, ds, rdata, err := dns.PublicKeyInfo(z.Name, z.DNSKEY)
+		if err == nil {
+			v.DNSSEC = &dnssecView{KeyTag: tag, Algorithm: 13, DS: ds, DNSKEY: rdata}
+		}
+	}
+	return v
+}
+
+func dnssecAD(zoneID int64) []byte { return []byte("dns-key:" + strconv.FormatInt(zoneID, 10)) }
+
+func (s *Server) unsealZoneKey(zoneID int64, sealed []byte) (string, error) {
+	b, err := s.box.Open(sealed, dnssecAD(zoneID))
+	return string(b), err
+}
+
+type dnssecRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+// handleSetDNSSEC signs a zone (a new key) or stops signing it. A zone
+// already signed keeps its key, so the DS at the registrar stays valid.
+func (s *Server) handleSetDNSSEC(w http.ResponseWriter, r *http.Request, p *principal) {
+	z, ok := s.pathZone(w, r)
+	if !ok {
+		return
+	}
+	var req dnssecRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.Enabled == (z.DNSKEY != "") {
+		writeJSON(w, http.StatusOK, map[string]any{"zone": viewDNSZone(z)})
+		return
+	}
+	dnskey, sealed := "", []byte(nil)
+	if req.Enabled {
+		k, err := dns.GenerateKey(z.Name)
+		if err != nil {
+			s.internalError(w, r, "generate dnssec key", err)
+			return
+		}
+		dnskey, sealed = k.DNSKEY, s.box.Seal([]byte(k.PrivateKey), dnssecAD(z.ID))
+	}
+	if err := s.db.SetZoneDNSSEC(r.Context(), z.ID, dnskey, sealed, s.now()); err != nil {
+		s.internalError(w, r, "save dnssec key", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "dns_zone.dnssec", map[string]any{"zone_id": z.ID, "zone": z.Name, "enabled": req.Enabled})
+	s.pushDNSAll(r.Context())
+	z, ok = s.pathZone(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"zone": viewDNSZone(z)})
 }
 
 type dnsRecordView struct {
@@ -58,7 +122,7 @@ func (s *Server) PushDNS(ctx context.Context, serverID int64) {
 	if !s.agents.Connected(serverID) {
 		return
 	}
-	rev, zones, err := s.db.DesiredDNS(ctx)
+	rev, zones, err := s.db.DesiredDNS(ctx, s.unsealZoneKey)
 	if err != nil {
 		s.log.Error("build desired dns state", "err", err)
 		return
@@ -129,7 +193,7 @@ func (s *Server) handleDNSOverview(w http.ResponseWriter, r *http.Request, p *pr
 		s.internalError(w, r, "load nameservers", err)
 		return
 	}
-	rev, _, err := s.db.DesiredDNS(ctx)
+	rev, _, err := s.db.DesiredDNS(ctx, nil)
 	if err != nil {
 		s.internalError(w, r, "load dns revision", err)
 		return

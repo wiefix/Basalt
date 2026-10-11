@@ -100,6 +100,20 @@ for i in $(seq 30); do
 done
 docker exec basalt-panel dig +noall +answer @$NODEIP shop.test A
 [ "$(docker exec basalt-panel dig +short @$NODEIP shop.test A)" = "$NODEIP" ] || { echo "no automatic record"; exit 1; }
+echo "### DNSSEC: the signed zone validates (delv with the zone key as trust anchor)"
+$API -X PUT -d '{"enabled":true}' http://127.0.0.1:8080/api/v1/dns/zones/$ZONE/dnssec >/dev/null
+KEY=$($API http://127.0.0.1:8080/api/v1/dns/zones/$ZONE | python3 -c 'import sys,json; print(json.load(sys.stdin)["zone"]["dnssec"]["dnskey"])')
+# shellcheck disable=SC2086
+docker exec basalt-panel sh -c "printf 'trust-anchors { zone.test. static-key %s %s %s \"%s\"; };\n' $KEY >/tmp/anchor"
+for i in $(seq 30); do
+  docker exec basalt-panel dig +dnssec +short @$NODEIP www.zone.test A | grep -q "^A 13 " && break; sleep 1
+done
+VALID=$(docker exec basalt-panel delv @$NODEIP -a /tmp/anchor +root=zone.test www.zone.test A 2>&1)
+echo "$VALID" | grep -E "validated|192.0.2.44" | sed 's/^/  /'
+echo "$VALID" | grep -q "; fully validated" || { echo "$VALID"; exit 1; }
+NEG=$(docker exec basalt-panel delv @$NODEIP -a /tmp/anchor +root=zone.test nope.zone.test A 2>&1)
+echo "$NEG" | grep -E "validated|resolution failed" | sed 's/^/  nope.zone.test: /'
+echo "$NEG" | grep -q "negative response, fully validated" || { echo "$NEG"; exit 1; }
 echo "### panel backup, then recovery from it"
 ST=$($API -d '{"name":"local","kind":"local","path":"/var/backups/basalt"}' http://127.0.0.1:8080/api/v1/backup-storages | python3 -c 'import sys,json; print(json.load(sys.stdin)["storage"]["id"])')
 $API -X PUT -d "{\"storage_id\":$ST,\"schedule\":\"daily\",\"at_minute\":0,\"keep_last\":3}" http://127.0.0.1:8080/api/v1/panel-backup/policy >/dev/null

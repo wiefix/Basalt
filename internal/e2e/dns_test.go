@@ -246,3 +246,86 @@ func TestAutoDNS(t *testing.T) {
 		t.Fatalf("public ips = %v", ips)
 	}
 }
+
+func TestDNSSECEndToEnd(t *testing.T) {
+	p := startPanel(t)
+	startHostWith(t, p, "", func(c *agent.Config) { c.DNSListen = "127.0.0.1:0" })
+	var addr string
+	for _, s := range p.call(200, "GET", "/api/v1/dns", nil)["servers"].([]any) {
+		addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(int(s.(map[string]any)["port"].(float64))))
+	}
+	zid := jsonID(p.call(http.StatusCreated, "POST", "/api/v1/dns/zones", map[string]string{"name": "example.test"})["zone"].(map[string]any)["id"])
+	base := "/api/v1/dns/zones/" + zid
+	p.call(http.StatusCreated, "POST", base+"/records", map[string]any{"name": "@", "type": "A", "value": "192.0.2.1"})
+
+	z := p.call(200, "PUT", base+"/dnssec", map[string]any{"enabled": true})["zone"].(map[string]any)
+	sec := z["dnssec"].(map[string]any)
+	ds := sec["ds"].([]any)[0].(string)
+	if !strings.HasPrefix(ds, jsonID(sec["key_tag"])+" 13 2 ") {
+		t.Fatalf("dnssec = %v", sec)
+	}
+	// Enabling again keeps the key (the DS at the registrar stays valid).
+	if again := p.call(200, "PUT", base+"/dnssec", map[string]any{"enabled": true})["zone"].(map[string]any)["dnssec"].(map[string]any); again["ds"].([]any)[0] != ds {
+		t.Fatal("key replaced")
+	}
+	// The private key is stored encrypted only.
+	var sealed []byte
+	p.db.R.QueryRow(`SELECT dnssec_key FROM dns_zones WHERE id = ?`, mustAtoi(zid)).Scan(&sealed)
+	if len(sealed) == 0 || strings.Contains(string(sealed), "PrivateKey") {
+		t.Fatal("private key not sealed")
+	}
+
+	ask := func(name string, qtype uint16) *mdns.Msg {
+		q := new(mdns.Msg)
+		q.SetQuestion(name, qtype)
+		q.SetEdns0(1232, true)
+		r, _, err := (&mdns.Client{Net: "tcp", Timeout: 2 * time.Second}).Exchange(q, addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	var key *mdns.DNSKEY
+	eventually(t, "zone signed", func() bool {
+		r := ask("example.test.", mdns.TypeDNSKEY)
+		if len(r.Answer) != 2 {
+			return false
+		}
+		key, _ = r.Answer[0].(*mdns.DNSKEY)
+		return key != nil
+	})
+	if d := key.ToDS(mdns.SHA256); !strings.HasSuffix(ds, strings.ToUpper(d.Digest)) {
+		t.Fatal("served key does not match the DS shown")
+	}
+	r := ask("example.test.", mdns.TypeA)
+	if len(r.Answer) != 2 {
+		t.Fatalf("answer = %v", r.Answer)
+	}
+	if err := r.Answer[1].(*mdns.RRSIG).Verify(key, r.Answer[:1]); err != nil {
+		t.Fatalf("signature: %v", err)
+	}
+	// A missing name: signed compact denial.
+	r = ask("nope.example.test.", mdns.TypeA)
+	var nsec *mdns.NSEC
+	var nsecSig *mdns.RRSIG
+	for _, rr := range r.Ns {
+		switch v := rr.(type) {
+		case *mdns.NSEC:
+			nsec = v
+		case *mdns.RRSIG:
+			if v.TypeCovered == mdns.TypeNSEC {
+				nsecSig = v
+			}
+		}
+	}
+	if r.Rcode != mdns.RcodeSuccess || nsec == nil || nsecSig == nil || nsecSig.Verify(key, []mdns.RR{nsec}) != nil {
+		t.Fatalf("denial = %v", r)
+	}
+
+	// Turning it off removes the key and the signatures.
+	z = p.call(200, "PUT", base+"/dnssec", map[string]any{"enabled": false})["zone"].(map[string]any)
+	if z["dnssec"] != nil {
+		t.Fatalf("zone = %v", z)
+	}
+	eventually(t, "signatures gone", func() bool { return len(ask("example.test.", mdns.TypeA).Answer) == 1 })
+}

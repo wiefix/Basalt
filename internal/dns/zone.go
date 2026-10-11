@@ -61,6 +61,8 @@ type Zone struct {
 	Name    string   `json:"name"` // "example.com": lowercase, no trailing dot
 	Serial  uint32   `json:"serial"`
 	Records []Record `json:"records"`
+	// DNSSEC, when set, signs the zone with this key.
+	DNSSEC *ZoneKey `json:"dnssec,omitempty"`
 }
 
 // Record is one resource record. Name is relative to the zone ("@" is the
@@ -297,6 +299,11 @@ func (z *Zone) Validate() error {
 	}
 	if len(z.Records) > MaxRecords {
 		return fmt.Errorf("a zone holds at most %d records", MaxRecords)
+	}
+	if z.DNSSEC != nil {
+		if _, _, err := z.DNSSEC.parse(z.Name); err != nil {
+			return fmt.Errorf("DNSSEC key: %w", err)
+		}
 	}
 	byName := map[string][]*Record{}
 	for i := range z.Records {

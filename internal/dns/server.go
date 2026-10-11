@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,6 +47,7 @@ type Resolver interface {
 // refuses everything else and never recurses.
 type Server struct {
 	log      *slog.Logger
+	now      func() time.Time // signature times
 	cat      atomic.Pointer[catalog]
 	resolver Resolver
 	limiter  *prefixLimiter
@@ -63,7 +65,7 @@ type aliasEntry struct {
 // NewServer creates a server with no zones. resolver may be nil (ALIAS
 // targets outside our zones then do not resolve).
 func NewServer(log *slog.Logger, resolver Resolver) *Server {
-	s := &Server{log: log, resolver: resolver, limiter: newPrefixLimiter(udpRate, udpBurst, time.Now),
+	s := &Server{log: log, now: time.Now, resolver: resolver, limiter: newPrefixLimiter(udpRate, udpBurst, time.Now),
 		aliasCache: map[string]aliasEntry{}}
 	s.cat.Store(&catalog{zones: map[string]*zoneData{}})
 	return s
@@ -71,13 +73,13 @@ func NewServer(log *slog.Logger, resolver Resolver) *Server {
 
 // Check validates zones the way SetZones would, without serving them.
 func Check(zones []Zone) error {
-	_, err := compile(zones)
+	_, err := compile(zones, time.Now)
 	return err
 }
 
 // SetZones replaces every zone at once; on error nothing changes.
 func (s *Server) SetZones(zones []Zone) error {
-	c, err := compile(zones)
+	c, err := compile(zones, s.now)
 	if err != nil {
 		return err
 	}
@@ -246,8 +248,9 @@ func (s *Server) answer(req *mdns.Msg) *mdns.Msg {
 	m.Compress = true
 	m.RecursionAvailable = false
 	opt := req.IsEdns0()
+	do := opt != nil && opt.Do()
 	if opt != nil {
-		m.SetEdns0(maxUDPSize, false)
+		m.SetEdns0(maxUDPSize, do)
 		if opt.Version() != 0 {
 			m.Rcode = mdns.RcodeBadVers
 			m.Question = req.Question
@@ -280,20 +283,100 @@ func (s *Server) answer(req *mdns.Msg) *mdns.Msg {
 		return m
 	}
 	m.Authoritative = true
-	if q.Qtype == mdns.TypeANY {
+	switch {
+	case q.Qtype == mdns.TypeANY:
 		// RFC 8482: a minimal answer instead of everything at the name.
 		m.Answer = []mdns.RR{&mdns.HINFO{Hdr: mdns.RR_Header{Name: q.Name, Rrtype: mdns.TypeHINFO,
 			Class: mdns.ClassINET, Ttl: 3600}, Cpu: "RFC8482"}}
-		return m
+	case q.Qtype == mdns.TypeDS && name == zd.name && cat.parentOf(zd) != nil:
+		// The DS of a zone is the parent's data: when we serve the parent
+		// too, answer from it (with the child's key when it is signed).
+		s.dsFromParent(m, cat.parentOf(zd), zd, q.Name, do)
+	default:
+		s.resolve(m, cat, zd, q.Name, name, q.Qtype, 0, do)
 	}
-	s.resolve(m, cat, zd, q.Name, name, q.Qtype, 0)
+	if do {
+		s.signAnswer(m, cat)
+	}
 	return m
+}
+
+// dsFromParent answers a DS query for child's apex from parent.
+func (s *Server) dsFromParent(m *mdns.Msg, parent, child *zoneData, owner string, do bool) {
+	if len(child.ds) > 0 {
+		for _, rr := range child.ds {
+			m.Answer = append(m.Answer, withOwner(rr, owner))
+		}
+		return
+	}
+	m.Ns = append(m.Ns, parent.negativeSOA())
+	if do {
+		m.Ns = append(m.Ns, denial(owner, []uint16{mdns.TypeNS}))
+	}
+}
+
+// denial is the compact denial of existence (RFC 9824) for owner: an NSEC
+// whose next name is the immediate successor, listing the types present.
+func denial(owner string, types []uint16) mdns.RR {
+	bitmap := append(slices.Clone(types), mdns.TypeRRSIG, mdns.TypeNSEC)
+	slices.Sort(bitmap)
+	bitmap = slices.Compact(bitmap)
+	return &mdns.NSEC{
+		Hdr:        mdns.RR_Header{Name: owner, Rrtype: mdns.TypeNSEC, Class: mdns.ClassINET, Ttl: NegativeTTL},
+		NextDomain: `\000.` + owner,
+		TypeBitMap: bitmap,
+	}
+}
+
+// signAnswer adds RRSIGs for every authoritative RRset in the answer and
+// authority sections, each signed by the zone that holds it. Referral NS
+// records and glue are not signed (they are the child's data).
+func (s *Server) signAnswer(m *mdns.Msg, cat *catalog) {
+	dsQuery := len(m.Question) == 1 && m.Question[0].Qtype == mdns.TypeDS
+	sign := func(section []mdns.RR, skipNS bool) []mdns.RR {
+		var out []mdns.RR
+		for i := 0; i < len(section); {
+			h := section[i].Header()
+			j := i + 1
+			for j < len(section) && section[j].Header().Rrtype == h.Rrtype &&
+				strings.EqualFold(section[j].Header().Name, h.Name) {
+				j++
+			}
+			set := section[i:j]
+			out = append(out, set...)
+			i = j
+			if skipNS && h.Rrtype == mdns.TypeNS {
+				continue
+			}
+			zd := cat.zoneFor(strings.TrimSuffix(strings.ToLower(h.Name), "."))
+			// The DS of a zone, or the proof there is none, is the parent's.
+			if (h.Rrtype == mdns.TypeDS || h.Rrtype == mdns.TypeNSEC && dsQuery) && zd != nil &&
+				zd.name+"." == strings.ToLower(h.Name) {
+				if p := cat.parentOf(zd); p != nil {
+					zd = p
+				}
+			}
+			if zd == nil || zd.signer == nil {
+				continue
+			}
+			sig, err := zd.signer.sign(set)
+			if err != nil {
+				s.log.Warn("sign dns answer", "zone", zd.name, "err", err)
+				continue
+			}
+			out = append(out, sig)
+		}
+		return out
+	}
+	m.Answer = sign(m.Answer, false)
+	m.Ns = sign(m.Ns, true)
 }
 
 // resolve appends the answer for (name, qtype) in zone zd to m, following
 // CNAMEs and ALIASes into our zones. owner is the name as asked (its case
 // is kept in the answer).
-func (s *Server) resolve(m *mdns.Msg, cat *catalog, zd *zoneData, owner, name string, qtype uint16, depth int) {
+func (s *Server) resolve(m *mdns.Msg, cat *catalog, zd *zoneData, owner, name string, qtype uint16, depth int, do bool) {
+	signed := do && zd.signer != nil
 	// A delegation on the way down hands the query to the child's servers.
 	if cut := zd.cutAbove(name); cut != "" {
 		if !(cut == name && qtype == mdns.TypeDS) {
@@ -302,6 +385,10 @@ func (s *Server) resolve(m *mdns.Msg, cat *catalog, zd *zoneData, owner, name st
 			}
 			n := zd.nodes[cut]
 			m.Ns = append(m.Ns, n.rrsets[mdns.TypeNS]...)
+			if signed {
+				// Proves the child has no DS: an insecure delegation.
+				m.Ns = append(m.Ns, denial(fqdn(cut), []uint16{mdns.TypeNS}))
+			}
 			m.Extra = append(m.Extra, zd.glue(n.rrsets[mdns.TypeNS])...)
 			return
 		}
@@ -310,15 +397,27 @@ func (s *Server) resolve(m *mdns.Msg, cat *catalog, zd *zoneData, owner, name st
 	if !ok {
 		n = zd.wildcard(name)
 		if n == nil {
-			m.Rcode = mdns.RcodeNameError // RFC 6604: the code of the last name
 			m.Ns = append(m.Ns, zd.negativeSOA())
+			if signed {
+				// Compact denial: NOERROR and an NSEC with the NXNAME
+				// pseudo-type instead of NXDOMAIN and a proof of the gap.
+				m.Ns = append(m.Ns, denial(owner, []uint16{mdns.TypeNXNAME}))
+				return
+			}
+			m.Rcode = mdns.RcodeNameError // RFC 6604: the code of the last name
 			return
+		}
+	}
+	nodata := func() {
+		m.Ns = append(m.Ns, zd.negativeSOA())
+		if signed {
+			m.Ns = append(m.Ns, denial(owner, n.types(qtype)))
 		}
 	}
 	if cname := n.rrsets[mdns.TypeCNAME]; len(cname) > 0 && qtype != mdns.TypeCNAME {
 		rr := withOwner(cname[0], owner)
 		m.Answer = append(m.Answer, rr)
-		s.chase(m, cat, rr.(*mdns.CNAME).Target, qtype, depth)
+		s.chase(m, cat, rr.(*mdns.CNAME).Target, qtype, depth, do)
 		return
 	}
 	if n.alias != "" && (qtype == mdns.TypeA || qtype == mdns.TypeAAAA) {
@@ -332,13 +431,13 @@ func (s *Server) resolve(m *mdns.Msg, cat *catalog, zd *zoneData, owner, name st
 			m.Answer = append(m.Answer, addrRR(owner, qtype, n.aliasTTL, a))
 		}
 		if len(addrs) == 0 {
-			m.Ns = append(m.Ns, zd.negativeSOA())
+			nodata()
 		}
 		return
 	}
 	rrs := n.rrsets[qtype]
 	if len(rrs) == 0 {
-		m.Ns = append(m.Ns, zd.negativeSOA())
+		nodata()
 		return
 	}
 	for _, rr := range rrs {
@@ -348,7 +447,7 @@ func (s *Server) resolve(m *mdns.Msg, cat *catalog, zd *zoneData, owner, name st
 
 // chase continues a CNAME into our own zones; a target elsewhere is left
 // to the resolver.
-func (s *Server) chase(m *mdns.Msg, cat *catalog, target string, qtype uint16, depth int) {
+func (s *Server) chase(m *mdns.Msg, cat *catalog, target string, qtype uint16, depth int, do bool) {
 	if depth+1 >= maxChain {
 		return
 	}
@@ -358,7 +457,7 @@ func (s *Server) chase(m *mdns.Msg, cat *catalog, target string, qtype uint16, d
 		return
 	}
 	before := len(m.Ns)
-	s.resolve(m, cat, zd, target, name, qtype, depth+1)
+	s.resolve(m, cat, zd, target, name, qtype, depth+1, do)
 	// Only the final answer matters; drop authority data of the chain.
 	if len(m.Answer) > 0 {
 		m.Ns = m.Ns[:before]
@@ -374,7 +473,7 @@ func (s *Server) aliasAddrs(cat *catalog, target string, qtype uint16, depth int
 	}
 	if zd := cat.zoneFor(target); zd != nil {
 		sub := new(mdns.Msg)
-		s.resolve(sub, cat, zd, fqdn(target), target, qtype, depth+1)
+		s.resolve(sub, cat, zd, fqdn(target), target, qtype, depth+1, false)
 		if sub.Rcode == mdns.RcodeServerFailure {
 			return nil, false
 		}

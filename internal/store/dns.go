@@ -21,10 +21,12 @@ const (
 )
 
 type DNSZone struct {
-	ID        int64
-	Name      string
-	Serial    uint32
-	Records   int
+	ID      int64
+	Name    string
+	Serial  uint32
+	Records int
+	// DNSKEY is the zone's public signing key ("" when not signed).
+	DNSKEY    string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -96,12 +98,12 @@ func insertDNSRecord(ctx context.Context, tx *sql.Tx, zoneID int64, r *dns.Recor
 }
 
 const dnsZoneColumns = `z.id, z.name, z.serial, z.created_at, z.updated_at,
-	(SELECT COUNT(*) FROM dns_records r WHERE r.zone_id = z.id)`
+	(SELECT COUNT(*) FROM dns_records r WHERE r.zone_id = z.id), z.dnssec_dnskey`
 
 func scanDNSZone(row interface{ Scan(...any) error }) (*DNSZone, error) {
 	var z DNSZone
 	var created, updated int64
-	if err := row.Scan(&z.ID, &z.Name, &z.Serial, &created, &updated, &z.Records); err != nil {
+	if err := row.Scan(&z.ID, &z.Name, &z.Serial, &created, &updated, &z.Records, &z.DNSKEY); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -247,6 +249,35 @@ func (db *DB) PutDNSRecord(ctx context.Context, zoneID, id int64, rec *dns.Recor
 	return out, tx.Commit()
 }
 
+// SetZoneDNSSEC stores a zone's signing key (empty dnskey: unsigned) and
+// bumps its serial.
+func (db *DB) SetZoneDNSSEC(ctx context.Context, id int64, dnskey string, sealed []byte, now time.Time) error {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var serial uint32
+	if err := tx.QueryRowContext(ctx, `SELECT serial FROM dns_zones WHERE id = ?`, id).Scan(&serial); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if dnskey == "" {
+		sealed = nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE dns_zones SET dnssec_dnskey = ?, dnssec_key = ?, serial = ?, updated_at = ? WHERE id = ?`,
+		dnskey, sealed, nextSerial(serial, now), now.Unix(), id); err != nil {
+		return err
+	}
+	if err := bumpDNSRevision(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (db *DB) DeleteDNSZone(ctx context.Context, id int64) error {
 	tx, err := db.W.BeginTx(ctx, nil)
 	if err != nil {
@@ -266,14 +297,18 @@ func (db *DB) DeleteDNSZone(ctx context.Context, id int64) error {
 	return tx.Commit()
 }
 
-// DesiredDNS assembles every zone with its records, automatic ones included.
-func (db *DB) DesiredDNS(ctx context.Context) (rev int64, zones []dns.Zone, err error) {
+// Unseal decrypts a zone's private signing key.
+type Unseal func(zoneID int64, sealed []byte) (string, error)
+
+// DesiredDNS assembles every zone with its records, automatic ones
+// included, and with the signing keys when unseal is given.
+func (db *DB) DesiredDNS(ctx context.Context, unseal Unseal) (rev int64, zones []dns.Zone, err error) {
 	tx, err := db.R.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer tx.Rollback()
-	rev, zones, _, err = db.manualDNS(ctx, tx)
+	rev, zones, _, err = db.manualDNS(ctx, tx, unseal)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -291,7 +326,7 @@ func (db *DB) DesiredDNS(ctx context.Context) (rev int64, zones []dns.Zone, err 
 
 // manualDNS loads the revision and every zone with the records users made,
 // with the zone IDs.
-func (db *DB) manualDNS(ctx context.Context, q queryer) (rev int64, zones []dns.Zone, ids []int64, err error) {
+func (db *DB) manualDNS(ctx context.Context, q queryer, unseal Unseal) (rev int64, zones []dns.Zone, ids []int64, err error) {
 	var v string
 	rows, err := q.QueryContext(ctx, `SELECT value FROM settings WHERE key = ?`, settingDNSRevision)
 	if err != nil {
@@ -305,7 +340,7 @@ func (db *DB) manualDNS(ctx context.Context, q queryer) (rev int64, zones []dns.
 		rev, _ = strconv.ParseInt(v, 10, 64)
 	}
 	rows.Close()
-	rows, err = q.QueryContext(ctx, `SELECT id, name, serial FROM dns_zones ORDER BY id`)
+	rows, err = q.QueryContext(ctx, `SELECT id, name, serial, dnssec_dnskey, dnssec_key FROM dns_zones ORDER BY id`)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -313,9 +348,19 @@ func (db *DB) manualDNS(ctx context.Context, q queryer) (rev int64, zones []dns.
 	for rows.Next() {
 		var id int64
 		var z dns.Zone
-		if err := rows.Scan(&id, &z.Name, &z.Serial); err != nil {
+		var dnskey string
+		var sealed []byte
+		if err := rows.Scan(&id, &z.Name, &z.Serial, &dnskey, &sealed); err != nil {
 			rows.Close()
 			return 0, nil, nil, err
+		}
+		if dnskey != "" && unseal != nil {
+			priv, err := unseal(id, sealed)
+			if err != nil {
+				rows.Close()
+				return 0, nil, nil, fmt.Errorf("zone %s key: %w", z.Name, err)
+			}
+			z.DNSSEC = &dns.ZoneKey{DNSKEY: dnskey, PrivateKey: priv}
 		}
 		index[id] = len(zones)
 		zones = append(zones, z)
@@ -472,7 +517,7 @@ func autoHash(recs []dns.AutoRecord) string {
 
 // DNSZoneAuto returns the automatic records of one zone.
 func (db *DB) DNSZoneAuto(ctx context.Context, zoneID int64) ([]dns.AutoRecord, error) {
-	_, zones, ids, err := db.manualDNS(ctx, db.R)
+	_, zones, ids, err := db.manualDNS(ctx, db.R, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -497,7 +542,7 @@ func (db *DB) SyncAutoDNS(ctx context.Context, now time.Time) (bool, error) {
 		return false, err
 	}
 	defer tx.Rollback()
-	_, zones, ids, err := db.manualDNS(ctx, tx)
+	_, zones, ids, err := db.manualDNS(ctx, tx, nil)
 	if err != nil {
 		return false, err
 	}

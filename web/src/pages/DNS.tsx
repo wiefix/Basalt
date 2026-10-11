@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router";
-import { api, can, type DNSRecord, type DNSRecordInput, type DNSServer, type User } from "../api";
-import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useConfirm, useToast } from "../components/ui";
+import { api, can, type DNSRecord, type DNSRecordInput, type DNSServer, type DNSZone, type User } from "../api";
+import { CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useConfirm, useToast } from "../components/ui";
 
 export function DNSPage({ user }: { user: User }) {
   const dns = useQuery({ queryKey: ["dns"], queryFn: api.dns });
@@ -51,6 +51,11 @@ export function DNSPage({ user }: { user: User }) {
                         <Link to={`/dns/${z.id}`}>
                           <strong>{z.name}</strong>
                         </Link>
+                        {z.dnssec && (
+                          <span className="badge ok" style={{ marginLeft: 8 }}>
+                            DNSSEC
+                          </span>
+                        )}
                       </td>
                       <td className="num">{z.records}</td>
                       <td className="mono muted">{z.serial}</td>
@@ -400,6 +405,7 @@ export function ZonePage({ user }: { user: User }) {
           </table>
         </div>
       </div>
+      <DNSSECCard zone={z} admin={admin} onChanged={refresh} />
       <p className="faint small">
         Sites and apps whose domains are in this zone get A/AAAA records for their server automatically (TTL 5
         minutes). A record of your own at the same name replaces them.
@@ -415,6 +421,92 @@ export function ZonePage({ user }: { user: User }) {
         />
       )}
     </>
+  );
+}
+
+function DNSSECCard({ zone, admin, onChanged }: { zone: DNSZone; admin: boolean; onChanged: () => void }) {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [busy, setBusy] = useState(false);
+  const sec = zone.dnssec;
+  const set = async (enabled: boolean) => {
+    if (!enabled) {
+      const ok = await confirm({
+        title: "Turn off DNSSEC?",
+        body: (
+          <>
+            <p>
+              First remove the DS record at your registrar and wait a day or two for it to expire from caches.
+              Otherwise resolvers that validate will treat <strong>{zone.name}</strong> as broken and stop resolving it.
+            </p>
+            <p className="muted">Turning it on again creates a new key with a new DS record.</p>
+          </>
+        ),
+        confirm: "Turn off",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    setBusy(true);
+    try {
+      await api.setDNSSEC(zone.id, enabled);
+      onChanged();
+    } catch (e) {
+      toast(errorMessage(e), true);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="card card-body stack" style={{ marginTop: 16 }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="row">
+          <h2>DNSSEC</h2>
+          {sec ? <span className="badge ok">signed</span> : <span className="badge plain">off</span>}
+        </div>
+        {admin && (
+          <button className={sec ? "btn sm ghost" : "btn sm primary"} disabled={busy} onClick={() => set(!sec)}>
+            {sec ? "Turn off" : "Sign this zone"}
+          </button>
+        )}
+      </div>
+      {sec ? (
+        <>
+          <p className="muted" style={{ margin: 0 }}>
+            Answers are signed (ECDSA P-256). To make resolvers check the signatures, add this DS record at your
+            registrar. Registrars that read CDS records pick it up by themselves.
+          </p>
+          <dl className="kv">
+            <dt>DS record</dt>
+            <dd>
+              {sec.ds.map((d) => (
+                <div key={d} className="row" style={{ alignItems: "flex-start" }}>
+                  <code style={{ overflowWrap: "anywhere" }}>{d}</code>
+                  <CopyButton text={d} />
+                </div>
+              ))}
+            </dd>
+            <dt>Key tag</dt>
+            <dd className="mono">{sec.key_tag}</dd>
+            <dt>Algorithm</dt>
+            <dd>13 (ECDSA P-256 with SHA-256)</dd>
+            <dt>Digest type</dt>
+            <dd>2 (SHA-256)</dd>
+            <dt>DNSKEY</dt>
+            <dd>
+              <div className="row" style={{ alignItems: "flex-start" }}>
+                <code className="small" style={{ overflowWrap: "anywhere" }}>{sec.dnskey}</code>
+                <CopyButton text={sec.dnskey} />
+              </div>
+            </dd>
+          </dl>
+        </>
+      ) : (
+        <p className="muted" style={{ margin: 0 }}>
+          Signing protects visitors from forged answers. Once on, you add one DS record at your registrar.
+        </p>
+      )}
+    </div>
   );
 }
 

@@ -26,7 +26,7 @@ func TestDNSZones(t *testing.T) {
 	if _, err := db.CreateDNSZone(ctx, "example.com", nil, check, now); !errors.Is(err, ErrNameTaken) {
 		t.Fatalf("duplicate zone: %v", err)
 	}
-	rev0, _, _ := db.DesiredDNS(ctx)
+	rev0, _, _ := db.DesiredDNS(ctx, nil)
 
 	a := dns.Record{Name: "www", Type: dns.TypeA, Value: "192.0.2.1"}
 	a.Normalize()
@@ -53,7 +53,7 @@ func TestDNSZones(t *testing.T) {
 		t.Fatalf("cross-zone delete: %v", err)
 	}
 
-	rev, zones, err := db.DesiredDNS(ctx)
+	rev, zones, err := db.DesiredDNS(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,5 +93,45 @@ func TestDNSZones(t *testing.T) {
 	}
 	if hosts, _ := db.DNSNameservers(ctx); len(hosts) != 2 {
 		t.Fatal(hosts)
+	}
+}
+
+func TestZoneDNSSEC(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTemp(t)
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	z, err := db.CreateDNSZone(ctx, "example.com", nil, func(*dns.Zone) error { return nil }, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, _ := dns.GenerateKey("example.com")
+	if err := db.SetZoneDNSSEC(ctx, z.ID, k.DNSKEY, []byte("sealed:"+k.PrivateKey), now); err != nil {
+		t.Fatal(err)
+	}
+	unseal := func(id int64, sealed []byte) (string, error) {
+		if id != z.ID {
+			t.Fatalf("unseal for zone %d", id)
+		}
+		return string(sealed[len("sealed:"):]), nil
+	}
+	_, zones, err := db.DesiredDNS(ctx, unseal)
+	if err != nil || zones[0].DNSSEC == nil || zones[0].DNSSEC.PrivateKey != k.PrivateKey || dns.Check(zones) != nil {
+		t.Fatalf("%+v %v", zones, err)
+	}
+	// Without unseal no key leaves the store (overviews, automatic records).
+	if _, zones, _ := db.DesiredDNS(ctx, nil); zones[0].DNSSEC != nil {
+		t.Fatal("key without unseal")
+	}
+	got, _ := db.DNSZone(ctx, z.ID)
+	if got.DNSKEY != k.DNSKEY || got.Serial != 2026101101 {
+		t.Fatalf("%+v", got)
+	}
+	if err := db.SetZoneDNSSEC(ctx, z.ID, "", []byte("x"), now); err != nil {
+		t.Fatal(err)
+	}
+	var sealed []byte
+	db.R.QueryRow(`SELECT dnssec_key FROM dns_zones WHERE id = ?`, z.ID).Scan(&sealed)
+	if got, _ := db.DNSZone(ctx, z.ID); got.DNSKEY != "" || sealed != nil {
+		t.Fatal("key kept after disabling")
 	}
 }

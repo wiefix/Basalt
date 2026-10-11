@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"time"
 
 	mdns "github.com/miekg/dns"
 )
@@ -15,8 +16,10 @@ type catalog struct {
 }
 
 type zoneData struct {
-	name string
-	soa  *mdns.SOA
+	name   string
+	soa    *mdns.SOA
+	signer *signer   // nil: the zone is not signed
+	ds     []mdns.RR // DS of the zone's key, for a parent zone we also serve
 	// nodes holds every owner name with records; names that exist only
 	// because something below them does (empty non-terminals) are in
 	// nodes too, with no records.
@@ -35,7 +38,7 @@ type node struct {
 func fqdn(name string) string { return name + "." }
 
 // compile validates zones and builds the lookup structure.
-func compile(zones []Zone) (*catalog, error) {
+func compile(zones []Zone, now func() time.Time) (*catalog, error) {
 	c := &catalog{zones: make(map[string]*zoneData, len(zones))}
 	for i := range zones {
 		z := &zones[i]
@@ -45,7 +48,7 @@ func compile(zones []Zone) (*catalog, error) {
 		if c.zones[z.Name] != nil {
 			return nil, fmt.Errorf("zone %s listed twice", z.Name)
 		}
-		zd, err := compileZone(z)
+		zd, err := compileZone(z, now)
 		if err != nil {
 			return nil, fmt.Errorf("zone %s: %w", z.Name, err)
 		}
@@ -54,7 +57,7 @@ func compile(zones []Zone) (*catalog, error) {
 	return c, nil
 }
 
-func compileZone(z *Zone) (*zoneData, error) {
+func compileZone(z *Zone, now func() time.Time) (*zoneData, error) {
 	zd := &zoneData{name: z.Name, nodes: map[string]*node{}}
 	mname := z.Name
 	if ns := z.Nameservers(); len(ns) > 0 {
@@ -69,6 +72,21 @@ func compileZone(z *Zone) (*zoneData, error) {
 	}
 	apex := zd.ensure(z.Name)
 	apex.rrsets[mdns.TypeSOA] = []mdns.RR{zd.soa}
+	if z.DNSSEC != nil {
+		sg, err := newSigner(z.Name, z.DNSSEC, now)
+		if err != nil {
+			return nil, err
+		}
+		zd.signer = sg
+		ds := sg.key.ToDS(mdns.SHA256)
+		ds.Hdr.Ttl = dnskeyTTL
+		zd.ds = []mdns.RR{ds}
+		// CDS and CDNSKEY let registrars that support RFC 8078 pick up the
+		// DS by themselves.
+		apex.rrsets[mdns.TypeDNSKEY] = []mdns.RR{sg.key}
+		apex.rrsets[mdns.TypeCDNSKEY] = []mdns.RR{sg.key.ToCDNSKEY()}
+		apex.rrsets[mdns.TypeCDS] = []mdns.RR{ds.ToCDS()}
+	}
 	for i := range z.Records {
 		r := &z.Records[i]
 		owner := r.FQDN(z.Name)
@@ -172,6 +190,34 @@ func escapeTXT(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// parentOf returns the zone above zd that we also serve, or nil.
+func (c *catalog) parentOf(zd *zoneData) *zoneData {
+	_, parent, ok := strings.Cut(zd.name, ".")
+	if !ok {
+		return nil
+	}
+	return c.zoneFor(parent)
+}
+
+// types lists the record types a node answers, without except (for the
+// type bitmap of a NODATA proof).
+func (n *node) types(except uint16) []uint16 {
+	var out []uint16
+	for t, rrs := range n.rrsets {
+		if t != except && len(rrs) > 0 {
+			out = append(out, t)
+		}
+	}
+	if n.alias != "" {
+		for _, t := range []uint16{mdns.TypeA, mdns.TypeAAAA} {
+			if t != except {
+				out = append(out, t)
+			}
+		}
+	}
+	return out
 }
 
 // zoneFor finds the most specific zone containing name (lowercase, no

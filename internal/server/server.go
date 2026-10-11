@@ -190,6 +190,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/dns/zones", s.requireRole(store.RoleAdmin, s.handleCreateZone))
 	mux.Handle("GET /api/v1/dns/zones/{id}", s.requireRole(store.RoleViewer, s.handleGetZone))
 	mux.Handle("DELETE /api/v1/dns/zones/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteZone))
+	mux.Handle("PUT /api/v1/dns/zones/{id}/dnssec", s.requireRole(store.RoleAdmin, s.handleSetDNSSEC))
 	mux.Handle("POST /api/v1/dns/zones/{id}/records", s.requireRole(store.RoleAdmin, s.handlePutRecord))
 	mux.Handle("PUT /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handlePutRecord))
 	mux.Handle("DELETE /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handleDeleteRecord))

@@ -360,6 +360,8 @@ export interface DNSZone {
   name: string;
   serial: number;
   records: number;
+  // Present when the zone is signed: what to give the registrar.
+  dnssec?: { key_tag: number; algorithm: number; ds: string[]; dnskey: string };
   created_at: string;
   updated_at: string;
 }
@@ -522,6 +524,7 @@ export const api = {
   zone: (id: number) =>
     get<{ zone: DNSZone; records: DNSRecord[]; auto: DNSAutoRecord[]; types: string[] }>(`/api/v1/dns/zones/${id}`),
   deleteZone: (id: number) => del<void>(`/api/v1/dns/zones/${id}`),
+  setDNSSEC: (id: number, enabled: boolean) => put<{ zone: DNSZone }>(`/api/v1/dns/zones/${id}/dnssec`, { enabled }),
   createRecord: (zoneId: number, r: DNSRecordInput) => post<{ record: DNSRecord }>(`/api/v1/dns/zones/${zoneId}/records`, r),
   updateRecord: (zoneId: number, id: number, r: DNSRecordInput) =>
     put<{ record: DNSRecord }>(`/api/v1/dns/zones/${zoneId}/records/${id}`, r),
