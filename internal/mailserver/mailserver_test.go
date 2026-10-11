@@ -173,3 +173,74 @@ func TestClient(t *testing.T) {
 		t.Fatal("unknown method not reported")
 	}
 }
+
+func TestSettings(t *testing.T) {
+	var calls []string
+	var bodies []map[string]any
+	record := func(name string, res any) func(map[string]any) any {
+		return func(a map[string]any) any {
+			calls = append(calls, name)
+			bodies = append(bodies, a)
+			return res
+		}
+	}
+	created := map[string]any{"created": map[string]any{"n": map[string]any{"id": "new"}}}
+	f := fakeServer{
+		"x:MtaRoute/query":           record("route?", map[string]any{"ids": []string{"r1"}}),
+		"x:MtaRoute/get":             record("route get", map[string]any{"list": []any{map[string]any{"id": "r1", "name": "mx"}}}),
+		"x:MtaRoute/set":             record("route set", created),
+		"x:MtaTlsStrategy/query":     record("tls?", map[string]any{"ids": []string{"t1"}}),
+		"x:MtaTlsStrategy/get":       record("tls get", map[string]any{"list": []any{map[string]any{"id": "t1", "name": "basalt-relay"}}}),
+		"x:MtaTlsStrategy/set":       record("tls set", map[string]any{"updated": map[string]any{"t1": nil}}),
+		"x:MtaOutboundStrategy/set":  record("strategy", map[string]any{"updated": map[string]any{"singleton": nil}}),
+		"x:MtaInboundThrottle/query": record("throttle?", map[string]any{"ids": []string{}}),
+		"x:MtaInboundThrottle/set":   record("throttle set", created),
+		"x:Action/set":               record("action", created),
+	}
+	c := NewClient(f.transport)
+	ctx := context.Background()
+	if err := c.SetRelay(ctx, &Relay{Host: "smtp.example.net", Port: 587, Username: "u", Password: "p"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(calls, ","); got != "route?,route get,route set,tls?,tls get,tls set,strategy" {
+		t.Fatalf("calls %s", got)
+	}
+	b, _ := json.Marshal(bodies)
+	for _, want := range []string{`"@type":"Relay"`, `"name":"basalt-relay"`, `"authSecret":{"@type":"Value","secret":"p"}`,
+		`"implicitTls":false`, `"startTls":"require"`, `"else":"'basalt-relay'"`, `"if":"!is_local_domain(rcpt_domain)"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("missing %s in %s", want, b)
+		}
+	}
+	// The TLS strategy existed: it is updated, not created again.
+	if strings.Contains(jsonOf(bodies[5]), "create") {
+		t.Errorf("tls strategy recreated: %v", bodies[5])
+	}
+	calls, bodies = nil, nil
+	if err := c.SetSendLimit(ctx, 50); err != nil {
+		t.Fatal(err)
+	}
+	if b := jsonOf(bodies[len(bodies)-1]); !strings.Contains(b, `"rate":{"count":50,"period":3600000}`) ||
+		!strings.Contains(b, `"description":"basalt-send-limit"`) || !strings.Contains(b, `"authenticatedAs":true`) {
+		t.Fatalf("throttle %s", b)
+	}
+	if err := c.Reload(ctx); err != nil || calls[len(calls)-1] != "action" {
+		t.Fatal(calls, err)
+	}
+	// Without a relay: direct delivery, Basalt's objects removed.
+	calls, bodies = nil, nil
+	if err := c.SetRelay(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if b := jsonOf(bodies[0]); !strings.Contains(b, `"else":"'mx'"`) || !strings.Contains(b, `'invalid-tls'`) {
+		t.Fatalf("direct %s", b)
+	}
+	if b := jsonOf(bodies[len(bodies)-1]); !strings.Contains(b, `"destroy":["t1"]`) {
+		t.Fatalf("tls strategy kept: %s", b)
+	}
+}
+
+func jsonOf(v any) string {
+	b, _ := json.Marshal(v)
+	return string(b)
+}

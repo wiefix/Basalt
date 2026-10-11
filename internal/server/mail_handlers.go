@@ -89,6 +89,12 @@ func (s *Server) configureMail(ctx context.Context) {
 	if err == nil {
 		err = s.reconcileMailDomains(ctx, c, app)
 	}
+	if err == nil {
+		var m *mailSettings
+		if m, err = s.mailSettings(ctx); err == nil {
+			err = s.applyMailSettings(ctx, c, m)
+		}
+	}
 	if err != nil {
 		s.log.Warn("configure mail server", "err", err)
 		return
@@ -180,6 +186,9 @@ func (s *Server) reconcileMailDomains(ctx context.Context, c *mailserver.Client,
 			}
 		} else if err := c.EnableDomain(ctx, id, true); err != nil {
 			return err // it may have been turned off as the last domain
+		}
+		if err := c.SetCatchAll(ctx, id, catchAllAddress(d.CatchAll, d.Name)); err != nil {
+			return err
 		}
 		if id != d.RemoteID {
 			if err := s.db.SetMailDomainRemote(ctx, d.ID, id); err != nil {
@@ -368,6 +377,7 @@ type mailDomainView struct {
 	// ManagedDNS: a Basalt zone holds the domain and gets the records
 	// automatically; otherwise they go to the domain's DNS provider.
 	ManagedDNS bool      `json:"managed_dns"`
+	CatchAll   string    `json:"catch_all"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 
@@ -384,7 +394,7 @@ func (s *Server) viewMailDomains(ctx context.Context, domains []*store.MailDomai
 	out := make([]mailDomainView, len(domains))
 	for i, d := range domains {
 		out[i] = mailDomainView{ID: d.ID, Name: d.Name, DNSRecords: nonNil(d.DNSRecords),
-			ManagedDNS: dns.ZoneOf(d.Name, names) != "", CreatedAt: d.CreatedAt}
+			ManagedDNS: dns.ZoneOf(d.Name, names) != "", CatchAll: d.CatchAll, CreatedAt: d.CreatedAt}
 	}
 	return out, nil
 }
@@ -409,11 +419,17 @@ func (s *Server) handleMailOverview(w http.ResponseWriter, r *http.Request, p *p
 		s.internalError(w, r, "list mail domains", err)
 		return
 	}
+	settings, err := s.mailSettings(r.Context())
+	if err != nil {
+		s.internalError(w, r, "load mail settings", err)
+		return
+	}
 	s.mailTLSMu.Lock()
 	tls := s.mailTLS
 	s.mailTLSMu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"server": viewApp(app), "hostname": app.Hostname,
-		"domains": out, "ports": agentproto.MailPorts, "tls": tls, "checks": s.lastMailChecks(r.Context())})
+		"domains": out, "ports": agentproto.MailPorts, "tls": tls, "checks": s.lastMailChecks(r.Context()),
+		"settings": viewMailSettings(settings)})
 }
 
 type createMailRequest struct {
@@ -614,8 +630,13 @@ func (s *Server) handleDeleteMailDomain(w http.ResponseWriter, r *http.Request, 
 		s.mailError(w, err)
 		return
 	}
-	if len(boxes) > 0 {
-		writeError(w, http.StatusConflict, "delete the domain's mailboxes first")
+	fwds, err := c.Forwarders(ctx, d.RemoteID)
+	if err != nil {
+		s.mailError(w, err)
+		return
+	}
+	if len(boxes) > 0 || len(fwds) > 0 {
+		writeError(w, http.StatusConflict, "delete the domain's mailboxes and forwarders first")
 		return
 	}
 	if d.RemoteID != "" {

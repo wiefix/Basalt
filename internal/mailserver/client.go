@@ -81,6 +81,7 @@ type SetError struct {
 	ValidationErrors []struct {
 		Type     string `json:"type"`
 		Property string `json:"property"`
+		Value    string `json:"value"` // an explanation, when given
 	} `json:"validationErrors"`
 }
 
@@ -91,7 +92,11 @@ func (e *SetError) Error() string {
 	}
 	props := slices.Clone(e.Properties)
 	for _, v := range e.ValidationErrors {
-		props = append(props, v.Property+": "+v.Type)
+		why := v.Type
+		if v.Value != "" {
+			why = v.Value
+		}
+		props = append(props, v.Property+": "+why)
 	}
 	if len(props) > 0 {
 		msg += " (" + strings.Join(props, ", ") + ")"
@@ -190,18 +195,60 @@ func (c *Client) Configure(ctx context.Context, hostname, defaultDomainID string
 	if err := c.getAll(ctx, "x:NetworkListener", []string{"name"}, &ls); err != nil {
 		return err
 	}
-	if slices.ContainsFunc(ls.List, func(l struct {
+	if !slices.ContainsFunc(ls.List, func(l struct {
 		Name string `json:"name"`
 	}) bool {
 		return l.Name == "submission"
 	}) {
-		return nil
+		_, err := c.create(ctx, "x:NetworkListener", map[string]any{
+			"name": "submission", "bind": map[string]bool{"[::]:587": true}, "protocol": "smtp", "tlsImplicit": false,
+		})
+		if err != nil {
+			return fmt.Errorf("add submission listener: %w", err)
+		}
 	}
-	_, err := c.create(ctx, "x:NetworkListener", map[string]any{
-		"name": "submission", "bind": map[string]bool{"[::]:587": true}, "protocol": "smtp", "tlsImplicit": false,
-	})
-	if err != nil {
-		return fmt.Errorf("add submission listener: %w", err)
+	return c.logToStdout(ctx)
+}
+
+// logToStdout makes the server log to its standard output (the container
+// log) instead of a file inside the container, its default.
+func (c *Client) logToStdout(ctx context.Context) error {
+	var ts struct {
+		List []struct {
+			ID   string `json:"id"`
+			Type string `json:"@type"`
+		} `json:"list"`
+	}
+	if err := c.getAll(ctx, "x:Tracer", []string{"id", "@type"}, &ts); err != nil {
+		return err
+	}
+	var files []string
+	stdout := false
+	for _, t := range ts.List {
+		switch t.Type {
+		case "Stdout":
+			stdout = true
+		case "Log":
+			files = append(files, t.ID)
+		}
+	}
+	if !stdout {
+		if _, err := c.create(ctx, "x:Tracer", map[string]any{"@type": "Stdout", "ansi": false, "level": "info", "enable": true}); err != nil {
+			return fmt.Errorf("log to stdout: %w", err)
+		}
+	}
+	for _, id := range files {
+		if err := c.destroy(ctx, "x:Tracer", id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Reload applies changed server settings (routes, throttles, logging).
+func (c *Client) Reload(ctx context.Context) error {
+	if _, err := c.create(ctx, "x:Action", map[string]any{"@type": "ReloadSettings"}); err != nil {
+		return fmt.Errorf("reload settings: %w", err)
 	}
 	return nil
 }

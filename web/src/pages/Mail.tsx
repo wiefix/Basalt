@@ -6,9 +6,12 @@ import {
   can,
   type CheckStatus,
   type DNSRecordInput,
+  type Forwarder,
   type MailCheckResult,
   type MailChecks,
   type MailDomain,
+  type MailRelayInput,
+  type MailSettings,
   type Mailbox,
   type MailboxInput,
   type User,
@@ -50,6 +53,7 @@ export function MailPage({ user }: { user: User }) {
         <div className="stack">
           <ServerCard hostname={m.hostname ?? ""} serverId={m.server.server_id} appId={m.server.id} tls={m.tls} />
           <ChecksCard checks={m.checks ?? null} admin={admin} />
+          {m.settings && <OutgoingCard settings={m.settings} admin={admin} />}
           {m.domains.length === 0 ? (
             <div className="card empty">
               <h3>No mail domains</h3>
@@ -177,6 +181,158 @@ function ServerCard({
         </dd>
       </dl>
     </div>
+  );
+}
+
+function OutgoingCard({ settings, admin }: { settings: MailSettings; admin: boolean }) {
+  const [editing, setEditing] = useState(false);
+  const r = settings.relay;
+  return (
+    <div className="card card-body stack">
+      <div className="row wrap" style={{ justifyContent: "space-between" }}>
+        <h2>Outgoing mail</h2>
+        {admin && (
+          <button className="btn sm" onClick={() => setEditing(true)}>
+            <Icon name="edit" size={14} /> Edit
+          </button>
+        )}
+      </div>
+      <dl className="kv">
+        <dt>Delivery</dt>
+        <dd>
+          {r ? (
+            <>
+              Through the relay <span className="mono">{`${r.host}:${r.port}`}</span> ({r.tls === "implicit" ? "TLS" : "STARTTLS"}
+              {r.username ? <>, as <span className="mono">{r.username}</span></> : ", without login"}
+              {r.insecure ? ", certificate not verified" : ""})
+            </>
+          ) : (
+            "Directly to the recipients' mail servers (port 25)"
+          )}
+        </dd>
+        <dt>Send limit</dt>
+        <dd>
+          {settings.send_limit
+            ? `${settings.send_limit} messages per mailbox per hour`
+            : "No limit"}
+          <span className="faint small"> · a brake on a mailbox whose password was stolen</span>
+        </dd>
+      </dl>
+      {editing && <OutgoingModal settings={settings} onClose={() => setEditing(false)} />}
+    </div>
+  );
+}
+
+function OutgoingModal({ settings, onClose }: { settings: MailSettings; onClose: () => void }) {
+  const qc = useQueryClient();
+  const r = settings.relay;
+  const [useRelay, setUseRelay] = useState(!!r);
+  const [host, setHost] = useState(r?.host ?? "");
+  const [tls, setTLS] = useState<"implicit" | "starttls">(r?.tls ?? "starttls");
+  const [port, setPort] = useState(String(r?.port ?? 587));
+  const [username, setUsername] = useState(r?.username ?? "");
+  const [password, setPassword] = useState("");
+  const [insecure, setInsecure] = useState(r?.insecure ?? false);
+  const [limit, setLimit] = useState(String(settings.send_limit));
+  const save = useMutation({
+    mutationFn: () => {
+      let relay: MailRelayInput | null = null;
+      if (useRelay) {
+        relay = { host: host.trim(), port: Number(port) || 0, tls, username: username.trim(), insecure };
+        if (password) relay.password = password;
+      }
+      return api.updateMailSettings({ relay, send_limit: Number(limit) || 0 });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["mail"] });
+      onClose();
+    },
+  });
+  return (
+    <Modal
+      title="Outgoing mail"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" form="outgoing-form" disabled={save.isPending}>
+            Save
+          </button>
+        </>
+      }
+    >
+      <form
+        id="outgoing-form"
+        className="form"
+        onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          save.mutate();
+        }}
+      >
+        <ErrorBox error={save.error} />
+        <Field
+          label="Delivery"
+          help="A relay (Amazon SES, Mailgun, Postmark, your provider's SMTP…) helps when port 25 is blocked or the server's address has a poor reputation."
+        >
+          <div className="segmented">
+            <button type="button" className={useRelay ? "" : "active"} onClick={() => setUseRelay(false)}>
+              Direct
+            </button>
+            <button type="button" className={useRelay ? "active" : ""} onClick={() => setUseRelay(true)}>
+              Through a relay
+            </button>
+          </div>
+        </Field>
+        {useRelay && (
+          <>
+            <Field label="Relay host">
+              <input className="input mono" value={host} onChange={(e) => setHost(e.target.value)} placeholder="smtp.example.net" required />
+            </Field>
+            <Field label="Security" help="Credentials are only sent over TLS.">
+              <select
+                className="input"
+                value={tls}
+                onChange={(e) => {
+                  const v = e.target.value as "implicit" | "starttls";
+                  setTLS(v);
+                  if (port === "587" || port === "465") setPort(v === "implicit" ? "465" : "587");
+                }}
+              >
+                <option value="starttls">STARTTLS (usually port 587)</option>
+                <option value="implicit">TLS (usually port 465)</option>
+              </select>
+            </Field>
+            <Field label="Port">
+              <input className="input mono" type="number" min={1} max={65535} value={port} onChange={(e) => setPort(e.target.value)} required />
+            </Field>
+            <Field label="User name" help="Empty if the relay accepts this server without a login.">
+              <input className="input mono" value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="off" />
+            </Field>
+            {username.trim() && (
+              <Field label="Password" help={r?.has_password ? "Leave empty to keep the current one." : undefined}>
+                <input
+                  className="input mono"
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  autoComplete="new-password"
+                  required={!r?.has_password}
+                />
+              </Field>
+            )}
+            <label className="row small">
+              <input type="checkbox" checked={insecure} onChange={(e) => setInsecure(e.target.checked)} />
+              Do not verify the relay's certificate (only for a relay on your own network)
+            </label>
+          </>
+        )}
+        <Field label="Send limit" help="Messages each mailbox may send per hour; 0 for no limit.">
+          <input className="input mono" type="number" min={0} value={limit} onChange={(e) => setLimit(e.target.value)} />
+        </Field>
+      </form>
+    </Modal>
   );
 }
 
@@ -351,6 +507,9 @@ function DomainCard({ domain, hostname, user }: { domain: MailDomain; hostname: 
   const admin = can(user, "admin");
   const boxes = useQuery({ queryKey: ["mailboxes", domain.id], queryFn: () => api.mailboxes(domain.id) });
   const [editing, setEditing] = useState<Mailbox | "new" | null>(null);
+  const fwds = useQuery({ queryKey: ["forwarders", domain.id], queryFn: () => api.forwarders(domain.id) });
+  const [editingFwd, setEditingFwd] = useState<Forwarder | "new" | null>(null);
+  const [editingCatchAll, setEditingCatchAll] = useState(false);
   const [showDNS, setShowDNS] = useState(false);
   const refresh = () => qc.invalidateQueries({ queryKey: ["mailboxes", domain.id] });
 
@@ -385,6 +544,22 @@ function DomainCard({ domain, hostname, user }: { domain: MailDomain; hostname: 
     }
   };
 
+  const removeFwd = async (f: Forwarder) => {
+    const ok = await confirm({
+      title: `Delete ${f.address}?`,
+      body: <p>Mail to {f.address} is refused from now on.</p>,
+      confirm: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.deleteForwarder(domain.id, f.id);
+      qc.invalidateQueries({ queryKey: ["forwarders", domain.id] });
+    } catch (e) {
+      toast(errorMessage(e), true);
+    }
+  };
+
   return (
     <div className="card">
       <div className="card-body row wrap" style={{ justifyContent: "space-between" }}>
@@ -400,6 +575,9 @@ function DomainCard({ domain, hostname, user }: { domain: MailDomain; hostname: 
             <>
               <button className="btn sm primary" onClick={() => setEditing("new")}>
                 <Icon name="plus" size={14} /> Mailbox
+              </button>
+              <button className="btn sm" onClick={() => setEditingFwd("new")}>
+                <Icon name="plus" size={14} /> Forwarder
               </button>
               <button className="btn sm icon ghost" title="Remove domain" onClick={removeDomain}>
                 <Icon name="trash" size={14} />
@@ -485,6 +663,74 @@ function DomainCard({ domain, hostname, user }: { domain: MailDomain; hostname: 
           </table>
         )}
       </div>
+      {fwds.data && fwds.data.forwarders.length > 0 && (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Forwarder</th>
+                <th>Delivered to</th>
+                {admin && <th />}
+              </tr>
+            </thead>
+            <tbody>
+              {fwds.data.forwarders.map((f) => (
+                <tr key={f.id}>
+                  <td className="mono">{f.address}</td>
+                  <td className="mono small" style={{ overflowWrap: "anywhere" }}>
+                    {f.recipients.join(", ")}
+                  </td>
+                  {admin && (
+                    <td className="num">
+                      <div className="row" style={{ justifyContent: "flex-end" }}>
+                        <button className="btn sm icon ghost" title="Edit" onClick={() => setEditingFwd(f)}>
+                          <Icon name="edit" size={14} />
+                        </button>
+                        <button className="btn sm icon ghost" title="Delete" onClick={() => removeFwd(f)}>
+                          <Icon name="trash" size={14} />
+                        </button>
+                      </div>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {fwds.error && (
+        <div className="card-body">
+          <ErrorBox error={fwds.error} />
+        </div>
+      )}
+      <div className="card-body row wrap small" style={{ justifyContent: "space-between" }}>
+        <span className="muted">
+          Mail to unknown addresses:{" "}
+          {domain.catch_all ? (
+            <>
+              delivered to <span className="mono">{`${domain.catch_all}@${domain.name}`}</span> (catch-all)
+            </>
+          ) : (
+            "refused"
+          )}
+        </span>
+        {admin && (
+          <button className="btn sm ghost" onClick={() => setEditingCatchAll(true)}>
+            Change
+          </button>
+        )}
+      </div>
+      {editingCatchAll && (
+        <CatchAllModal domain={domain} mailboxes={boxes.data?.mailboxes ?? []} onClose={() => setEditingCatchAll(false)} />
+      )}
+      {editingFwd && (
+        <ForwarderModal
+          domain={domain}
+          forwarder={editingFwd === "new" ? null : editingFwd}
+          onClose={() => setEditingFwd(null)}
+          onSaved={() => qc.invalidateQueries({ queryKey: ["forwarders", domain.id] })}
+        />
+      )}
       {editing && (
         <MailboxModal domain={domain} mailbox={editing === "new" ? null : editing} onClose={() => setEditing(null)} onSaved={refresh} />
       )}
@@ -610,6 +856,128 @@ function MailboxModal({
         </Field>
         <Field label="Storage limit (MB)" help="Empty for no limit.">
           <input className="input mono" type="number" min={0} value={quota} onChange={(e) => setQuota(e.target.value)} />
+        </Field>
+      </form>
+    </Modal>
+  );
+}
+
+function CatchAllModal({ domain, mailboxes, onClose }: { domain: MailDomain; mailboxes: Mailbox[]; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [local, setLocal] = useState(domain.catch_all);
+  const save = useMutation({
+    mutationFn: () => api.updateMailDomain(domain.id, { catch_all: local }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["mail"] });
+      onClose();
+    },
+  });
+  // Mailbox addresses and their aliases, as local parts.
+  const locals = mailboxes.flatMap((b) => [b.address.replace(/@.*$/, ""), ...b.aliases]);
+  if (domain.catch_all && !locals.includes(domain.catch_all)) locals.push(domain.catch_all);
+  return (
+    <Modal
+      title={`Unknown addresses at ${domain.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" onClick={() => save.mutate()} disabled={save.isPending}>
+            Save
+          </button>
+        </>
+      }
+    >
+      <div className="form">
+        <ErrorBox error={save.error} />
+        <Field
+          label="Catch-all"
+          help="Mail to addresses that do not exist goes to this mailbox. Catch-all mailboxes receive a lot of spam: refusing is usually better."
+        >
+          <select className="input mono" value={local} onChange={(e) => setLocal(e.target.value)}>
+            <option value="">Refuse the mail</option>
+            {locals.map((l) => (
+              <option key={l} value={l}>
+                {l}@{domain.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
+function ForwarderModal({
+  domain,
+  forwarder,
+  onClose,
+  onSaved,
+}: {
+  domain: MailDomain;
+  forwarder: Forwarder | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [local, setLocal] = useState("");
+  const [recipients, setRecipients] = useState((forwarder?.recipients ?? []).join("\n"));
+  const save = useMutation({
+    mutationFn: async () => {
+      const list = recipients.split(/[\s,;]+/).filter(Boolean);
+      if (forwarder) await api.updateForwarder(domain.id, forwarder.id, list);
+      else await api.createForwarder(domain.id, { local: local.trim(), recipients: list });
+    },
+    onSuccess: () => {
+      onSaved();
+      onClose();
+    },
+  });
+  return (
+    <Modal
+      title={forwarder ? `Edit ${forwarder.address}` : `New forwarder at ${domain.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" form="forwarder-form" disabled={save.isPending}>
+            Save
+          </button>
+        </>
+      }
+    >
+      <form
+        id="forwarder-form"
+        className="form"
+        onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          save.mutate();
+        }}
+      >
+        <ErrorBox error={save.error} />
+        {!forwarder && (
+          <Field label="Address" help="Mail to it is passed on and not stored; it cannot be logged into.">
+            <div className="row">
+              <input className="input mono" value={local} onChange={(e) => setLocal(e.target.value)} placeholder="sales" required autoFocus />
+              <span className="mono muted">@{domain.name}</span>
+            </div>
+          </Field>
+        )}
+        <Field
+          label="Forward to"
+          help="One address per line: mailboxes here or anywhere else (up to 50). Forwarding outside can fail the recipients' SPF checks; DKIM-signed mail still passes."
+        >
+          <textarea
+            className="input mono"
+            rows={4}
+            value={recipients}
+            onChange={(e) => setRecipients(e.target.value)}
+            placeholder={"alice@" + domain.name + "\npartner@example.net"}
+            required
+          />
         </Field>
       </form>
     </Modal>

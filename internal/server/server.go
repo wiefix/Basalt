@@ -214,6 +214,12 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/mail", s.requireRole(store.RoleViewer, s.handleMailOverview))
 	mux.Handle("POST /api/v1/mail", s.requireRole(store.RoleAdmin, s.handleCreateMail))
+	mux.Handle("PUT /api/v1/mail/settings", s.requireRole(store.RoleAdmin, s.handleMailSettings))
+	mux.Handle("PUT /api/v1/mail/domains/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateMailDomain))
+	mux.Handle("GET /api/v1/mail/domains/{id}/forwarders", s.requireRole(store.RoleViewer, s.handleListForwarders))
+	mux.Handle("POST /api/v1/mail/domains/{id}/forwarders", s.requireRole(store.RoleAdmin, s.handleCreateForwarder))
+	mux.Handle("PUT /api/v1/mail/domains/{id}/forwarders/{fid}", s.requireRole(store.RoleAdmin, s.handleUpdateForwarder))
+	mux.Handle("DELETE /api/v1/mail/domains/{id}/forwarders/{fid}", s.requireRole(store.RoleAdmin, s.handleDeleteForwarder))
 	mux.Handle("POST /api/v1/mail/checks", s.requireRole(store.RoleAdmin, s.handleMailChecks))
 	mux.Handle("POST /api/v1/mail/domains", s.requireRole(store.RoleAdmin, s.handleCreateMailDomain))
 	mux.Handle("DELETE /api/v1/mail/domains/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteMailDomain))

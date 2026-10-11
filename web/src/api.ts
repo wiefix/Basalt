@@ -400,7 +400,37 @@ export interface MailDomain {
   name: string;
   dns_records: DNSRecordInput[]; // absolute names
   managed_dns: boolean;
+  catch_all: string;
   created_at: string;
+}
+
+export interface MailRelay {
+  host: string;
+  port: number;
+  tls: "implicit" | "starttls";
+  username: string;
+  has_password: boolean;
+  insecure: boolean;
+}
+
+export interface MailRelayInput {
+  host: string;
+  port: number;
+  tls: "implicit" | "starttls";
+  username: string;
+  password?: string;
+  insecure: boolean;
+}
+
+export interface MailSettings {
+  relay: MailRelay | null;
+  send_limit: number;
+}
+
+export interface Forwarder {
+  id: string;
+  address: string;
+  recipients: string[];
 }
 
 export interface Mailbox {
@@ -435,6 +465,7 @@ export interface MailOverview {
   ports: number[];
   tls?: { not_after?: string; error?: string };
   checks?: MailChecks | null;
+  settings?: MailSettings;
 }
 
 export interface MailboxInput {
@@ -583,6 +614,16 @@ export const api = {
   mail: () => get<MailOverview>("/api/v1/mail"),
   createMail: (b: { server_id: number; hostname: string; memory_mb: number }) =>
     post<{ server: App; deploy_error?: string }>("/api/v1/mail", b),
+  updateMailSettings: (b: { relay?: MailRelayInput | null; send_limit?: number }) =>
+    put<{ settings: MailSettings }>("/api/v1/mail/settings", b),
+  updateMailDomain: (id: number, b: { catch_all: string }) => put<void>(`/api/v1/mail/domains/${id}`, b),
+  forwarders: (domainId: number) => get<{ forwarders: Forwarder[] }>(`/api/v1/mail/domains/${domainId}/forwarders`),
+  createForwarder: (domainId: number, b: { local: string; recipients: string[] }) =>
+    post<{ forwarder: Forwarder }>(`/api/v1/mail/domains/${domainId}/forwarders`, b),
+  updateForwarder: (domainId: number, id: string, recipients: string[]) =>
+    put<void>(`/api/v1/mail/domains/${domainId}/forwarders/${encodeURIComponent(id)}`, { recipients }),
+  deleteForwarder: (domainId: number, id: string) =>
+    del<void>(`/api/v1/mail/domains/${domainId}/forwarders/${encodeURIComponent(id)}`),
   mailChecks: () => post<{ checks: MailChecks }>("/api/v1/mail/checks", {}),
   createMailDomain: (name: string) => post<{ domain: MailDomain }>("/api/v1/mail/domains", { name }),
   deleteMailDomain: (id: number) => del<void>(`/api/v1/mail/domains/${id}`),

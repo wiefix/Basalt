@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"os"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -154,6 +155,12 @@ func TestMailWithDocker(t *testing.T) {
 		t.Fatalf("stored checks = %v", checks)
 	}
 
+	// The mail server logs to the container log (its default is a file
+	// inside the container).
+	eventually(t, "mail server log", func() bool {
+		return strings.Contains(p.call(200, "GET", base+"/logs?tail=200", nil)["log"].(string), " INFO ")
+	})
+
 	// Mailboxes.
 	mb := "/api/v1/mail/domains/" + did + "/mailboxes"
 	p.call(http.StatusUnprocessableEntity, "POST", mb, map[string]any{"local": "Bad Name", "password": "long enough pass"})
@@ -266,6 +273,168 @@ func TestMailWithDocker(t *testing.T) {
 	p.call(http.StatusNotFound, "PUT", mb+"/nope", map[string]any{"password": "new mail pass 33"})
 	p.call(http.StatusConflict, "DELETE", "/api/v1/mail/domains/"+did, nil)
 
+	// Outgoing mail through a relay that requires STARTTLS and a login.
+	relayHost, listen := "host.docker.internal", "127.0.0.1:0"
+	if runtime.GOOS == "linux" {
+		ni, err := docker.New(sock).NetworkInspect(context.Background(), "basalt-app-"+aid)
+		if err != nil || len(ni.IPAM.Config) == 0 {
+			t.Fatalf("app network: %v %v", ni, err)
+		}
+		relayHost, listen = ni.IPAM.Config[0].Gateway, "0.0.0.0:0"
+	}
+	sink := startSMTPSink(t, listen, "relayuser", "relay secret 1")
+	settings := "/api/v1/mail/settings"
+	relay := func(kv ...any) map[string]any {
+		r := map[string]any{"host": relayHost, "port": sink.port(), "tls": "starttls"}
+		for i := 0; i < len(kv); i += 2 {
+			r[kv[i].(string)] = kv[i+1]
+		}
+		return map[string]any{"relay": r}
+	}
+	for _, bad := range []map[string]any{relay("host", "bad host"), relay("port", 0), relay("tls", "none"),
+		relay("username", "relayuser"), relay("username", "relayuser", "password", "x\r\nRCPT"), {"send_limit": -1}} {
+		p.call(http.StatusUnprocessableEntity, "PUT", settings, bad)
+	}
+	p.call(http.StatusBadRequest, "PUT", settings, relay("extra", true))
+	ok := relay("username", "relayuser", "password", "relay secret 1", "insecure", true)
+	ok["send_limit"] = 3
+	p.call(200, "PUT", settings, ok)
+	view := p.call(200, "GET", "/api/v1/mail", nil)["settings"].(map[string]any)
+	if r := view["relay"].(map[string]any); r["has_password"] != true || r["username"] != "relayuser" || view["send_limit"].(float64) != 3 ||
+		strings.Contains(jsonString(view), "secret") {
+		t.Fatalf("settings = %v", view)
+	}
+	var stored string
+	p.db.R.QueryRow(`SELECT value FROM settings WHERE key = 'mail_settings'`).Scan(&stored)
+	if !strings.Contains(stored, relayHost) || strings.Contains(stored, "relay secret") {
+		t.Fatalf("stored settings: %s", stored)
+	}
+	// Changing the limit alone keeps the relay and its password.
+	p.call(200, "PUT", settings, map[string]any{"send_limit": 3})
+	submit := func(to, subject string) error {
+		conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", "127.0.0.1:"+strconv.Itoa(ports[465]),
+			&tls.Config{ServerName: "mail.example.test", InsecureSkipVerify: true})
+		if err != nil {
+			return err
+		}
+		c, err := smtp.NewClient(conn, "mail.example.test")
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		if err := c.Hello("client.example.net"); err != nil {
+			return err
+		}
+		if err := c.Auth(smtp.PlainAuth("", "alice@example.test", "new mail pass 22", "mail.example.test")); err != nil {
+			return err
+		}
+		if err := c.Mail("alice@example.test"); err != nil {
+			return err
+		}
+		if err := c.Rcpt(to); err != nil {
+			return err
+		}
+		w, err := c.Data()
+		if err != nil {
+			return err
+		}
+		io.WriteString(w, "From: alice@example.test\r\nTo: "+to+"\r\nSubject: "+subject+"\r\n\r\nHi.\r\n")
+		if err := w.Close(); err != nil {
+			return err
+		}
+		return c.Quit()
+	}
+	// waitRelayed waits for a message at the relay (delivery is queued),
+	// showing the mail server's log if it does not arrive.
+	waitRelayed := func(rcpt, subject string) {
+		t.Helper()
+		for deadline := time.Now().Add(45 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+			for _, m := range sink.messages() {
+				if strings.Contains(strings.Join(m.To, " "), rcpt) && strings.Contains(m.Data, subject) {
+					if m.User != "relayuser" || !m.TLS {
+						t.Fatalf("relayed without TLS or login: %+v", m)
+					}
+					return
+				}
+			}
+		}
+		t.Fatalf("not relayed: %s to %s; relay got %d messages; mail server log:\n%s", subject, rcpt, len(sink.messages()),
+			p.call(200, "GET", base+"/logs?tail=80", nil)["log"])
+	}
+	if err := submit("someone@example.net", "through the relay"); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	waitRelayed("someone@example.net", "through the relay")
+
+	// Forwarders: to a mailbox and, through the relay, outside.
+	fw := "/api/v1/mail/domains/" + did + "/forwarders"
+	for _, bad := range []map[string]any{{"local": "sales", "recipients": []string{}}, {"local": "sales", "recipients": []string{"not an address"}},
+		{"local": "sales", "recipients": []string{"Sales <x@example.net>"}}, {"local": "sales", "recipients": []string{"sales@example.test"}},
+		{"local": "Bad Name", "recipients": []string{"x@example.net"}}} {
+		p.call(http.StatusUnprocessableEntity, "POST", fw, bad)
+	}
+	p.call(http.StatusConflict, "POST", fw, map[string]any{"local": "alice", "recipients": []string{"x@example.net"}})
+	fwd := p.call(http.StatusCreated, "POST", fw, map[string]any{"local": "sales", "recipients": []string{"Partner@Example.net", "alice@example.test"}})["forwarder"].(map[string]any)
+	fid := fwd["id"].(string)
+	if list := p.call(200, "GET", fw, nil)["forwarders"].([]any); len(list) != 1 ||
+		jsonString(list[0].(map[string]any)["recipients"]) != `["alice@example.test","partner@example.net"]` {
+		t.Fatalf("forwarders = %v", list)
+	}
+	p.call(http.StatusConflict, "POST", mb, map[string]any{"local": "sales", "password": "sales mail pass 1"})
+	if err := sendMail("127.0.0.1:"+strconv.Itoa(smtpPort), "tester@example.net", "sales@example.test",
+		"From: tester@example.net\r\nTo: sales@example.test\r\nSubject: forwarded order\r\n\r\nHi.\r\n"); err != nil {
+		t.Fatalf("to forwarder: %v", err)
+	}
+	waitRelayed("partner@example.net", "forwarded order")
+	eventually(t, "forwarded to the mailbox", func() bool {
+		_, body := jmap("alice@example.test", "new mail pass 22")
+		return strings.Contains(body, "forwarded order")
+	})
+	p.call(http.StatusNoContent, "PUT", fw+"/"+fid, map[string]any{"recipients": []string{"alice@example.test"}})
+	p.call(http.StatusUnprocessableEntity, "PUT", fw+"/"+fid, map[string]any{"local": "other", "recipients": []string{"alice@example.test"}})
+	p.call(http.StatusNotFound, "PUT", fw+"/nope", map[string]any{"recipients": []string{"alice@example.test"}})
+
+	// Catch-all: unknown addresses reach alice while it is set.
+	dom1 := "/api/v1/mail/domains/" + did
+	p.call(http.StatusUnprocessableEntity, "PUT", dom1, map[string]any{"catch_all": "Bad Name"})
+	p.call(http.StatusNoContent, "PUT", dom1, map[string]any{"catch_all": "alice"})
+	if d := p.call(200, "GET", "/api/v1/mail", nil)["domains"].([]any)[0].(map[string]any); d["catch_all"] != "alice" {
+		t.Fatalf("domain = %v", d)
+	}
+	eventually(t, "catch-all accepts", func() bool {
+		return sendMail("127.0.0.1:"+strconv.Itoa(smtpPort), "tester@example.net", "nobody@example.test",
+			"From: tester@example.net\r\nTo: nobody@example.test\r\nSubject: to nobody\r\n\r\nHi.\r\n") == nil
+	})
+	eventually(t, "catch-all delivers", func() bool {
+		_, body := jmap("alice@example.test", "new mail pass 22")
+		return strings.Contains(body, "to nobody")
+	})
+	p.call(http.StatusNoContent, "PUT", dom1, map[string]any{"catch_all": ""})
+	eventually(t, "catch-all off refuses", func() bool {
+		return sendMail("127.0.0.1:"+strconv.Itoa(smtpPort), "tester@example.net", "nobody2@example.test",
+			"From: tester@example.net\r\nTo: nobody2@example.test\r\nSubject: x\r\n\r\nHi.\r\n") != nil
+	})
+
+	// The send limit (3 an hour, one used) refuses a mailbox's extra mail.
+	var refused error
+	for i := range 6 {
+		if err := submit("someone@example.net", "burst "+strconv.Itoa(i)); err != nil {
+			refused = err
+			break
+		}
+	}
+	if refused == nil || !strings.HasPrefix(refused.Error(), "4") {
+		t.Fatalf("send limit not enforced: %v", refused)
+	}
+	t.Logf("send limit: %v", refused)
+	p.call(200, "PUT", settings, map[string]any{"send_limit": 0, "relay": nil})
+	eventually(t, "no limit", func() bool { return submit("alice@example.test", "unlimited") == nil })
+	if view := p.call(200, "GET", "/api/v1/mail", nil)["settings"].(map[string]any); view["relay"] != nil || view["send_limit"].(float64) != 0 {
+		t.Fatalf("settings = %v", view)
+	}
+	p.call(http.StatusConflict, "DELETE", "/api/v1/mail/domains/"+did, nil)
+	p.call(http.StatusNoContent, "DELETE", fw+"/"+fid, nil)
+
 	// A redeployment keeps the mail.
 	dep := p.call(http.StatusAccepted, "POST", base+"/deploy", map[string]any{})["deployment"].(map[string]any)
 	if d, log := followDeployment(t, p, base, jsonID(dep["id"])); d["status"] != "succeeded" {
@@ -308,10 +477,14 @@ func TestMailWithDocker(t *testing.T) {
 	viewer.call(http.StatusForbidden, "POST", "/api/v1/mail/domains/"+again+"/mailboxes", map[string]any{"local": "eve", "password": "eve mail pass 1"})
 	viewer.call(http.StatusForbidden, "POST", "/api/v1/mail/domains", map[string]string{"name": "example.net"})
 	viewer.call(http.StatusForbidden, "POST", "/api/v1/mail/checks", nil)
+	viewer.call(200, "GET", "/api/v1/mail/domains/"+again+"/forwarders", nil)
+	viewer.call(http.StatusForbidden, "POST", "/api/v1/mail/domains/"+again+"/forwarders", map[string]any{"local": "x", "recipients": []string{"a@example.net"}})
+	viewer.call(http.StatusForbidden, "PUT", "/api/v1/mail/settings", map[string]any{"send_limit": 1})
+	viewer.call(http.StatusForbidden, "PUT", "/api/v1/mail/domains/"+again, map[string]any{"catch_all": ""})
 	// No password reaches the audit log.
 	var audit string
 	p.db.R.QueryRow(`SELECT group_concat(details) FROM audit_log WHERE action LIKE 'mail.%'`).Scan(&audit)
-	if strings.Contains(audit, "mail pass") || !strings.Contains(audit, "alice@example.test") {
+	if strings.Contains(audit, "mail pass") || strings.Contains(audit, "relay secret") || !strings.Contains(audit, "alice@example.test") {
 		t.Fatalf("audit: %s", audit)
 	}
 }

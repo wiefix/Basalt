@@ -19,16 +19,19 @@ type MailDomain struct {
 	Name       string
 	RemoteID   string
 	DNSRecords []dns.Record
-	CreatedAt  time.Time
+	// CatchAll is the local part receiving mail for unknown addresses
+	// ("" for none).
+	CatchAll  string
+	CreatedAt time.Time
 }
 
-const mailDomainColumns = `id, app_id, name, remote_id, dns_records, created_at`
+const mailDomainColumns = `id, app_id, name, remote_id, dns_records, catch_all, created_at`
 
 func scanMailDomain(row interface{ Scan(...any) error }) (*MailDomain, error) {
 	var d MailDomain
 	var recs string
 	var created int64
-	if err := row.Scan(&d.ID, &d.AppID, &d.Name, &d.RemoteID, &recs, &created); err != nil {
+	if err := row.Scan(&d.ID, &d.AppID, &d.Name, &d.RemoteID, &recs, &d.CatchAll, &created); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -89,6 +92,10 @@ func (db *DB) SetMailDomainDNS(ctx context.Context, id int64, recs []dns.Record)
 	}
 	b, _ := json.Marshal(recs)
 	return db.execOne(ctx, `UPDATE mail_domains SET dns_records = ? WHERE id = ?`, string(b), id)
+}
+
+func (db *DB) SetMailDomainCatchAll(ctx context.Context, id int64, local string) error {
+	return db.execOne(ctx, `UPDATE mail_domains SET catch_all = ? WHERE id = ?`, local, id)
 }
 
 func (db *DB) DeleteMailDomain(ctx context.Context, id int64) error {
