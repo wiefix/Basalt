@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strconv"
@@ -8,9 +9,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libdns/libdns"
 	mdns "github.com/miekg/dns"
 
 	"github.com/wiefix/basalt/internal/agent"
+	"github.com/wiefix/basalt/internal/proxy"
+	"github.com/wiefix/basalt/internal/proxy/caddyrun"
 )
 
 // dnsQuery asks the server at addr over UDP and returns the rcode and the
@@ -328,4 +332,78 @@ func TestDNSSECEndToEnd(t *testing.T) {
 		t.Fatalf("zone = %v", z)
 	}
 	eventually(t, "signatures gone", func() bool { return len(ask("example.test.", mdns.TypeA).Answer) == 1 })
+}
+
+func TestDNSChallenges(t *testing.T) {
+	p := startPanel(t)
+	h := startHostWith(t, p, "", func(c *agent.Config) { c.DNSListen = "127.0.0.1:0" })
+	other := startHost(t, p)
+	var addr string
+	for _, s := range p.call(200, "GET", "/api/v1/dns", nil)["servers"].([]any) {
+		if s := s.(map[string]any); jsonID(s["server_id"]) == h.id {
+			addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(int(s["port"].(float64))))
+		}
+	}
+	// A public wildcard needs the zone in Basalt (DNS-01); an internal one does not.
+	route := func(want int, srv string, domains []string, tls string) {
+		t.Helper()
+		p.call(want, "POST", "/api/v1/servers/"+srv+"/routes", map[string]any{
+			"kind": "reverse_proxy", "domains": domains, "upstream": "127.0.0.1:9", "tls": tls})
+	}
+	route(http.StatusUnprocessableEntity, h.id, []string{"*.example.com"}, "auto")
+	route(http.StatusUnprocessableEntity, h.id, []string{"*.com"}, "auto")
+	route(http.StatusCreated, h.id, []string{"*.internal.example.org"}, "internal")
+	p.call(http.StatusCreated, "POST", "/api/v1/dns/zones", map[string]string{"name": "example.com"})
+	route(http.StatusCreated, h.id, []string{"*.example.com"}, "auto")
+	route(http.StatusCreated, other.id, []string{"shop.example.com"}, "auto")
+
+	// The proxy's DNS provider asks the agent, which asks the panel.
+	prov := &caddyrun.DNSProvider{Socket: proxy.ACMESocket(h.proxyDir)}
+	ctx := context.Background()
+	txt := libdns.TXT{Name: "_acme-challenge", Text: "token-wild"}
+	if _, err := prov.AppendRecords(ctx, "example.com.", []libdns.Record{txt}); err != nil {
+		t.Fatal(err)
+	}
+	// Published on the DNS server by the time the call returns.
+	q := func(name string) []string {
+		_, ans := dnsQuery(t, addr, name, mdns.TypeTXT)
+		return ans
+	}
+	if ans := q("_acme-challenge.example.com."); len(ans) != 1 || !strings.Contains(ans[0], `60 IN TXT "token-wild"`) {
+		t.Fatalf("challenge = %v", ans)
+	}
+	// Shown with the zone's automatic records (the host's own public
+	// addresses may be there too).
+	shown := false
+	for _, a := range p.call(200, "GET", "/api/v1/dns/zones/1", nil)["auto"].([]any) {
+		a := a.(map[string]any)
+		shown = shown || a["source"] == "ACME challenge" && a["value"] == "token-wild"
+	}
+	if !shown {
+		t.Fatal("challenge not listed with the zone")
+	}
+	// Only for this server's own domains, and only in our zones.
+	for zone, name := range map[string]string{
+		"example.com.": "_acme-challenge.shop",            // another server's domain
+		"example.net.": "_acme-challenge",                 // not served here
+		"example.org.": "_acme-challenge.internal",        // served here, but not our zone
+		"example.com":  "_acme-challenge.nope.deep.under", // nothing like it
+	} {
+		if _, err := prov.AppendRecords(ctx, zone, []libdns.Record{libdns.TXT{Name: name, Text: "x"}}); err == nil {
+			t.Errorf("challenge %s in %s accepted", name, zone)
+		}
+	}
+	if _, err := prov.DeleteRecords(ctx, "example.com.", []libdns.Record{txt}); err != nil {
+		t.Fatal(err)
+	}
+	if ans := q("_acme-challenge.example.com."); len(ans) != 0 {
+		t.Fatalf("challenge left: %v", ans)
+	}
+	// Expired challenges are dropped.
+	if err := p.db.AddDNSChallenge(ctx, mustAtoi(h.id), "_acme-challenge.example.com", "old", time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := p.db.DeleteExpiredDNSChallenges(ctx, time.Now()); err != nil || n != 1 {
+		t.Fatalf("expired: %d %v", n, err)
+	}
 }

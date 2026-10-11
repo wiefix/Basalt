@@ -79,7 +79,9 @@ func startPanelWith(t *testing.T, o server.Options) *panel {
 	if o.DataDir == "" {
 		o.DataDir = dir
 	}
-	api := httptest.NewServer(server.New(o).Handler())
+	srv := server.New(o)
+	hub.OnACMEChallenge(srv.ACMEChallenge)
+	api := httptest.NewServer(srv.Handler())
 	t.Cleanup(api.Close)
 
 	jar, _ := cookiejar.New(nil)

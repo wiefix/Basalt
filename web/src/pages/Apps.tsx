@@ -293,7 +293,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
               <input className="input mono" type="number" min={0} max={65535} value={port} onChange={(e) => setPort(e.target.value)} />
             </Field>
           )}
-          <Field label="Domains" help="Optional. Separate several with spaces; point their DNS at the server.">
+          <Field label="Domains" help="Optional. Separate several with spaces; point their DNS at the server. *.example.com covers every subdomain (its zone must be under DNS).">
             <input className="input" value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="api.example.com" />
           </Field>
           <Field label="Server">

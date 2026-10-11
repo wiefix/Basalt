@@ -64,6 +64,8 @@ type Agent struct {
 	HTTPPort      int
 	HTTPSPort     int
 	ACMEDirectory string
+	ACMECARoot    string
+	ACMEResolvers string
 	SFTPListen    string
 	DNSListen     string
 	Isolate       string // "auto", "on", "off"
@@ -168,6 +170,8 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs.IntVar(&cfg.HTTPPort, "http-port", 80, "public HTTP port of the proxy")
 	fs.IntVar(&cfg.HTTPSPort, "https-port", 443, "public HTTPS port of the proxy")
 	fs.StringVar(&cfg.ACMEDirectory, "acme-directory", env("ACME_DIRECTORY", ""), "ACME directory URL override (e.g. Let's Encrypt staging)")
+	fs.StringVar(&cfg.ACMECARoot, "acme-ca-root", env("ACME_CA_ROOT", ""), "PEM file trusted for the ACME server's certificate (a private CA)")
+	fs.StringVar(&cfg.ACMEResolvers, "acme-resolvers", env("ACME_RESOLVERS", ""), "comma-separated DNS servers (host:port) used to find DNS-01 challenge zones")
 	fs.StringVar(&cfg.SFTPListen, "sftp-listen", env("SFTP_LISTEN", ":2222"), "SFTP listen address (empty disables SFTP)")
 	fs.StringVar(&cfg.DNSListen, "dns-listen", env("DNS_LISTEN", ""), "authoritative DNS listen address, UDP and TCP (e.g. :53; empty disables DNS)")
 	fs.StringVar(&cfg.Isolate, "isolate", env("ISOLATE", "auto"), "per-site system users: auto (on when root on Linux), on, off")

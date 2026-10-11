@@ -3,13 +3,16 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/dns"
+	"github.com/wiefix/basalt/internal/proxy"
 	"github.com/wiefix/basalt/internal/store"
 )
 
@@ -153,7 +156,7 @@ func (s *Server) syncAutoDNS(ctx context.Context) {
 }
 
 // dnsLoop catches changes no handler announces, such as a server reporting
-// new addresses when it reconnects.
+// new addresses when it reconnects, and drops expired challenges.
 func (s *Server) dnsLoop(ctx context.Context) {
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
@@ -162,9 +165,90 @@ func (s *Server) dnsLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if _, err := s.db.DeleteExpiredDNSChallenges(ctx, s.now()); err != nil {
+				s.log.Error("delete expired dns challenges", "err", err)
+			}
 			s.syncAutoDNS(ctx)
 		}
 	}
+}
+
+// checkWildcards refuses wildcard domains that cannot get a certificate:
+// a public one needs the DNS-01 challenge, which works only for domains in
+// a zone Basalt serves.
+func (s *Server) checkWildcards(ctx context.Context, domains []string, tls proxy.TLSMode) error {
+	var names []string
+	for _, d := range domains {
+		if !proxy.IsWildcard(d) || tls == proxy.TLSInternal || !proxy.PublicCertEligible(d) {
+			continue
+		}
+		if names == nil {
+			zones, err := s.db.DNSZones(ctx)
+			if err != nil {
+				return err
+			}
+			names = []string{}
+			for _, z := range zones {
+				names = append(names, z.Name)
+			}
+		}
+		base := strings.TrimPrefix(d, "*.")
+		if dns.ZoneOf("_acme-challenge."+base, names) == "" {
+			return fmt.Errorf("%s needs its DNS in Basalt for a certificate: add the zone %s under DNS first (or use an internal certificate)", d, base)
+		}
+	}
+	return nil
+}
+
+// challengeTTL bounds how long a DNS-01 record stays if the proxy never
+// removes it (the CA validates within minutes).
+const challengeTTL = time.Hour
+
+// ACMEChallenge publishes (or withdraws) a DNS-01 challenge record for a
+// server's proxy. The name must be _acme-challenge.<d> for a domain d (or
+// *.d) the server serves, in one of our zones; it returns once every
+// connected agent has the zones.
+func (s *Server) ACMEChallenge(ctx context.Context, serverID int64, c agentproto.ACMEChallenge) error {
+	name := strings.TrimSuffix(strings.ToLower(c.Name), ".")
+	domain, ok := strings.CutPrefix(name, "_acme-challenge.")
+	if !ok || len(c.Value) == 0 || len(c.Value) > 255 || strings.ContainsAny(c.Value, "\x00\r\n") {
+		return errors.New("invalid challenge record")
+	}
+	served := false
+	for _, d := range []string{domain, "*." + domain} {
+		has, err := s.db.ServerHasDomain(ctx, serverID, d)
+		if err != nil {
+			return err
+		}
+		served = served || has
+	}
+	if !served {
+		return fmt.Errorf("%s is not a domain of this server", domain)
+	}
+	if !c.Present {
+		if err := s.db.RemoveDNSChallenge(ctx, serverID, name, c.Value); err != nil {
+			return err
+		}
+		s.syncAutoDNS(ctx)
+		return nil
+	}
+	zones, err := s.db.DNSZones(ctx)
+	if err != nil {
+		return err
+	}
+	names := make([]string, len(zones))
+	for i, z := range zones {
+		names[i] = z.Name
+	}
+	if dns.ZoneOf(name, names) == "" {
+		return fmt.Errorf("%s is not in a DNS zone managed by Basalt: add the zone under DNS, or use a domain whose DNS Basalt serves", domain)
+	}
+	if err := s.db.AddDNSChallenge(ctx, serverID, name, c.Value, s.now().Add(challengeTTL)); err != nil {
+		return err
+	}
+	s.log.Info("dns challenge published", "server_id", serverID, "name", name)
+	s.syncAutoDNS(ctx)
+	return nil
 }
 
 // pushDNSAll sends the zones to every connected agent, in parallel.

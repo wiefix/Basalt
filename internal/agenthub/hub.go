@@ -51,6 +51,7 @@ type Hub struct {
 	mu        sync.Mutex
 	conns     map[int64]*conn
 	onConnect func(ctx context.Context, serverID int64)
+	onACME    func(ctx context.Context, serverID int64, c agentproto.ACMEChallenge) error
 
 	installScript []byte
 	binariesDir   string
@@ -59,6 +60,12 @@ type Hub struct {
 // OnConnect registers a callback run (in its own goroutine) whenever an
 // agent connects, e.g. to push desired state. Call before serving.
 func (h *Hub) OnConnect(f func(ctx context.Context, serverID int64)) { h.onConnect = f }
+
+// OnACMEChallenge registers the handler of DNS-01 challenge requests from
+// agents (their proxies). Call before serving.
+func (h *Hub) OnACMEChallenge(f func(ctx context.Context, serverID int64, c agentproto.ACMEChallenge) error) {
+	h.onACME = f
+}
 
 type conn struct {
 	peer   *agentproto.Peer
@@ -332,6 +339,15 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 		}
 		// Only apps placed on this server are stored.
 		return nil, h.db.InsertAppMetrics(ctx, id, apps)
+	case agentproto.TypeACMEChallenge:
+		var c agentproto.ACMEChallenge
+		if err := json.Unmarshal(payload, &c); err != nil {
+			return nil, err
+		}
+		if h.onACME == nil {
+			return nil, errors.New("DNS challenges are not available")
+		}
+		return struct{}{}, h.onACME(ctx, id, c)
 	case agentproto.TypeRenewCert:
 		var req agentproto.RenewCertRequest
 		if err := json.Unmarshal(payload, &req); err != nil {

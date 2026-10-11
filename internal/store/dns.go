@@ -312,11 +312,11 @@ func (db *DB) DesiredDNS(ctx context.Context, unseal Unseal) (rev int64, zones [
 	if err != nil {
 		return 0, nil, err
 	}
-	targets, err := DNSTargets(ctx, tx)
+	auto, err := autoDNS(ctx, tx, zones)
 	if err != nil {
 		return 0, nil, err
 	}
-	for i, auto := range withAuto(zones, targets) {
+	for i, auto := range auto {
 		for _, r := range auto {
 			zones[i].Records = append(zones[i].Records, r.Record)
 		}
@@ -491,17 +491,92 @@ func DNSTargets(ctx context.Context, q queryer) ([]dns.AutoTarget, error) {
 	return out, rows.Err()
 }
 
-// withAuto adds the automatic records to zones.
-func withAuto(zones []dns.Zone, targets []dns.AutoTarget) [][]dns.AutoRecord {
+// dnsChallenges lists the DNS-01 challenge records not yet expired.
+func dnsChallenges(ctx context.Context, q queryer) ([]dns.Challenge, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT name, value FROM dns_challenges WHERE expires_at > unixepoch() ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []dns.Challenge
+	for rows.Next() {
+		var c dns.Challenge
+		if err := rows.Scan(&c.Name, &c.Value); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// autoDNS computes the automatic records (addresses of sites and apps,
+// DNS-01 challenges) of every zone.
+func autoDNS(ctx context.Context, q queryer, zones []dns.Zone) ([][]dns.AutoRecord, error) {
+	targets, err := DNSTargets(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	challenges, err := dnsChallenges(ctx, q)
+	if err != nil {
+		return nil, err
+	}
 	names := make([]string, len(zones))
 	for i, z := range zones {
 		names[i] = z.Name
 	}
 	out := make([][]dns.AutoRecord, len(zones))
 	for i := range zones {
-		out[i] = dns.AutoRecords(&zones[i], names, targets)
+		out[i] = append(dns.AutoRecords(&zones[i], names, targets), dns.ChallengeRecords(&zones[i], names, challenges)...)
+		if room := dns.MaxRecords - len(zones[i].Records); len(out[i]) > room {
+			out[i] = out[i][:max(room, 0)]
+		}
 	}
-	return out
+	return out, nil
+}
+
+// AddDNSChallenge publishes a DNS-01 challenge record for a server's proxy
+// until expires (or RemoveDNSChallenge).
+func (db *DB) AddDNSChallenge(ctx context.Context, serverID int64, name, value string, expires time.Time) error {
+	var n int
+	if err := db.R.QueryRowContext(ctx, `SELECT COUNT(*) FROM dns_challenges WHERE server_id = ?`, serverID).Scan(&n); err != nil {
+		return err
+	}
+	if n >= maxChallengesPerServer {
+		return ErrTooManyChallenges
+	}
+	_, err := db.W.ExecContext(ctx,
+		`INSERT INTO dns_challenges (server_id, name, value, expires_at) VALUES (?, ?, ?, ?)
+		 ON CONFLICT (server_id, name, value) DO UPDATE SET expires_at = excluded.expires_at`,
+		serverID, name, value, expires.Unix())
+	return err
+}
+
+const maxChallengesPerServer = 100
+
+var ErrTooManyChallenges = errors.New("too many pending DNS challenges for this server")
+
+func (db *DB) RemoveDNSChallenge(ctx context.Context, serverID int64, name, value string) error {
+	_, err := db.W.ExecContext(ctx, `DELETE FROM dns_challenges WHERE server_id = ? AND name = ? AND value = ?`,
+		serverID, name, value)
+	return err
+}
+
+// DeleteExpiredDNSChallenges removes challenges past their expiry.
+func (db *DB) DeleteExpiredDNSChallenges(ctx context.Context, now time.Time) (int64, error) {
+	res, err := db.W.ExecContext(ctx, `DELETE FROM dns_challenges WHERE expires_at <= ?`, now.Unix())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// ServerHasDomain reports whether a route on the server serves domain.
+func (db *DB) ServerHasDomain(ctx context.Context, serverID int64, domain string) (bool, error) {
+	var n int
+	err := db.R.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM proxy_route_domains WHERE server_id = ? AND domain = ?`, serverID, domain).Scan(&n)
+	return n > 0, err
 }
 
 func autoHash(recs []dns.AutoRecord) string {
@@ -521,11 +596,10 @@ func (db *DB) DNSZoneAuto(ctx context.Context, zoneID int64) ([]dns.AutoRecord, 
 	if err != nil {
 		return nil, err
 	}
-	targets, err := DNSTargets(ctx, db.R)
+	auto, err := autoDNS(ctx, db.R, zones)
 	if err != nil {
 		return nil, err
 	}
-	auto := withAuto(zones, targets)
 	for i, id := range ids {
 		if id == zoneID {
 			return auto[i], nil
@@ -546,7 +620,7 @@ func (db *DB) SyncAutoDNS(ctx context.Context, now time.Time) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	targets, err := DNSTargets(ctx, tx)
+	auto, err := autoDNS(ctx, tx, zones)
 	if err != nil {
 		return false, err
 	}
@@ -566,7 +640,7 @@ func (db *DB) SyncAutoDNS(ctx context.Context, now time.Time) (bool, error) {
 	}
 	rows.Close()
 	changed := false
-	for i, auto := range withAuto(zones, targets) {
+	for i, auto := range auto {
 		h := autoHash(auto)
 		if h == hashes[ids[i]] {
 			continue

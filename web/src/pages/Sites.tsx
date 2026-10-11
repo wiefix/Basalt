@@ -142,7 +142,7 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
           <Field label="Name" help="Used in the panel and as a default SFTP username.">
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-blog" required autoFocus />
           </Field>
-          <Field label="Domains" help="Separate several with spaces. Point their DNS (A/AAAA records) at the server.">
+          <Field label="Domains" help="Separate several with spaces. Point their DNS (A/AAAA records) at the server. *.example.com covers every subdomain (its zone must be under DNS).">
             <input className="input" value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="example.com www.example.com" required />
           </Field>
           <Field label="Server">

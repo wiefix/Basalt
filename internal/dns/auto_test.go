@@ -75,3 +75,31 @@ func TestPublicAddr(t *testing.T) {
 		}
 	}
 }
+
+func TestChallengeRecords(t *testing.T) {
+	z := Zone{Name: "example.com", Records: []Record{
+		rec("_acme-challenge.delegated", TypeCNAME, "x.acme-dns.example.org"),
+		rec("sub", TypeNS, "ns.example.org"),
+	}}
+	got := ChallengeRecords(&z, []string{"example.com", "child.example.com"}, []Challenge{
+		{"_acme-challenge.example.com", "token-1"},
+		{"_acme-challenge.example.com", "token-2"}, // wildcard and apex at once
+		{"_acme-challenge.example.com", "token-1"}, // asked twice
+		{"_acme-challenge.www.example.com", "token-3"},
+		{"_acme-challenge.delegated.example.com", "x"},
+		{"_acme-challenge.sub.example.com", "x"},
+		{"_acme-challenge.child.example.com", "x"},
+		{"_acme-challenge.example.org", "x"},
+	})
+	var lines []string
+	for _, r := range got {
+		lines = append(lines, r.Name+" "+r.Type+" "+r.Value)
+		z.Records = append(z.Records, r.Record)
+	}
+	if strings.Join(lines, "|") != "_acme-challenge TXT token-1|_acme-challenge TXT token-2|_acme-challenge.www TXT token-3" {
+		t.Fatalf("%v", lines)
+	}
+	if err := z.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

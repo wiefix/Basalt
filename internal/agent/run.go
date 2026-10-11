@@ -47,6 +47,10 @@ type Config struct {
 	HTTPPort      int
 	HTTPSPort     int
 	ACMEDirectory string
+	// ACMECARoots are PEM files trusted for the ACME server's TLS
+	// certificate; ACMEResolvers find DNS-01 zones (see proxy.BuildOptions).
+	ACMECARoots   []string
+	ACMEResolvers []string
 	// SFTPListen is the SFTP server address; empty disables SFTP.
 	SFTPListen string
 	// DNSListen is the authoritative DNS address (UDP and TCP); empty
@@ -83,6 +87,7 @@ type Agent struct {
 	sites   *sitesManager
 	sftp    *sftpManager
 	dns     *dnsManager
+	acme    *acmeRelay
 	apps    *appsManager
 	backups *backupManager
 	mysql   string
@@ -129,6 +134,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		sites:           sites,
 		sftp:            sftp,
 		dns:             newDNSManager(cfg, log.With("subsystem", "dns")),
+		acme:            newACMERelay(cfg, log.With("subsystem", "acme")),
 		apps:            apps,
 		backups:         backups,
 		mysql:           cfg.MySQLSocket,
@@ -156,6 +162,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.sites.janitor(ctx)
 	go a.sftp.run(ctx)
 	go a.dns.run(ctx)
+	go a.acme.run(ctx)
 	go a.apps.run(ctx)
 
 	backoff := minBackoff
@@ -241,6 +248,8 @@ func (a *Agent) session(ctx context.Context) error {
 	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
 		return err
 	}
+	a.acme.setPanel(peer)
+	defer a.acme.setPanel(nil)
 	go a.maybeRenew(ctx, peer)
 	go a.reportMetrics(ctx, peer)
 

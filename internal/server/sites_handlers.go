@@ -107,6 +107,9 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, p *pri
 		return
 	}
 	domains, tls, err := normalizeDomains(req.Domains, req.TLS)
+	if err == nil {
+		err = s.checkWildcards(r.Context(), domains, tls)
+	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -185,6 +188,9 @@ func (s *Server) handleSetSiteDomains(w http.ResponseWriter, r *http.Request, p 
 		return
 	}
 	domains, _, err := normalizeDomains(req.Domains, site.TLS)
+	if err == nil {
+		err = s.checkWildcards(r.Context(), domains, site.TLS)
+	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return

@@ -281,6 +281,9 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 		st.Port = cf.port
 	}
 	domains, tls, err := normalizeAppDomains(req.Domains, req.TLS, st.Port)
+	if err == nil {
+		err = s.checkWildcards(r.Context(), domains, tls)
+	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -413,6 +416,9 @@ func (s *Server) handleSetAppDomains(w http.ResponseWriter, r *http.Request, p *
 		return
 	}
 	domains, _, err := normalizeAppDomains(req.Domains, app.TLS, app.Port)
+	if err == nil {
+		err = s.checkWildcards(r.Context(), domains, app.TLS)
+	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return

@@ -91,7 +91,7 @@ function DomainsTab({ site, user }: { site: Site; user: User }) {
       >
         <h2>Domains</h2>
         <ErrorBox error={save.error} />
-        <Field label="One per line" help="Certificates are requested automatically once DNS points at the server.">
+        <Field label="One per line" help="Certificates are requested automatically once DNS points at the server. *.example.com covers every subdomain (its zone must be under DNS).">
           <textarea className="input mono" rows={6} value={text} onChange={(e) => setText(e.target.value)} disabled={!can(user, "admin")} />
         </Field>
         {can(user, "admin") && (

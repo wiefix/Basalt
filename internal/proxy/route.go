@@ -68,9 +68,30 @@ type Desired struct {
 
 const maxDomainsPerRoute = 100
 
+// NormalizeRouteDomain is NormalizeDomain that also accepts a wildcard as
+// the leftmost label ("*.example.com", matching one label). Public
+// certificates for wildcards come through the DNS-01 challenge.
+func NormalizeRouteDomain(d string) (string, error) {
+	d = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d)), ".")
+	rest, wild := strings.CutPrefix(d, "*.")
+	if !wild {
+		return NormalizeDomain(d)
+	}
+	n, err := NormalizeDomain(rest)
+	if err != nil {
+		return "", err
+	}
+	if _, err := netip.ParseAddr(n); err == nil || !strings.Contains(n, ".") {
+		return "", fmt.Errorf("wildcard domain %q needs at least two labels after *", d)
+	}
+	return "*." + n, nil
+}
+
+// IsWildcard reports whether a route domain is a wildcard.
+func IsWildcard(d string) bool { return strings.HasPrefix(d, "*.") }
+
 // NormalizeDomain lowercases and validates a hostname. Internationalised
-// names must be given in punycode (xn--) form; wildcards are not supported
-// until DNS-01 issuance is available.
+// names must be given in punycode (xn--) form; no wildcards.
 func NormalizeDomain(d string) (string, error) {
 	d = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(d)), ".")
 	if d == "" {
@@ -79,8 +100,8 @@ func NormalizeDomain(d string) (string, error) {
 	if len(d) > 253 {
 		return "", fmt.Errorf("domain %q is too long", d)
 	}
-	if strings.HasPrefix(d, "*.") {
-		return "", fmt.Errorf("wildcard domain %q is not supported yet", d)
+	if strings.Contains(d, "*") {
+		return "", fmt.Errorf("wildcard %q is not allowed here", d)
 	}
 	if _, err := netip.ParseAddr(d); err == nil {
 		return d, nil
@@ -103,8 +124,8 @@ func NormalizeDomain(d string) (string, error) {
 	return d, nil
 }
 
-// publicCertEligible reports whether a public CA can issue for d.
-func publicCertEligible(d string) bool {
+// PublicCertEligible reports whether a public CA can issue for d.
+func PublicCertEligible(d string) bool {
 	if _, err := netip.ParseAddr(d); err == nil {
 		return false
 	}
@@ -149,7 +170,7 @@ func (r *Route) Validate(sitesRoot string) error {
 		return fmt.Errorf("at most %d domains per route", maxDomainsPerRoute)
 	}
 	for i, d := range r.Domains {
-		n, err := NormalizeDomain(d)
+		n, err := NormalizeRouteDomain(d)
 		if err != nil {
 			return err
 		}

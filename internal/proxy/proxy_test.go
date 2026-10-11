@@ -119,3 +119,87 @@ func TestAppRoute(t *testing.T) {
 		t.Fatalf("app route config: %s", cfg)
 	}
 }
+
+func TestWildcardDomains(t *testing.T) {
+	for in, want := range map[string]string{"*.Example.com": "*.example.com", "*.a.b.example.com.": "*.a.b.example.com", "www.example.com": "www.example.com"} {
+		if got, err := NormalizeRouteDomain(in); err != nil || got != want {
+			t.Errorf("NormalizeRouteDomain(%q) = %q, %v", in, got, err)
+		}
+	}
+	for _, bad := range []string{"*.com", "*", "*.*.example.com", "a.*.example.com", "*example.com", "*.10.0.0.1", "**.example.com"} {
+		if _, err := NormalizeRouteDomain(bad); err == nil {
+			t.Errorf("NormalizeRouteDomain(%q) accepted", bad)
+		}
+	}
+	// Upstreams never take a wildcard.
+	if err := ValidateUpstream("*.example.com:80"); err == nil {
+		t.Error("wildcard upstream accepted")
+	}
+
+	d := Desired{ACMEEmail: "ops@example.com", Routes: []Route{
+		{ID: 1, Kind: KindReverseProxy, Domains: []string{"*.example.com", "example.org"}, Upstream: "127.0.0.1:1"},
+		{ID: 2, Kind: KindReverseProxy, Domains: []string{"www.example.com"}, Upstream: "127.0.0.1:2"},
+		{ID: 3, Kind: KindReverseProxy, Domains: []string{"*.dev.localhost"}, Upstream: "127.0.0.1:3"},
+	}}
+	if err := d.Validate(""); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Build(d, BuildOptions{Dir: "/p", HTTPPort: 80, HTTPSPort: 443,
+		ACMECARoots: []string{"/ca.pem"}, ACMEResolvers: []string{"127.0.0.1:53"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c struct {
+		Apps struct {
+			HTTP struct {
+				Servers map[string]struct {
+					Routes []struct {
+						Match []struct {
+							Host []string `json:"host"`
+						} `json:"match"`
+					} `json:"routes"`
+				} `json:"servers"`
+			} `json:"http"`
+			TLS struct {
+				Automation struct {
+					Policies []struct {
+						Subjects []string         `json:"subjects"`
+						Issuers  []map[string]any `json:"issuers"`
+					} `json:"policies"`
+				} `json:"automation"`
+			} `json:"tls"`
+		} `json:"apps"`
+	}
+	if err := json.Unmarshal(cfg, &c); err != nil {
+		t.Fatal(err)
+	}
+	// Exact names come before wildcards, whatever the route order.
+	var hosts []string
+	for _, r := range c.Apps.HTTP.Servers["basalt"].Routes {
+		if len(r.Match) > 0 {
+			hosts = append(hosts, strings.Join(r.Match[0].Host, " "))
+		}
+	}
+	if strings.Join(hosts, " | ") != "example.org | www.example.com | *.example.com | *.dev.localhost" {
+		t.Fatalf("route order: %v", hosts)
+	}
+	p := c.Apps.TLS.Automation.Policies
+	if len(p) != 3 || strings.Join(p[0].Subjects, ",") != "*.dev.localhost" || strings.Join(p[1].Subjects, ",") != "*.example.com" {
+		t.Fatalf("policies: %+v", p)
+	}
+	// Wildcards: DNS-01 through the agent, for Let's Encrypt and ZeroSSL.
+	for _, iss := range p[1].Issuers {
+		b, _ := json.Marshal(iss)
+		if !strings.Contains(string(b), `"provider":{"name":"basalt","socket":"/p/acme.sock"}`) ||
+			!strings.Contains(string(b), `"resolvers":["127.0.0.1:53"]`) || !strings.Contains(string(b), `"trusted_roots_pem_files":["/ca.pem"]`) {
+			t.Fatalf("wildcard issuer: %s", b)
+		}
+	}
+	if len(p[1].Issuers) != 2 {
+		t.Fatal("no ZeroSSL fallback for wildcards")
+	}
+	// Other names keep the HTTP and TLS-ALPN challenges.
+	if b, _ := json.Marshal(p[2]); strings.Contains(string(b), "challenges") {
+		t.Fatalf("default policy: %s", b)
+	}
+}

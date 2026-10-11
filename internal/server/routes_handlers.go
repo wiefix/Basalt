@@ -116,7 +116,11 @@ func (s *Server) handleCreateRoute(w http.ResponseWriter, r *http.Request, p *pr
 		TLS: req.TLS, HSTS: req.HSTS,
 	}
 	// The agent additionally confines static roots to its sites directory.
-	if err := route.Validate(""); err != nil {
+	err := route.Validate("")
+	if err == nil {
+		err = s.checkWildcards(r.Context(), route.Domains, route.TLS)
+	}
+	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}

@@ -137,3 +137,42 @@ var nonPublic = []netip.Prefix{
 	netip.MustParsePrefix("203.0.113.0/24"),  // documentation
 	netip.MustParsePrefix("2001:db8::/32"),   // documentation
 }
+
+// ChallengeTTL is the TTL of DNS-01 challenge records.
+const ChallengeTTL = MinTTL
+
+// Challenge is a DNS-01 challenge record: TXT Value at Name (absolute).
+type Challenge struct {
+	Name  string
+	Value string
+}
+
+// ChallengeRecords returns the TXT records zone z serves for challenges in
+// it. A name the user pointed elsewhere with a CNAME (delegated
+// validation) or that is delegated gets none.
+func ChallengeRecords(z *Zone, zones []string, cs []Challenge) []AutoRecord {
+	skip := map[string]bool{}
+	var cuts []string
+	for _, r := range z.Records {
+		switch {
+		case r.Type == TypeCNAME:
+			skip[r.Name] = true
+		case r.Type == TypeNS && r.Name != "@":
+			cuts = append(cuts, r.Name)
+		}
+	}
+	var out []AutoRecord
+	seen := map[string]bool{}
+	for _, c := range cs {
+		if ZoneOf(c.Name, zones) != z.Name || c.Name == z.Name {
+			continue
+		}
+		name := strings.TrimSuffix(c.Name, "."+z.Name)
+		if skip[name] || delegated(name, cuts) || seen[name+" "+c.Value] {
+			continue
+		}
+		seen[name+" "+c.Value] = true
+		out = append(out, AutoRecord{Record: Record{Name: name, Type: TypeTXT, TTL: ChallengeTTL, Value: c.Value}, Source: "ACME challenge"})
+	}
+	return out
+}

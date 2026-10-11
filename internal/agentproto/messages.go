@@ -24,6 +24,9 @@ const (
 	TypeMetrics = "metrics"
 	// agent -> server requests
 	TypeRenewCert = "renew_cert"
+	// TypeACMEChallenge sets or removes a DNS-01 challenge record for the
+	// host's proxy (ACMEChallenge).
+	TypeACMEChallenge = "acme_challenge"
 	// server -> agent requests
 	TypePing       = "ping"
 	TypeProxyApply = "proxy_apply"
@@ -193,6 +196,15 @@ type FilesResponse struct {
 type SFTPApply struct {
 	Revision int64        `json:"revision"`
 	Users    []sftpd.User `json:"users"`
+}
+
+// ACMEChallenge asks the panel to publish (or withdraw) the TXT record
+// _acme-challenge.<domain> on every DNS server. The panel answers once the
+// servers have it.
+type ACMEChallenge struct {
+	Name    string `json:"name"` // _acme-challenge.<domain>, no trailing dot
+	Value   string `json:"value"`
+	Present bool   `json:"present"`
 }
 
 // DNSApply is the complete set of DNS zones. Every agent keeps them; the

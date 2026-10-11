@@ -31,6 +31,8 @@ import (
 type host struct {
 	id        string
 	sitesRoot string
+	proxyDir  string
+	httpsPort int
 	get       func(host, path string) (int, string)
 }
 
@@ -85,7 +87,7 @@ func startHostWith(t *testing.T, p *panel, dockerSocket string, configure ...fun
 		s := p.server(id)
 		return s["status"] == "online" && s["hostname"] != nil
 	})
-	return &host{id: id, sitesRoot: sitesRoot, get: httpsGetter(t, httpsPort)}
+	return &host{id: id, sitesRoot: sitesRoot, proxyDir: proxyDir, httpsPort: httpsPort, get: httpsGetter(t, httpsPort)}
 }
 
 // raw performs a request with an arbitrary body and returns status and body.

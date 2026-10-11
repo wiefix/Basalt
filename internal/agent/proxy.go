@@ -59,6 +59,8 @@ func newProxyManager(cfg Config, sites *sitesManager, apps *appsManager, log *sl
 			HTTPPort:      cfg.HTTPPort,
 			HTTPSPort:     cfg.HTTPSPort,
 			ACMEDirectory: cfg.ACMEDirectory,
+			ACMECARoots:   cfg.ACMECARoots,
+			ACMEResolvers: cfg.ACMEResolvers,
 		},
 		admin: proxy.NewAdmin(proxy.AdminSocket(cfg.ProxyDir)),
 	}

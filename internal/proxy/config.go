@@ -18,7 +18,20 @@ type BuildOptions struct {
 	HTTPSPort int
 	// ACMEDirectory overrides the public CA (e.g. Let's Encrypt staging).
 	ACMEDirectory string
+	// ACMECARoots are PEM files trusted for the ACME server's own TLS
+	// certificate (a private CA such as Pebble).
+	ACMECARoots []string
+	// ACMEResolvers are DNS servers certmagic uses to find the zone of a
+	// DNS-01 challenge (default: the system's).
+	ACMEResolvers []string
 }
+
+// ACMESocket is where the agent answers DNS-01 requests of the proxy.
+func ACMESocket(dir string) string { return filepath.Join(dir, "acme.sock") }
+
+// DNSProviderModule is the Caddy DNS provider that sets DNS-01 challenge
+// records through the agent (see caddyrun).
+const DNSProviderModule = "basalt"
 
 const zeroSSLDirectory = "https://acme.zerossl.com/v2/DV90"
 
@@ -60,29 +73,39 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 	if o.HTTPPort == 0 || o.HTTPSPort == 0 {
 		return nil, "", fmt.Errorf("HTTP and HTTPS ports are required")
 	}
-	var internalNames []string
-	var routes []any
+	var internalNames, wildcardNames []string
+	var routes, wildcardRoutes []any
 	filesystems := []any{}
 	for _, r := range d.Routes {
-		if r.TLS == TLSInternal {
-			internalNames = append(internalNames, r.Domains...)
-		} else {
-			for _, dom := range r.Domains {
-				if !publicCertEligible(dom) {
-					internalNames = append(internalNames, dom)
-				}
+		var exact, wild []string
+		for _, dom := range r.Domains {
+			if IsWildcard(dom) {
+				wild = append(wild, dom)
+			} else {
+				exact = append(exact, dom)
+			}
+			switch {
+			case r.TLS == TLSInternal || !PublicCertEligible(dom):
+				internalNames = append(internalNames, dom)
+			case IsWildcard(dom):
+				wildcardNames = append(wildcardNames, dom)
 			}
 		}
 		handlers, fsEntry := routeHandlers(r)
 		if fsEntry != nil {
 			filesystems = append(filesystems, fsEntry)
 		}
-		routes = append(routes, obj{
-			"match":    []any{obj{"host": r.Domains}},
-			"handle":   []any{obj{"handler": "subroute", "routes": []any{obj{"handle": handlers}}}},
-			"terminal": true,
-		})
+		handle := []any{obj{"handler": "subroute", "routes": []any{obj{"handle": handlers}}}}
+		if len(exact) > 0 {
+			routes = append(routes, obj{"match": []any{obj{"host": exact}}, "handle": handle, "terminal": true})
+		}
+		if len(wild) > 0 {
+			wildcardRoutes = append(wildcardRoutes, obj{"match": []any{obj{"host": wild}}, "handle": handle, "terminal": true})
+		}
 	}
+	// Exact names first: www.example.com is served by its own route even
+	// when another route has *.example.com.
+	routes = append(routes, wildcardRoutes...)
 	routes = append(routes, obj{"handle": []any{obj{
 		"handler": "static_response", "status_code": 404, "body": "Not found\n",
 	}}})
@@ -108,7 +131,7 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 				"grace_period": "10s",
 				"servers":      obj{"basalt": server},
 			},
-			"tls": obj{"automation": obj{"policies": tlsPolicies(internalNames, d.ACMEEmail, o.ACMEDirectory)}},
+			"tls": obj{"automation": obj{"policies": tlsPolicies(internalNames, wildcardNames, d.ACMEEmail, o)}},
 			// Never touch the host's trust store with the internal CA root.
 			"pki": obj{"certificate_authorities": obj{"local": obj{"install_trust": false}}},
 		},
@@ -190,7 +213,7 @@ func routeHandlers(r Route) (handlers []any, fsEntry obj) {
 	return handlers, fsEntry
 }
 
-func tlsPolicies(internalNames []string, email, acmeDirectory string) []any {
+func tlsPolicies(internalNames, wildcardNames []string, email string, o BuildOptions) []any {
 	var policies []any
 	if len(internalNames) > 0 {
 		policies = append(policies, obj{
@@ -198,26 +221,46 @@ func tlsPolicies(internalNames []string, email, acmeDirectory string) []any {
 			"issuers":  []any{obj{"module": "internal"}},
 		})
 	}
-	var issuers []any
-	if acmeDirectory != "" {
-		issuers = []any{acmeIssuer(acmeDirectory, email)}
-	} else {
-		issuers = []any{acmeIssuer("", email)}
+	issuers := func(dns01 bool) []any {
+		if o.ACMEDirectory != "" {
+			return []any{acmeIssuer(o.ACMEDirectory, email, dns01, o)}
+		}
+		out := []any{acmeIssuer("", email, dns01, o)}
 		if email != "" {
 			// ZeroSSL needs an email to obtain its account credentials.
-			issuers = append(issuers, acmeIssuer(zeroSSLDirectory, email))
+			out = append(out, acmeIssuer(zeroSSLDirectory, email, dns01, o))
 		}
+		return out
 	}
-	return append(policies, obj{"issuers": issuers})
+	if len(wildcardNames) > 0 {
+		// A CA issues wildcards only through the DNS-01 challenge.
+		policies = append(policies, obj{"subjects": wildcardNames, "issuers": issuers(true)})
+	}
+	return append(policies, obj{"issuers": issuers(false)})
 }
 
-func acmeIssuer(directory, email string) obj {
+func acmeIssuer(directory, email string, dns01 bool, o BuildOptions) obj {
 	iss := obj{"module": "acme"}
 	if directory != "" {
 		iss["ca"] = directory
 	}
 	if email != "" {
 		iss["email"] = email
+	}
+	if len(o.ACMECARoots) > 0 {
+		iss["trusted_roots_pem_files"] = o.ACMECARoots
+	}
+	if dns01 {
+		dns := obj{
+			"provider": obj{"name": DNSProviderModule, "socket": ACMESocket(o.Dir)},
+			"ttl":      "60s",
+			// The agent answers only once every DNS server has the record.
+			"propagation_timeout": -1,
+		}
+		if len(o.ACMEResolvers) > 0 {
+			dns["resolvers"] = o.ACMEResolvers
+		}
+		iss["challenges"] = obj{"dns": dns}
 	}
 	return iss
 }

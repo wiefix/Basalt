@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -190,6 +191,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		Restic:         cfg.Restic,
 	})
 	hub.OnConnect(api.SyncSites)
+	hub.OnACMEChallenge(api.ACMEChallenge)
 
 	// Run both listeners; the first failure stops the other.
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -233,6 +235,8 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		HTTPPort:      cfg.HTTPPort,
 		HTTPSPort:     cfg.HTTPSPort,
 		ACMEDirectory: cfg.ACMEDirectory,
+		ACMECARoots:   splitList(cfg.ACMECARoot),
+		ACMEResolvers: splitList(cfg.ACMEResolvers),
 		SFTPListen:    cfg.SFTPListen,
 		DNSListen:     cfg.DNSListen,
 		Isolate:       cfg.Isolate == "on" || (cfg.Isolate == "auto" && runtime.GOOS == "linux" && os.Geteuid() == 0),
@@ -318,4 +322,15 @@ func runAgentEnroll(ctx context.Context, args []string, stderr io.Writer) error 
 	fmt.Fprintf(stderr, "enrolled as server %d; credentials saved in %s\nstart the agent with: basalt agent --data-dir %s\n",
 		id, cfg.DataDir, cfg.DataDir)
 	return nil
+}
+
+// splitList splits a comma-separated flag value, dropping empty items.
+func splitList(v string) []string {
+	var out []string
+	for _, item := range strings.Split(v, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }

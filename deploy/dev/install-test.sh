@@ -100,6 +100,19 @@ for i in $(seq 30); do
 done
 docker exec basalt-panel dig +noall +answer @$NODEIP shop.test A
 [ "$(docker exec basalt-panel dig +short @$NODEIP shop.test A)" = "$NODEIP" ] || { echo "no automatic record"; exit 1; }
+echo "### DNS-01 relay: the proxy user asks the agent, the panel publishes the TXT record"
+docker exec basalt-node1 stat -c '  %n %U %a' /var/lib/basalt/proxy/acme.sock
+[ "$(docker exec basalt-node1 stat -c '%U %a' /var/lib/basalt/proxy/acme.sock)" = "basalt-proxy 600" ] || { echo "acme socket not private to the proxy"; exit 1; }
+docker exec basalt-node1 runuser -u basalt-proxy -- curl -fsS --unix-socket /var/lib/basalt/proxy/acme.sock \
+  -X POST -d '{"name":"_acme-challenge.shop.test","value":"relay-token"}' http://agent/acme-challenge
+[ "$(docker exec basalt-panel dig +short @$NODEIP _acme-challenge.shop.test TXT)" = '"relay-token"' ] || { echo "challenge not published"; exit 1; }
+echo "  _acme-challenge.shop.test TXT relay-token served by node1"
+DENIED=$(docker exec basalt-node1 runuser -u nobody -- curl -sS --unix-socket /var/lib/basalt/proxy/acme.sock \
+  -X POST -d '{"name":"_acme-challenge.shop.test","value":"x"}' http://agent/acme-challenge 2>&1 || true)
+echo "  as nobody: $DENIED"
+case "$DENIED" in *"Couldn't connect"* | *"Permission denied"* | *"Failed to connect"*) ;; *) echo "socket open to other users"; exit 1 ;; esac
+docker exec basalt-node1 runuser -u basalt-proxy -- curl -fsS --unix-socket /var/lib/basalt/proxy/acme.sock \
+  -X DELETE -d '{"name":"_acme-challenge.shop.test","value":"relay-token"}' http://agent/acme-challenge
 echo "### DNSSEC: the signed zone validates (delv with the zone key as trust anchor)"
 $API -X PUT -d '{"enabled":true}' http://127.0.0.1:8080/api/v1/dns/zones/$ZONE/dnssec >/dev/null
 KEY=$($API http://127.0.0.1:8080/api/v1/dns/zones/$ZONE | python3 -c 'import sys,json; print(json.load(sys.stdin)["zone"]["dnssec"]["dnskey"])')
