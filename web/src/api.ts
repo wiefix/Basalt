@@ -184,6 +184,8 @@ export interface App {
   memory_mb: number;
   cpus: number;
   read_only: boolean;
+  template?: string;
+  template_revision?: number;
   created_at: string;
 }
 
@@ -404,6 +406,33 @@ export interface MailDomain {
   created_at: string;
 }
 
+export interface TemplateInput {
+  key: string;
+  label: string;
+  type: "domain" | "text" | "email";
+  required: boolean;
+  default?: string;
+  help?: string;
+}
+
+export interface Template {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  website: string;
+  version: string;
+  revision: number;
+  memory_mb: number;
+  inputs: TemplateInput[];
+  secrets: { key: string; length: number }[] | null;
+  expose: { service: string; port: number };
+  notes: string;
+  services: { name: string; image: string }[];
+  volumes: string[] | null;
+  compose: string;
+}
+
 export interface MailRelay {
   host: string;
   port: number;
@@ -611,6 +640,9 @@ export const api = {
     put<{ record: DNSRecord }>(`/api/v1/dns/zones/${zoneId}/records/${id}`, r),
   deleteRecord: (zoneId: number, id: number) => del<void>(`/api/v1/dns/zones/${zoneId}/records/${id}`),
 
+  catalog: () => get<{ templates: Template[] }>("/api/v1/catalog"),
+  installTemplate: (id: string, b: { server_id: number; name: string; inputs: Record<string, string> }) =>
+    post<{ app: App; notes: string; deploy_error?: string }>(`/api/v1/catalog/${id}/install`, b),
   mail: () => get<MailOverview>("/api/v1/mail"),
   createMail: (b: { server_id: number; hostname: string; memory_mb: number }) =>
     post<{ server: App; deploy_error?: string }>("/api/v1/mail", b),
@@ -761,6 +793,8 @@ export const sourceLabel = (a: App) =>
     ? `${engineNames[a.engine ?? ""] ?? a.engine} ${a.version}`
     : a.source === "git"
     ? `${a.git?.url} · ${a.git?.branch}`
+    : a.source === "compose" && a.template
+      ? `catalog · ${a.template} · ${(a.compose?.services ?? []).map((s) => s.name).join(", ")}`
     : a.source === "compose"
       ? `compose · ${(a.compose?.services ?? []).map((s) => s.name).join(", ")}`
       : a.image;

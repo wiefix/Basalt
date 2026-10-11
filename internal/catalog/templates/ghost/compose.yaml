@@ -1,0 +1,35 @@
+services:
+  ghost:
+    image: ghost:6.69.0@sha256:55131b90d48c3cecae6c085f873b2067542ababd286b12d08474b2b34328e266
+    environment:
+      url: https://${DOMAIN}
+      NODE_ENV: production
+      database__client: mysql
+      database__connection__host: db
+      database__connection__user: ghost
+      database__connection__password: ${DB_PASSWORD}
+      database__connection__database: ghost
+    volumes:
+      - content:/var/lib/ghost/content
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: mysql:8.4.11@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242
+    environment:
+      MYSQL_DATABASE: ghost
+      MYSQL_USER: ghost
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+    volumes:
+      - db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5m
+      start_interval: 1s
+volumes:
+  content:
+  db:

@@ -1,0 +1,23 @@
+id: wordpress
+name: WordPress
+description: The popular publishing platform for websites and blogs, with a MariaDB database.
+category: CMS
+website: https://wordpress.org
+version: 7.1.3
+revision: 1
+memory_mb: 512
+inputs:
+  - key: DOMAIN
+    label: Domain
+    type: domain
+    required: true
+secrets:
+  - key: DB_PASSWORD
+    length: 32
+  - key: DB_ROOT_PASSWORD
+    length: 32
+expose:
+  service: wordpress
+  port: 80
+notes: |
+  Open the domain right away to choose the site title and the administrator account.

@@ -212,6 +212,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handlePutRecord))
 	mux.Handle("DELETE /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handleDeleteRecord))
 
+	mux.Handle("GET /api/v1/catalog", s.requireRole(store.RoleViewer, s.handleCatalog))
+	mux.Handle("POST /api/v1/catalog/{id}/install", s.requireRole(store.RoleAdmin, s.handleInstall))
 	mux.Handle("GET /api/v1/mail", s.requireRole(store.RoleViewer, s.handleMailOverview))
 	mux.Handle("POST /api/v1/mail", s.requireRole(store.RoleAdmin, s.handleCreateMail))
 	mux.Handle("PUT /api/v1/mail/settings", s.requireRole(store.RoleAdmin, s.handleMailSettings))

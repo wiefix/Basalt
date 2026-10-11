@@ -1,0 +1,22 @@
+id: n8n
+name: n8n
+description: Workflow automation connecting hundreds of apps and APIs, with a visual editor.
+category: Automation
+website: https://n8n.io
+version: 2.43.3
+revision: 1
+memory_mb: 1024
+inputs:
+  - key: DOMAIN
+    label: Domain
+    type: domain
+    required: true
+secrets:
+  - key: N8N_ENCRYPTION_KEY
+    length: 48
+expose:
+  service: n8n
+  port: 5678
+notes: |
+  Open the domain to create the owner account. N8N_ENCRYPTION_KEY under Environment
+  protects stored credentials: keep it with your backups.

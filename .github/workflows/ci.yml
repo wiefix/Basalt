@@ -46,6 +46,7 @@ jobs:
         env:
           BASALT_DOCKER_TESTS: "1"
           BASALT_DB_ENGINE_TESTS: "1"
+          BASALT_CATALOG_TESTS: "1"
           DOCKER_SOCKET: /var/run/docker.sock
         run: go test -count=1 -timeout 30m -run 'Live|WithDocker' ./internal/docker ./internal/e2e
 

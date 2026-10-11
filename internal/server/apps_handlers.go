@@ -41,6 +41,9 @@ type appView struct {
 	Engine  string  `json:"engine,omitempty"`
 	Version string  `json:"version,omitempty"`
 	Links   []int64 `json:"links,omitzero"` // never nil for a database
+	// Template is the catalog template the app was installed from.
+	Template         string `json:"template,omitempty"`
+	TemplateRevision int    `json:"template_revision,omitempty"`
 
 	Port      int                    `json:"port"`
 	Domains   []string               `json:"domains"`
@@ -58,7 +61,8 @@ func viewApp(a *store.App) appView {
 		vols = []agentproto.AppVolume{}
 	}
 	v := appView{ID: a.ID, ServerID: a.ServerID, Name: a.Name, Source: a.Source, Image: a.Image, Port: a.Port,
-		Domains: a.Domains, TLS: a.TLS, Volumes: vols, MemoryMB: a.MemoryMB, CPUs: a.CPUs, ReadOnly: a.ReadOnly, CreatedAt: a.CreatedAt}
+		Domains: a.Domains, TLS: a.TLS, Volumes: vols, MemoryMB: a.MemoryMB, CPUs: a.CPUs, ReadOnly: a.ReadOnly, CreatedAt: a.CreatedAt,
+		Template: a.Template, TemplateRevision: a.TemplateRevision}
 	switch a.Source {
 	case store.SourceGit:
 		v.Git = &gitView{URL: a.Git.URL, Branch: a.Git.Branch, Dockerfile: a.Git.Dockerfile, Context: a.Git.Context}

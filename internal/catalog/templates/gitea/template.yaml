@@ -1,0 +1,22 @@
+id: gitea
+name: Gitea
+description: Self-hosted Git with pull requests, issues, packages and CI, with a PostgreSQL database.
+category: Development
+website: https://about.gitea.com
+version: 28.1.0
+revision: 1
+memory_mb: 512
+inputs:
+  - key: DOMAIN
+    label: Domain
+    type: domain
+    required: true
+secrets:
+  - key: DB_PASSWORD
+    length: 32
+expose:
+  service: gitea
+  port: 3000
+notes: |
+  Open the domain right away: the installation page is filled in already; create the
+  administrator account there. Git works over HTTPS (SSH is off: no ports are opened).

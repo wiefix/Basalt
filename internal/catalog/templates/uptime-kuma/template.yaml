@@ -1,0 +1,18 @@
+id: uptime-kuma
+name: Uptime Kuma
+description: Monitors websites, APIs and servers, with status pages and notifications.
+category: Monitoring
+website: https://uptime.kuma.pet
+version: 2.5.6
+revision: 1
+memory_mb: 256
+inputs:
+  - key: DOMAIN
+    label: Domain
+    type: domain
+    required: true
+expose:
+  service: uptime-kuma
+  port: 3001
+notes: |
+  Open the domain right away: the first visitor creates the administrator account.

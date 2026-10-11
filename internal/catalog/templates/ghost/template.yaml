@@ -1,0 +1,24 @@
+id: ghost
+name: Ghost
+description: A publishing platform for blogs, newsletters and paid memberships, with a MySQL database.
+category: CMS
+website: https://ghost.org
+version: 6.69.0
+revision: 1
+memory_mb: 768
+inputs:
+  - key: DOMAIN
+    label: Domain
+    type: domain
+    required: true
+secrets:
+  - key: DB_PASSWORD
+    length: 32
+  - key: DB_ROOT_PASSWORD
+    length: 32
+expose:
+  service: ghost
+  port: 2368
+notes: |
+  Open /ghost on the domain right away to create the owner account. Staff invitations
+  and newsletters need a mail server: set mail__* variables under Environment.

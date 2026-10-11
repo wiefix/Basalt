@@ -1,0 +1,22 @@
+id: vaultwarden
+name: Vaultwarden
+description: A password manager server compatible with the Bitwarden apps and browser extensions.
+category: Security
+website: https://github.com/dani-garcia/vaultwarden
+version: 1.37.4
+revision: 1
+memory_mb: 128
+inputs:
+  - key: DOMAIN
+    label: Domain
+    type: domain
+    required: true
+secrets:
+  - key: ADMIN_TOKEN
+    length: 48
+expose:
+  service: vaultwarden
+  port: 80
+notes: |
+  Create your account at the domain, then turn off new sign-ups on the admin page
+  (/admin): its token is the ADMIN_TOKEN variable under Environment.
