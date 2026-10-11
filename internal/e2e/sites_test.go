@@ -75,7 +75,12 @@ func startHostWith(t *testing.T, p *panel, dockerSocket string, configure ...fun
 	agentDone := make(chan struct{})
 	go func() { a.Run(ctx); close(agentDone) }()
 	t.Cleanup(func() { cancel(); <-agentDone; <-proxyDone; os.RemoveAll(proxyDir) })
-	eventually(t, "agent online", func() bool { return p.server(id)["status"] == "online" })
+	// Online is reported as soon as the stream is up; wait for its hello to
+	// be stored too, or it would overwrite what a test sets on the server.
+	eventually(t, "agent online", func() bool {
+		s := p.server(id)
+		return s["status"] == "online" && s["hostname"] != nil
+	})
 	return &host{id: id, sitesRoot: sitesRoot, get: httpsGetter(t, httpsPort)}
 }
 
