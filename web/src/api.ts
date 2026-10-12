@@ -380,6 +380,8 @@ export interface DNSRecord {
   port?: number;
   flags?: number;
   tag?: string;
+  // A/AAAA: served only while this health check is not down.
+  health_check?: number;
 }
 
 export type DNSRecordInput = Omit<DNSRecord, "id">;

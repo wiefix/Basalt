@@ -464,7 +464,7 @@ func (s *Server) handlePutRecord(w http.ResponseWriter, r *http.Request, p *prin
 		event, status = "dns_record.updated", http.StatusOK
 	}
 	s.audit(r, &p.user.ID, event, map[string]any{"zone_id": z.ID, "zone": z.Name, "record_id": out.ID,
-		"name": rec.Name, "type": rec.Type, "value": rec.Value})
+		"name": rec.Name, "type": rec.Type, "value": rec.Value, "health_check": rec.HealthCheck})
 	s.syncAutoDNS(r.Context())
 	s.pushDNSAll(r.Context())
 	writeJSON(w, status, map[string]any{"record": dnsRecordView{ID: out.ID, Record: out.Record}})
@@ -499,6 +499,8 @@ func (s *Server) recordError(w http.ResponseWriter, r *http.Request, err error) 
 		writeError(w, http.StatusNotFound, "record not found")
 	case errors.As(err, &invalid):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, store.ErrNoHealthCheck):
+		writeError(w, http.StatusUnprocessableEntity, "the health check does not exist")
 	default:
 		s.internalError(w, r, "save dns record", err)
 	}

@@ -44,6 +44,10 @@ const (
 	MaxTXTLength   = 4000
 	MaxCAALength   = 255
 	MaxNameservers = 8
+	// FailoverTTL is the TTL a record following a health check gets by
+	// default; MaxFailoverTTL bounds it, so resolvers notice a change soon.
+	FailoverTTL    = 60
+	MaxFailoverTTL = 300
 )
 
 // SOA timers. The serial comes from the panel.
@@ -77,6 +81,9 @@ type Record struct {
 	Port     uint16 `json:"port,omitempty"`     // SRV
 	Flags    uint8  `json:"flags,omitempty"`    // CAA
 	Tag      string `json:"tag,omitempty"`      // CAA
+	// HealthCheck (A, AAAA): the address is served only while this check
+	// is not down, unless every address of its set is down (see Failover).
+	HealthCheck int64 `json:"health_check,omitempty"`
 }
 
 var (
@@ -134,6 +141,9 @@ func (r *Record) Normalize() {
 	}
 	if r.TTL == 0 {
 		r.TTL = DefaultTTL
+		if r.HealthCheck > 0 {
+			r.TTL = FailoverTTL
+		}
 	}
 	switch r.Type {
 	case TypeTXT, TypeCAA:
@@ -178,6 +188,14 @@ func (r *Record) Validate(zone string) error {
 	}
 	if r.TTL < MinTTL || r.TTL > MaxTTL {
 		return fmt.Errorf("TTL must be between %d and %d seconds", MinTTL, MaxTTL)
+	}
+	switch {
+	case r.HealthCheck < 0:
+		return errors.New("invalid health check")
+	case r.HealthCheck > 0 && r.Type != TypeA && r.Type != TypeAAAA:
+		return errors.New("only A and AAAA records can follow a health check")
+	case r.HealthCheck > 0 && r.TTL > MaxFailoverTTL:
+		return fmt.Errorf("a record that follows a health check needs a TTL of at most %d seconds, so resolvers notice a failure soon", MaxFailoverTTL)
 	}
 	switch r.Type {
 	case TypeA:

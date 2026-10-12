@@ -91,9 +91,9 @@ func (db *DB) CreateDNSZone(ctx context.Context, name string, records []dns.Reco
 func insertDNSRecord(ctx context.Context, tx *sql.Tx, zoneID int64, r *dns.Record, now time.Time) (int64, error) {
 	var id int64
 	err := tx.QueryRowContext(ctx,
-		`INSERT INTO dns_records (zone_id, name, type, ttl, value, priority, weight, port, flags, tag, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-		zoneID, r.Name, r.Type, r.TTL, r.Value, r.Priority, r.Weight, r.Port, r.Flags, r.Tag, now.Unix()).Scan(&id)
+		`INSERT INTO dns_records (zone_id, name, type, ttl, value, priority, weight, port, flags, tag, health_check_id, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		zoneID, r.Name, r.Type, r.TTL, r.Value, r.Priority, r.Weight, r.Port, r.Flags, r.Tag, nullID(r.HealthCheck), now.Unix()).Scan(&id)
 	return id, err
 }
 
@@ -134,7 +134,16 @@ func (db *DB) DNSZone(ctx context.Context, id int64) (*DNSZone, error) {
 	return scanDNSZone(db.R.QueryRowContext(ctx, `SELECT `+dnsZoneColumns+` FROM dns_zones z WHERE z.id = ?`, id))
 }
 
-const dnsRecordColumns = `id, zone_id, name, type, ttl, value, priority, weight, port, flags, tag, created_at`
+const dnsRecordColumns = `id, zone_id, name, type, ttl, value, priority, weight, port, flags, tag,
+	COALESCE(health_check_id, 0), created_at`
+
+// nullID stores an optional reference: 0 is NULL.
+func nullID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
+}
 
 type queryer interface {
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
@@ -159,7 +168,7 @@ func dnsRecords(ctx context.Context, q queryer, zoneID int64) ([]*DNSRecord, err
 		var r DNSRecord
 		var created int64
 		if err := rows.Scan(&r.ID, &r.ZoneID, &r.Name, &r.Type, &r.TTL, &r.Value, &r.Priority, &r.Weight,
-			&r.Port, &r.Flags, &r.Tag, &created); err != nil {
+			&r.Port, &r.Flags, &r.Tag, &r.HealthCheck, &created); err != nil {
 			return nil, err
 		}
 		r.CreatedAt = time.Unix(created, 0)
@@ -217,6 +226,15 @@ func (db *DB) PutDNSRecord(ctx context.Context, zoneID, id int64, rec *dns.Recor
 		if err := check(&zone); err != nil {
 			return nil, err
 		}
+		if rec.HealthCheck > 0 {
+			var n int
+			if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM health_checks WHERE id = ?`, rec.HealthCheck).Scan(&n); err != nil {
+				return nil, err
+			}
+			if n == 0 {
+				return nil, ErrNoHealthCheck
+			}
+		}
 	}
 	out := &DNSRecord{ID: id, ZoneID: zoneID, CreatedAt: now}
 	switch {
@@ -231,8 +249,9 @@ func (db *DB) PutDNSRecord(ctx context.Context, zoneID, id int64, rec *dns.Recor
 	default:
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE dns_records SET name = ?, type = ?, ttl = ?, value = ?, priority = ?, weight = ?, port = ?,
-			 flags = ?, tag = ? WHERE id = ?`,
-			rec.Name, rec.Type, rec.TTL, rec.Value, rec.Priority, rec.Weight, rec.Port, rec.Flags, rec.Tag, id); err != nil {
+			 flags = ?, tag = ?, health_check_id = ? WHERE id = ?`,
+			rec.Name, rec.Type, rec.TTL, rec.Value, rec.Priority, rec.Weight, rec.Port, rec.Flags, rec.Tag,
+			nullID(rec.HealthCheck), id); err != nil {
 			return nil, err
 		}
 	}
@@ -321,7 +340,48 @@ func (db *DB) DesiredDNS(ctx context.Context, unseal Unseal) (rev int64, zones [
 			zones[i].Records = append(zones[i].Records, r.Record)
 		}
 	}
+	down, err := downHealthChecks(ctx, tx)
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(down) > 0 {
+		for i := range zones {
+			dns.Failover(&zones[i], func(id int64) bool { return down[id] })
+		}
+	}
 	return rev, zones, nil
+}
+
+// downHealthChecks returns the checks that are down.
+func downHealthChecks(ctx context.Context, q queryer) (map[int64]bool, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id FROM health_checks WHERE status = ?`, HealthDown)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	down := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		down[id] = true
+	}
+	return down, rows.Err()
+}
+
+// bumpDNSIfFollowed raises the DNS revision when records follow the check,
+// so a change of its status reaches the DNS servers. It reports whether
+// they do.
+func bumpDNSIfFollowed(ctx context.Context, tx *sql.Tx, checkID int64) (bool, error) {
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM dns_records WHERE health_check_id = ?`, checkID).Scan(&n); err != nil {
+		return false, err
+	}
+	if n == 0 {
+		return false, nil
+	}
+	return true, bumpDNSRevision(ctx, tx)
 }
 
 // manualDNS loads the revision and every zone with the records users made,

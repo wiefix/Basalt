@@ -4,11 +4,16 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	mdns "github.com/miekg/dns"
+
+	"github.com/wiefix/basalt/internal/agent"
 	"github.com/wiefix/basalt/internal/agentproto"
 )
 
@@ -127,4 +132,115 @@ func TestHealthChecks(t *testing.T) {
 	if audit != "health.created,health.created,health.updated,health.deleted" {
 		t.Fatalf("audit: %s", audit)
 	}
+}
+
+// TestDNSFailover: A records follow health checks; the DNS server stops
+// answering an address once its check is down, and answers every address
+// when all of them are down.
+func TestDNSFailover(t *testing.T) {
+	old := agentproto.MinHealthInterval
+	agentproto.MinHealthInterval = 1
+	t.Cleanup(func() { agentproto.MinHealthInterval = old })
+
+	backend := func() (*atomic.Int32, int) {
+		var status atomic.Int32
+		status.Store(200)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(int(status.Load()))
+		}))
+		t.Cleanup(srv.Close)
+		_, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+		return &status, int(mustAtoi(port))
+	}
+	statusA, portA := backend()
+	statusB, portB := backend()
+
+	p := startPanel(t)
+	dnsHost := startHostWith(t, p, "", func(c *agent.Config) { c.DNSListen = "127.0.0.1:0" })
+	startHost(t, p)
+	var addr string
+	for _, s := range p.call(200, "GET", "/api/v1/dns", nil)["servers"].([]any) {
+		if s := s.(map[string]any); jsonID(s["server_id"]) == dnsHost.id {
+			addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(int(s["port"].(float64))))
+		}
+	}
+	check := func(name string, port int) string {
+		return jsonID(p.call(http.StatusCreated, "POST", "/api/v1/health-checks", map[string]any{"name": name, "kind": "http",
+			"host": "127.0.0.1", "port": port, "interval": 2, "timeout": 1})["check"].(map[string]any)["id"])
+	}
+	checkA, checkB := check("a", portA), check("b", portB)
+
+	zid := jsonID(p.call(http.StatusCreated, "POST", "/api/v1/dns/zones", map[string]string{"name": "example.test"})["zone"].(map[string]any)["id"])
+	records := "/api/v1/dns/zones/" + zid + "/records"
+	for _, bad := range []map[string]any{
+		{"name": "www", "type": "A", "value": "192.0.2.1", "health_check": 999},
+		{"name": "www", "type": "A", "value": "192.0.2.1", "ttl": 3600, "health_check": mustAtoi(checkA)},
+		{"name": "alias", "type": "CNAME", "value": "example.net", "health_check": mustAtoi(checkA)},
+	} {
+		p.call(http.StatusUnprocessableEntity, "POST", records, bad)
+	}
+	rec := p.call(http.StatusCreated, "POST", records, map[string]any{"name": "www", "type": "A", "value": "192.0.2.1",
+		"health_check": mustAtoi(checkA)})["record"].(map[string]any)
+	if rec["ttl"].(float64) != 60 || jsonID(rec["health_check"]) != checkA {
+		t.Fatalf("record = %v", rec)
+	}
+	p.call(http.StatusCreated, "POST", records, map[string]any{"name": "www", "type": "A", "value": "192.0.2.2",
+		"health_check": mustAtoi(checkB)})
+
+	served := func(want string) {
+		t.Helper()
+		var got []string
+		for deadline := time.Now().Add(25 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+			_, ans := dnsQuery(t, addr, "www.example.test.", mdns.TypeA)
+			got = got[:0]
+			for _, a := range ans {
+				got = append(got, a[strings.LastIndex(a, " ")+1:])
+			}
+			slices.Sort(got)
+			if strings.Join(got, " ") == want {
+				return
+			}
+		}
+		t.Fatalf("www answers %v, want %s", got, want)
+	}
+	served("192.0.2.1 192.0.2.2")
+
+	// b fails: only a's address is served.
+	statusB.Store(503)
+	served("192.0.2.1")
+	// a fails too: every address is served again.
+	statusA.Store(503)
+	waitStatus(t, p, "a", "down")
+	served("192.0.2.1 192.0.2.2")
+	// b recovers: only b.
+	statusB.Store(200)
+	served("192.0.2.2")
+
+	// The zone shows which check each record follows; deleting the check
+	// keeps the record, served unconditionally.
+	zone := p.call(200, "GET", "/api/v1/dns/zones/"+zid, nil)
+	if !strings.Contains(jsonString(zone["records"]), `"health_check":`+checkA) {
+		t.Fatalf("zone records = %v", zone["records"])
+	}
+	p.call(http.StatusNoContent, "DELETE", "/api/v1/health-checks/"+checkA, nil)
+	served("192.0.2.1 192.0.2.2")
+	if strings.Contains(jsonString(p.call(200, "GET", "/api/v1/dns/zones/"+zid, nil)["records"]), `"health_check":`+checkA) {
+		t.Fatal("deleted check still referenced")
+	}
+}
+
+func waitStatus(t *testing.T, p *panel, name, status string) {
+	t.Helper()
+	var last any
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(200 * time.Millisecond) {
+		for _, c := range p.call(200, "GET", "/api/v1/health-checks", nil)["checks"].([]any) {
+			if c := c.(map[string]any); c["name"] == name {
+				if c["status"] == status {
+					return
+				}
+				last = c
+			}
+		}
+	}
+	t.Fatalf("%s is not %s: %v", name, status, last)
 }

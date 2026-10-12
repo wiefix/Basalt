@@ -105,13 +105,22 @@ func (s *Server) HealthReport(serverID int64, r agentproto.HealthReport) {
 		}
 	}
 	s.health.mu.Unlock()
+	pushDNS := false
 	for _, c := range changes {
-		if err := s.db.SetHealthStatus(context.Background(), c.id, c.status, c.detail, now); err != nil &&
-			!errors.Is(err, store.ErrNotFound) {
-			s.log.Error("record health status", "check_id", c.id, "err", err)
+		dns, err := s.db.SetHealthStatus(context.Background(), c.id, c.status, c.detail, now)
+		if err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				s.log.Error("record health status", "check_id", c.id, "err", err)
+			}
 			continue
 		}
+		pushDNS = pushDNS || dns
 		s.log.Info("health check changed", "check_id", c.id, "status", c.status, "detail", c.detail)
+	}
+	// DNS records follow the check: the DNS servers get the zones without
+	// (or again with) its addresses. Not on the agent's read loop.
+	if pushDNS {
+		go s.pushDNSAll(context.Background())
 	}
 }
 
@@ -426,7 +435,8 @@ func (s *Server) handleUpdateHealthCheck(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	c.ID = old.ID
-	if err := s.db.UpdateHealthCheck(r.Context(), c); errors.Is(err, store.ErrNameTaken) {
+	dns, err := s.db.UpdateHealthCheck(r.Context(), c)
+	if errors.Is(err, store.ErrNameTaken) {
 		writeError(w, http.StatusConflict, "a health check with this name exists")
 		return
 	} else if err != nil {
@@ -435,6 +445,9 @@ func (s *Server) handleUpdateHealthCheck(w http.ResponseWriter, r *http.Request,
 	}
 	s.audit(r, &p.user.ID, "health.updated", map[string]any{"check_id": c.ID, "name": c.Name, "target": healthTarget(c)})
 	s.healthChanged(r.Context())
+	if dns {
+		s.pushDNSAll(r.Context()) // the status starts over: every address is served again
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -443,12 +456,16 @@ func (s *Server) handleDeleteHealthCheck(w http.ResponseWriter, r *http.Request,
 	if !ok {
 		return
 	}
-	if err := s.db.DeleteHealthCheck(r.Context(), c.ID); err != nil {
+	dns, err := s.db.DeleteHealthCheck(r.Context(), c.ID)
+	if err != nil {
 		s.internalError(w, r, "delete health check", err)
 		return
 	}
 	s.audit(r, &p.user.ID, "health.deleted", map[string]any{"check_id": c.ID, "name": c.Name})
 	s.healthChanged(r.Context())
+	if dns {
+		s.pushDNSAll(r.Context())
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

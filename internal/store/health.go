@@ -11,6 +11,9 @@ import (
 
 const settingHealthRevision = "health_revision"
 
+// ErrNoHealthCheck: a DNS record refers to a health check that does not exist.
+var ErrNoHealthCheck = errors.New("no such health check")
+
 // Health check statuses.
 const (
 	HealthUnknown = "unknown"
@@ -145,9 +148,10 @@ func (db *DB) CreateHealthCheck(ctx context.Context, c *HealthCheck) error {
 	})
 }
 
-// UpdateHealthCheck changes a check; its status starts over.
-func (db *DB) UpdateHealthCheck(ctx context.Context, c *HealthCheck) error {
-	return db.healthWrite(ctx, func(tx *sql.Tx) error {
+// UpdateHealthCheck changes a check; its status starts over. It reports
+// whether DNS records follow the check (their zones then change).
+func (db *DB) UpdateHealthCheck(ctx context.Context, c *HealthCheck) (dns bool, err error) {
+	err = db.healthWrite(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
 			`UPDATE health_checks SET name = ?, kind = ?, host = ?, port = ?, path = ?, host_header = ?, insecure = ?,
 			 interval_s = ?, timeout_s = ?, status = 'unknown', status_since = NULL WHERE id = ?`,
@@ -159,12 +163,19 @@ func (db *DB) UpdateHealthCheck(ctx context.Context, c *HealthCheck) error {
 			return ErrNotFound
 		}
 		c.Status, c.StatusSince = HealthUnknown, nil
-		return nil
+		dns, err = bumpDNSIfFollowed(ctx, tx, c.ID)
+		return err
 	})
+	return dns, err
 }
 
-func (db *DB) DeleteHealthCheck(ctx context.Context, id int64) error {
-	return db.healthWrite(ctx, func(tx *sql.Tx) error {
+// DeleteHealthCheck deletes a check; records that followed it are served
+// unconditionally from then on. It reports whether there were any.
+func (db *DB) DeleteHealthCheck(ctx context.Context, id int64) (dns bool, err error) {
+	err = db.healthWrite(ctx, func(tx *sql.Tx) error {
+		if dns, err = bumpDNSIfFollowed(ctx, tx, id); err != nil {
+			return err
+		}
 		res, err := tx.ExecContext(ctx, `DELETE FROM health_checks WHERE id = ?`, id)
 		if err != nil {
 			return err
@@ -174,27 +185,32 @@ func (db *DB) DeleteHealthCheck(ctx context.Context, id int64) error {
 		}
 		return nil
 	})
+	return dns, err
 }
 
-// SetHealthStatus records a status change of a check.
-func (db *DB) SetHealthStatus(ctx context.Context, id int64, status, detail string, at time.Time) error {
+// SetHealthStatus records a status change of a check. It reports whether
+// DNS records follow the check (their zones then change).
+func (db *DB) SetHealthStatus(ctx context.Context, id int64, status, detail string, at time.Time) (dns bool, err error) {
 	tx, err := db.W.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx, `UPDATE health_checks SET status = ?, status_since = ? WHERE id = ?`, status, at.Unix(), id)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+		return false, ErrNotFound
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO health_events (check_id, status, detail, at) VALUES (?, ?, ?, ?)`,
 		id, status, detail, at.Unix()); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	if dns, err = bumpDNSIfFollowed(ctx, tx, id); err != nil {
+		return false, err
+	}
+	return dns, tx.Commit()
 }
 
 // HealthEvents lists the latest status changes of a check, newest first.

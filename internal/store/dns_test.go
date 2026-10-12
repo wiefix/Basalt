@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -133,5 +134,99 @@ func TestZoneDNSSEC(t *testing.T) {
 	db.R.QueryRow(`SELECT dnssec_key FROM dns_zones WHERE id = ?`, z.ID).Scan(&sealed)
 	if got, _ := db.DNSZone(ctx, z.ID); got.DNSKEY != "" || sealed != nil {
 		t.Fatal("key kept after disabling")
+	}
+}
+
+func TestDNSFailover(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTemp(t)
+	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
+	check := func(z *dns.Zone) error { return z.Validate() }
+	z, err := db.CreateDNSZone(ctx, "example.com", nil, check, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hc := func(name string) *HealthCheck {
+		c := &HealthCheck{Name: name, Kind: "tcp", Host: "192.0.2.1", Port: 80, Interval: 30, Timeout: 5}
+		if err := db.CreateHealthCheck(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	one, two, unused := hc("one"), hc("two"), hc("unused")
+	put := func(value string, check int64) (*DNSRecord, error) {
+		r := dns.Record{Name: "www", Type: dns.TypeA, Value: value, HealthCheck: check}
+		r.Normalize()
+		return db.PutDNSRecord(ctx, z.ID, 0, &r, func(z *dns.Zone) error { return z.Validate() }, now)
+	}
+	if _, err := put("192.0.2.9", 999); !errors.Is(err, ErrNoHealthCheck) {
+		t.Fatalf("unknown check: %v", err)
+	}
+	r1, err := put("192.0.2.1", one.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := put("192.0.2.2", two.ID); err != nil {
+		t.Fatal(err)
+	}
+	if recs, _ := db.DNSRecords(ctx, z.ID); len(recs) != 2 || recs[0].HealthCheck != one.ID || recs[0].TTL != dns.FailoverTTL {
+		t.Fatalf("records: %+v", recs)
+	}
+	served := func() string {
+		_, zones, err := db.DesiredDNS(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, r := range zones[0].Records {
+			out = append(out, r.Value)
+		}
+		return strings.Join(out, " ")
+	}
+	revision := func() int64 { rev, _, _ := db.DesiredDNS(ctx, nil); return rev }
+
+	rev := revision()
+	if d, err := db.SetHealthStatus(ctx, one.ID, HealthDown, "x", now); err != nil || !d {
+		t.Fatalf("set status: %v %v", d, err)
+	}
+	if got := served(); got != "192.0.2.2" || revision() <= rev {
+		t.Fatalf("one down: %q, revision %d -> %d", got, rev, revision())
+	}
+	// Both down: every address is served rather than none.
+	db.SetHealthStatus(ctx, two.ID, HealthDown, "x", now)
+	if got := served(); got != "192.0.2.1 192.0.2.2" {
+		t.Fatalf("both down: %q", got)
+	}
+	db.SetHealthStatus(ctx, two.ID, HealthUp, "x", now)
+	if got := served(); got != "192.0.2.2" {
+		t.Fatalf("two up: %q", got)
+	}
+	// A check no record follows does not touch DNS.
+	rev = revision()
+	if d, err := db.SetHealthStatus(ctx, unused.ID, HealthDown, "x", now); err != nil || d || revision() != rev {
+		t.Fatalf("unused check: %v %v", d, err)
+	}
+	// Editing a check starts its status over: its address is back.
+	one.Name = "one-edited"
+	if d, err := db.UpdateHealthCheck(ctx, one); err != nil || !d {
+		t.Fatalf("update: %v %v", d, err)
+	}
+	if got := served(); got != "192.0.2.1 192.0.2.2" {
+		t.Fatalf("after edit: %q", got)
+	}
+	// Deleting a check keeps its records, no longer following anything.
+	db.SetHealthStatus(ctx, one.ID, HealthDown, "x", now)
+	if d, err := db.DeleteHealthCheck(ctx, one.ID); err != nil || !d {
+		t.Fatalf("delete: %v %v", d, err)
+	}
+	recs, _ := db.DNSRecords(ctx, z.ID)
+	if len(recs) != 2 || recs[0].ID != r1.ID || recs[0].HealthCheck != 0 {
+		t.Fatalf("after delete: %+v", recs)
+	}
+	if got := served(); got != "192.0.2.1 192.0.2.2" {
+		t.Fatalf("after delete: %q", got)
+	}
+	if d, err := db.DeleteHealthCheck(ctx, unused.ID); err != nil || d {
+		t.Fatalf("delete unused: %v %v", d, err)
 	}
 }

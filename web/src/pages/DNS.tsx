@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router";
-import { api, can, type DNSRecord, type DNSRecordInput, type DNSServer, type DNSZone, type User } from "../api";
+import { api, can, type DNSRecord, type DNSRecordInput, type DNSServer, type DNSZone, type HealthCheck, type User } from "../api";
 import { CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useConfirm, useToast } from "../components/ui";
 
 export function DNSPage({ user }: { user: User }) {
@@ -260,6 +260,7 @@ export function ZonePage({ user }: { user: User }) {
   const confirm = useConfirm();
   const navigate = useNavigate();
   const zone = useQuery({ queryKey: ["dns-zone", id], queryFn: () => api.zone(id) });
+  const checks = useQuery({ queryKey: ["health-checks"], queryFn: api.healthChecks, refetchInterval: 15_000 });
   const [editing, setEditing] = useState<DNSRecord | "new" | null>(null);
   const [filter, setFilter] = useState("");
   const admin = can(user, "admin");
@@ -272,6 +273,12 @@ export function ZonePage({ user }: { user: User }) {
   const match = (r: DNSRecordInput) =>
     !f || fqdn(r.name).includes(f) || r.type.toLowerCase() === f || recordData(r).toLowerCase().includes(f);
   const records = zone.data.records.filter(match);
+  const checkByID = new Map((checks.data?.checks ?? []).map((c) => [c.id, c]));
+  const isDown = (r: DNSRecord) => !!r.health_check && checkByID.get(r.health_check)?.status === "down";
+  // As the panel does (dns.Failover): a down address is left out unless
+  // every address of its name and type is down.
+  const notServed = (r: DNSRecord) =>
+    isDown(r) && zone.data.records.some((o) => o.name === r.name && o.type === r.type && !isDown(o));
   const auto = zone.data.auto.filter(match);
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["dns-zone", id] });
@@ -385,6 +392,9 @@ export function ZonePage({ user }: { user: User }) {
                   <td>{r.type}</td>
                   <td className="mono small" style={{ overflowWrap: "anywhere", maxWidth: 420 }}>
                     {recordData(r)}
+                    {r.health_check ? (
+                      <FollowsBadge check={checkByID.get(r.health_check)} notServed={notServed(r)} />
+                    ) : null}
                   </td>
                   <td className="muted">{formatTTL(r.ttl)}</td>
                   {admin && (
@@ -408,19 +418,37 @@ export function ZonePage({ user }: { user: User }) {
       <DNSSECCard zone={z} admin={admin} onChanged={refresh} />
       <p className="faint small">
         Sites and apps whose domains are in this zone get A/AAAA records for their server automatically (TTL 5
-        minutes). A record of your own at the same name replaces them.
+        minutes). A record of your own at the same name replaces them. An A or AAAA record can follow a health check
+        (see <Link to="/monitoring">Monitoring</Link>): while the check is down, its address is left out of the
+        answers, unless every address of that name is down.
       </p>
       {editing && (
         <RecordModal
           zone={z.name}
           zoneId={id}
           types={zone.data.types}
+          checks={checks.data?.checks ?? []}
           record={editing === "new" ? null : editing}
           onClose={() => setEditing(null)}
           onSaved={refresh}
         />
       )}
     </>
+  );
+}
+
+function FollowsBadge({ check, notServed }: { check?: HealthCheck; notServed: boolean }) {
+  if (!check) return null;
+  const cls = notServed ? "badge err" : check.status === "down" ? "badge warn" : check.status === "up" ? "badge ok" : "badge";
+  const title = notServed
+    ? `The check ${check.name} is down: this address is left out of the answers.`
+    : check.status === "down"
+      ? `The check ${check.name} is down, but so are the other addresses of this name: all of them are answered.`
+      : `Answered while the check ${check.name} is not down.`;
+  return (
+    <span className={cls} style={{ marginLeft: 8 }} title={title}>
+      {check.name} · {notServed ? "down, not served" : check.status}
+    </span>
   );
 }
 
@@ -534,6 +562,7 @@ function RecordModal({
   zone,
   zoneId,
   types,
+  checks,
   record,
   onClose,
   onSaved,
@@ -541,6 +570,7 @@ function RecordModal({
   zone: string;
   zoneId: number;
   types: string[];
+  checks: HealthCheck[];
   record: DNSRecord | null;
   onClose: () => void;
   onSaved: () => void;
@@ -554,6 +584,8 @@ function RecordModal({
   const [port, setPort] = useState(String(record?.port ?? ""));
   const [tag, setTag] = useState(record?.tag ?? "issue");
   const [critical, setCritical] = useState((record?.flags ?? 0) === 128);
+  const [check, setCheck] = useState(record?.health_check ?? 0);
+  const address = type === "A" || type === "AAAA";
   const save = useMutation({
     mutationFn: () => {
       const r: DNSRecordInput = { name: name.trim() || "@", type, ttl: Number(ttl), value };
@@ -566,6 +598,7 @@ function RecordModal({
         r.tag = tag;
         r.flags = critical ? 128 : 0;
       }
+      if (address && check) r.health_check = check;
       return record ? api.updateRecord(zoneId, record.id, r) : api.createRecord(zoneId, r);
     },
     onSuccess: () => {
@@ -659,6 +692,35 @@ function RecordModal({
               </label>
             </Field>
           </div>
+        )}
+        {address && (
+          <Field
+            label="Health check"
+            help={
+              checks.length === 0 ? (
+                <>Add one under <Link to="/monitoring">Monitoring</Link> to serve this address only while it answers.</>
+              ) : (
+                "While the check is down, this address is left out of the answers (unless every address of this name is down). Use a short TTL."
+              )
+            }
+          >
+            <select
+              className="input"
+              value={check}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setCheck(v);
+                if (v && Number(ttl) > 300) setTTL("60");
+              }}
+            >
+              <option value={0}>None: always served</option>
+              {checks.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} ({c.status})
+                </option>
+              ))}
+            </select>
+          </Field>
         )}
         <Field label={type === "TXT" ? "Text" : "Value"} help={valueHelp[type]}>
           {type === "TXT" ? (
