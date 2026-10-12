@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wiefix/basalt/internal/auth"
@@ -60,31 +61,33 @@ type Options struct {
 }
 
 type Server struct {
-	log            *slog.Logger
-	db             *store.DB
-	box            *secrets.Box
-	hasher         *auth.Hasher
-	secureCookies  bool
-	trusted        []netip.Prefix
-	setupFile      string
-	agents         AgentHub
-	agentURL       string
-	now            func() time.Time
-	imagesKept     int
-	mailPorts      map[int]int
-	mailMu         sync.Mutex // serializes changes to the mail server
-	mailTLSMu      sync.Mutex
-	mailTLS        mailTLSStatus // the last certificate sync
-	mailCheckMu    sync.Mutex    // one deliverability check at a time
-	mailCheckEvery time.Duration
-	catalog        func() ([]*catalog.Template, error)
-	tplMu          sync.Mutex
-	catalogMu      sync.Mutex
-	remote         *remoteCatalog            // the downloaded catalog
-	catalogFetchMu sync.Mutex                // one download at a time
-	tplUpdates     map[int64]*templateUpdate // running or failed template updates
-	dataDir        string
-	restic         string
+	log           *slog.Logger
+	db            *store.DB
+	box           *secrets.Box
+	hasher        *auth.Hasher
+	secureCookies bool
+	trusted       []netip.Prefix
+	setupFile     string
+	agents        AgentHub
+	agentURL      string
+	now           func() time.Time
+	imagesKept    int
+	mailPorts     map[int]int
+	mailMu        sync.Mutex // serializes changes to the mail server
+	mailTLSMu     sync.Mutex
+	mailTLS       mailTLSStatus // the last certificate sync
+	mailCheckMu   sync.Mutex    // one deliverability check at a time
+	// mailReloadPending: the mail server's last settings reload failed.
+	mailReloadPending atomic.Bool
+	mailCheckEvery    time.Duration
+	catalog           func() ([]*catalog.Template, error)
+	tplMu             sync.Mutex
+	catalogMu         sync.Mutex
+	remote            *remoteCatalog            // the downloaded catalog
+	catalogFetchMu    sync.Mutex                // one download at a time
+	tplUpdates        map[int64]*templateUpdate // running or failed template updates
+	dataDir           string
+	restic            string
 
 	setupMu    sync.Mutex
 	setupToken string

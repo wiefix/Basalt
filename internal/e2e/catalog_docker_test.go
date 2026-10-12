@@ -34,11 +34,14 @@ func TestCatalogWithDocker(t *testing.T) {
 		"gitea":       {"/api/healthz", "pass"},
 	}
 	list := p.call(200, "GET", "/api/v1/catalog", nil)["templates"].([]any)
-	if len(list) != len(checks) {
-		t.Fatalf("%d templates, %d checks", len(list), len(checks))
-	}
 	for _, tpl := range list {
 		id := tpl.(map[string]any)["id"].(string)
+		if tpl.(map[string]any)["mail"] == true {
+			// Webmail needs the mail server (see TestMailWithDocker).
+			p.call(http.StatusConflict, "POST", "/api/v1/catalog/"+id+"/install", map[string]any{
+				"server_id": mustAtoi(h.id), "inputs": map[string]string{"DOMAIN": id + ".localhost"}})
+			continue
+		}
 		t.Run(id, func(t *testing.T) {
 			check, ok := checks[id]
 			if !ok {

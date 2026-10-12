@@ -677,7 +677,7 @@ export const api = {
   createMail: (b: { server_id: number; hostname: string; memory_mb: number }) =>
     post<{ server: App; deploy_error?: string }>("/api/v1/mail", b),
   updateMailSettings: (b: { relay?: MailRelayInput | null; send_limit?: number }) =>
-    put<{ settings: MailSettings }>("/api/v1/mail/settings", b),
+    put<{ settings: MailSettings; warning?: string }>("/api/v1/mail/settings", b),
   updateMailDomain: (id: number, b: { catch_all: string }) => put<void>(`/api/v1/mail/domains/${id}`, b),
   forwarders: (domainId: number) => get<{ forwarders: Forwarder[] }>(`/api/v1/mail/domains/${domainId}/forwarders`),
   createForwarder: (domainId: number, b: { local: string; recipients: string[] }) =>

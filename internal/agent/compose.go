@@ -181,8 +181,9 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 }
 
 // attach connects the containers (ID -> service name) to the networks of
-// the apps in attach, reachable there by their service name, and
-// disconnects them from the networks of other apps.
+// the apps in attach, reachable there by their service name (and their
+// host name, if they have a full one: the mail server's, which its TLS
+// certificate names), and disconnects them from the networks of other apps.
 func (m *appsManager) attach(ctx context.Context, dc *docker.Client, appID int64, containers map[string]string, attach []int64) error {
 	want := map[string]int64{}
 	for _, id := range attach {
@@ -211,7 +212,11 @@ func (m *appsManager) attach(ctx context.Context, dc *docker.Client, appID int64
 				errs = append(errs, err)
 				continue
 			}
-			ep := &docker.EndpointSettings{Aliases: []string{service}}
+			aliases := []string{service}
+			if h := info.Config.Hostname; strings.Contains(h, ".") {
+				aliases = append(aliases, h)
+			}
+			ep := &docker.EndpointSettings{Aliases: aliases}
 			if err := dc.NetworkConnect(ctx, name, cid, ep); err != nil && !errors.Is(err, docker.ErrConflict) {
 				errs = append(errs, fmt.Errorf("connect %s to the network of app %d: %w", service, want[name], err))
 			}

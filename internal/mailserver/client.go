@@ -245,12 +245,34 @@ func (c *Client) logToStdout(ctx context.Context) error {
 	return nil
 }
 
+// reloadTries and reloadPause: a reload validates every setting, some by
+// looking names up in DNS (the Pyzor spam server's), so a passing DNS
+// failure makes it fail.
+var (
+	reloadTries = 5
+	reloadPause = 2 * time.Second
+)
+
 // Reload applies changed server settings (routes, throttles, logging).
 func (c *Client) Reload(ctx context.Context) error {
-	if _, err := c.create(ctx, "x:Action", map[string]any{"@type": "ReloadSettings"}); err != nil {
-		return fmt.Errorf("reload settings: %w", err)
+	var err error
+	for i := range reloadTries {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(reloadPause):
+			}
+		}
+		if _, err = c.create(ctx, "x:Action", map[string]any{"@type": "ReloadSettings"}); err == nil {
+			return nil
+		}
+		var se *SetError
+		if !errors.As(err, &se) {
+			break
+		}
 	}
-	return nil
+	return fmt.Errorf("the mail server did not reload its settings (they apply once it does): %w", err)
 }
 
 // Domain is a mail domain in the mail server.

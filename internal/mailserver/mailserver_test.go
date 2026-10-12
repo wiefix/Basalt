@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/dns"
@@ -243,4 +244,33 @@ func TestSettings(t *testing.T) {
 func jsonOf(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+func TestReloadRetries(t *testing.T) {
+	reloadPause = time.Millisecond
+	calls := 0
+	refuse := 2
+	f := fakeServer{"x:Action/set": func(map[string]any) any {
+		calls++
+		if calls <= refuse {
+			return map[string]any{"notCreated": map[string]any{"n": map[string]any{"type": "validationFailed",
+				"description": "Invalid address: failed to lookup address information"}}}
+		}
+		return map[string]any{"created": map[string]any{"n": map[string]any{"id": "a"}}}
+	}}
+	c := NewClient(f.transport)
+	if err := c.Reload(context.Background()); err != nil || calls != 3 {
+		t.Fatalf("%v after %d calls", err, calls)
+	}
+	calls, refuse = 0, 100
+	err := c.Reload(context.Background())
+	if err == nil || calls != reloadTries || !strings.Contains(err.Error(), "lookup address") {
+		t.Fatalf("%v after %d calls", err, calls)
+	}
+	// Transport errors are not retried.
+	broken := NewClient(func(context.Context, []byte) (int, []byte, error) { calls++; return 0, nil, context.Canceled })
+	calls = 0
+	if broken.Reload(context.Background()) == nil || calls != 1 {
+		t.Fatalf("%d calls", calls)
+	}
 }

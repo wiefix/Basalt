@@ -18,8 +18,9 @@ import (
 	"github.com/wiefix/basalt/internal/docker"
 )
 
-// Image is the Stalwart release Basalt runs, pinned to a patch version.
-const Image = "stalwartlabs/stalwart:v0.16.25"
+// Image is the Stalwart release Basalt runs, pinned by digest (a deployment
+// then needs no registry when the image is on the server).
+const Image = "stalwartlabs/stalwart:v0.16.25@sha256:74e5a7d55303ba525d939c6bf97ed4e010df7521f52d80afc22a815b66bd53f3"
 
 const (
 	// Service is the name of the mail server's only service.

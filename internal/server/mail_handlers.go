@@ -52,6 +52,8 @@ func (s *Server) mailSpec(app *store.App, pinned map[string]string, spec *agentp
 	spec.Services = []agentproto.ServiceSpec{svc}
 	spec.ComposeVolumes = mailserver.Volumes
 	spec.Mail = true
+	// Apps using the mail server (webmail) reach it on their networks.
+	spec.Attach = app.Links
 	return nil
 }
 
@@ -248,6 +250,11 @@ func (s *Server) refreshMailLoop(ctx context.Context) {
 				s.log.Warn("mail dns records", "err", err)
 			}
 			s.syncMailCert(cctx, app)
+			if s.mailReloadPending.Load() {
+				if err := s.reloadMail(cctx, c); err != nil {
+					s.log.Warn("mail settings reload", "err", err)
+				}
+			}
 			cancel()
 		}
 		if s.mailCheckEvery > 0 {

@@ -1,0 +1,17 @@
+services:
+  roundcube:
+    image: roundcube/roundcubemail:1.7.4-apache-nonroot@sha256:b93e946ce9e871113daa9a6ff5b9cfddc7c6f00b81d27924780b263386235aca
+    environment:
+      ROUNDCUBEMAIL_DEFAULT_HOST: ssl://${MAIL_HOST}
+      ROUNDCUBEMAIL_DEFAULT_PORT: "993"
+      ROUNDCUBEMAIL_SMTP_SERVER: ssl://${MAIL_HOST}
+      ROUNDCUBEMAIL_SMTP_PORT: "465"
+      ROUNDCUBEMAIL_DES_KEY: ${DES_KEY}
+      ROUNDCUBEMAIL_DB_TYPE: sqlite
+      ROUNDCUBEMAIL_DB_DIR: /var/roundcube/db
+      ROUNDCUBEMAIL_SKIN: elastic
+      ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE: 25M
+    volumes:
+      - data:/var/roundcube
+volumes:
+  data:

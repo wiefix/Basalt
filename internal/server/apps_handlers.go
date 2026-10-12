@@ -40,7 +40,7 @@ type appView struct {
 	// Databases: engine, major version and the apps that reach it.
 	Engine  string  `json:"engine,omitempty"`
 	Version string  `json:"version,omitempty"`
-	Links   []int64 `json:"links,omitzero"` // never nil for a database
+	Links   []int64 `json:"links,omitzero"` // never nil for a database or the mail server
 	// Template is the catalog template the app was installed from.
 	Template         string `json:"template,omitempty"`
 	TemplateRevision int    `json:"template_revision,omitempty"`
@@ -80,6 +80,8 @@ func viewApp(a *store.App) appView {
 		v.Service, v.Compose = a.Service, &sum
 	case store.SourceDatabase:
 		v.Engine, v.Version, v.Links = a.Engine, a.EngineVersion, nonNil(a.Links)
+	case store.SourceMail:
+		v.Links = nonNil(a.Links) // webmail apps that reach it
 	}
 	return v
 }

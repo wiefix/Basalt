@@ -1,0 +1,24 @@
+id: roundcube
+name: Roundcube
+description: Webmail for the mailboxes of Basalt's mail server, with contacts, filters and a modern interface.
+category: Mail
+website: https://roundcube.net
+version: 1.7.4
+revision: 1
+memory_mb: 256
+mail: true
+inputs:
+  - key: DOMAIN
+    label: Domain
+    type: domain
+    required: true
+    help: Where people read their mail, e.g. webmail.example.com. HTTPS is set up automatically.
+secrets:
+  - key: DES_KEY
+    length: 24
+expose:
+  service: roundcube
+  port: 8000
+notes: |
+  Sign in with a mailbox address and its password. Roundcube connects to the mail server
+  by its host name (MAIL_HOST under Environment) over IMAPS and SMTPS.

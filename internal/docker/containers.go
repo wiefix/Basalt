@@ -155,8 +155,9 @@ type ContainerInfo struct {
 	} `json:"State"`
 	RestartCount int `json:"RestartCount"`
 	Config       struct {
-		Image  string            `json:"Image"`
-		Labels map[string]string `json:"Labels"`
+		Image    string            `json:"Image"`
+		Labels   map[string]string `json:"Labels"`
+		Hostname string            `json:"Hostname"`
 	} `json:"Config"`
 	NetworkSettings struct {
 		Networks map[string]struct {

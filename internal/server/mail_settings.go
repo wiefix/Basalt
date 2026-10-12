@@ -79,6 +79,12 @@ func (s *Server) relay(m *mailSettings) (*mailserver.Relay, error) {
 	return r, nil
 }
 
+// reloadError: the settings are stored in the mail server but it did
+// not reload them yet; the panel retries in the background.
+type reloadError struct{ err error }
+
+func (e *reloadError) Error() string { return e.err.Error() }
+
 // applyMailSettings configures the relay and the send limit, then has
 // the mail server reload its settings (also those Configure changed).
 func (s *Server) applyMailSettings(ctx context.Context, c *mailserver.Client, m *mailSettings) error {
@@ -92,7 +98,18 @@ func (s *Server) applyMailSettings(ctx context.Context, c *mailserver.Client, m 
 	if err := c.SetSendLimit(ctx, m.sendLimit()); err != nil {
 		return err
 	}
-	return c.Reload(ctx)
+	return s.reloadMail(ctx, c)
+}
+
+// reloadMail reloads the mail server's settings, remembering a failure
+// for refreshMailLoop to retry.
+func (s *Server) reloadMail(ctx context.Context, c *mailserver.Client) error {
+	err := c.Reload(ctx)
+	s.mailReloadPending.Store(err != nil)
+	if err != nil {
+		return &reloadError{err}
+	}
+	return nil
 }
 
 type mailRelayView struct {
@@ -213,7 +230,9 @@ func (s *Server) handleMailSettings(w http.ResponseWriter, r *http.Request, p *p
 		m.SendLimit = req.SendLimit
 		details["send_limit"] = *req.SendLimit
 	}
-	if err := s.applyMailSettings(ctx, c, m); err != nil {
+	var re *reloadError
+	err = s.applyMailSettings(ctx, c, m)
+	if err != nil && !errors.As(err, &re) {
 		s.mailError(w, err)
 		return
 	}
@@ -223,7 +242,11 @@ func (s *Server) handleMailSettings(w http.ResponseWriter, r *http.Request, p *p
 		return
 	}
 	s.audit(r, &p.user.ID, "mail.settings_updated", details)
-	writeJSON(w, http.StatusOK, map[string]any{"settings": viewMailSettings(m)})
+	resp := map[string]any{"settings": viewMailSettings(m)}
+	if re != nil {
+		resp["warning"] = re.Error()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 type mailDomainUpdate struct {

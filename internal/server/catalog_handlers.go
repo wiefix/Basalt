@@ -92,6 +92,18 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request, p *princi
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	var mailApp *store.App
+	if t.Mail {
+		mailApp, err = s.db.MailApp(r.Context())
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusConflict, t.Name+" uses the mail server: set it up under Mail first")
+			return
+		} else if err != nil {
+			s.internalError(w, r, "load mail server", err)
+			return
+		}
+		in.Env[catalog.MailHostKey] = mailApp.Hostname
+	}
 	cf, err := s.parseCompose(r.Context(), []byte(t.Compose), in.Env, t.Expose.Service, t.Expose.Port)
 	if err != nil {
 		s.internalError(w, r, "parse template "+t.ID, err)
@@ -146,6 +158,19 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request, p *princi
 		"revision": t.Revision, "domain": in.Domain})
 	s.PushProxy(r.Context(), app.ServerID)
 	resp := map[string]any{"app": viewApp(app), "notes": t.Notes}
+	if mailApp != nil && mailApp.ServerID == app.ServerID {
+		// The app reaches the mail server on its own network, under the
+		// name its certificate has (as linked databases are reached).
+		if err := s.db.LinkApp(r.Context(), mailApp.ID, app.ID); err != nil {
+			s.internalError(w, r, "link the mail server", err)
+			return
+		}
+		if mailApp, err = s.db.AppByID(r.Context(), mailApp.ID); err == nil {
+			if err := s.applyLinks(r.Context(), mailApp); err != nil {
+				resp["attach_error"] = err.Error()
+			}
+		}
+	}
 	dep, err := s.startDeployment(r.Context(), app, deployOptions{actorID: &p.user.ID, ip: clientIP(r), trigger: "manual"})
 	if err != nil {
 		resp["deploy_error"] = err.Error()
@@ -311,6 +336,14 @@ func (s *Server) handleTemplateUpdate(w http.ResponseWriter, r *http.Request, p 
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
+	}
+	if _, ok := newEnv[catalog.MailHostKey]; t.Mail && !ok {
+		mailApp, err := s.db.MailApp(r.Context())
+		if err != nil {
+			writeError(w, http.StatusConflict, "the new version uses the mail server: set it up under Mail first")
+			return
+		}
+		newEnv[catalog.MailHostKey] = mailApp.Hostname
 	}
 	cf, err := s.parseCompose(r.Context(), []byte(t.Compose), newEnv, t.Expose.Service, t.Expose.Port)
 	if err != nil {

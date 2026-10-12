@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/smtp"
 	"os"
+	"os/exec"
 	"runtime"
 	"slices"
 	"strconv"
@@ -157,9 +158,19 @@ func TestMailWithDocker(t *testing.T) {
 
 	// The mail server logs to the container log (its default is a file
 	// inside the container).
-	eventually(t, "mail server log", func() bool {
-		return strings.Contains(p.call(200, "GET", base+"/logs?tail=200", nil)["log"].(string), " INFO ")
-	})
+	// An SMTP connection is logged; logging switches over with the
+	// settings reload after the deployment, so give it time.
+	logged := false
+	for deadline := time.Now().Add(time.Minute); !logged && time.Now().Before(deadline); time.Sleep(time.Second) {
+		if c, err := smtp.Dial("127.0.0.1:" + strconv.Itoa(smtpPort)); err == nil {
+			c.Hello("client.example.net")
+			c.Quit()
+		}
+		logged = strings.Contains(p.call(200, "GET", base+"/logs?tail=200", nil)["log"].(string), " INFO ")
+	}
+	if !logged {
+		t.Fatal("the mail server does not log to the container log")
+	}
 
 	// Mailboxes.
 	mb := "/api/v1/mail/domains/" + did + "/mailboxes"
@@ -235,6 +246,49 @@ func TestMailWithDocker(t *testing.T) {
 	})
 	if code, _ := jmap("alice@example.test", "wrong password 1"); code != http.StatusUnauthorized {
 		t.Fatalf("wrong password: %d", code)
+	}
+
+	// Webmail from the catalog reaches the mail server on its own network
+	// by the mail host name (the name the certificate has).
+	wr := p.call(http.StatusCreated, "POST", "/api/v1/catalog/roundcube/install", map[string]any{
+		"server_id": mustAtoi(h.id), "inputs": map[string]string{"DOMAIN": "webmail.localhost"}})
+	if wr["attach_error"] != nil {
+		t.Fatalf("install webmail: %v", wr)
+	}
+	wid := jsonID(wr["app"].(map[string]any)["id"])
+	t.Cleanup(func() { p.call(200, "DELETE", "/api/v1/apps/"+wid+"?volumes=1", nil) })
+	if d, log := followDeployment(t, p, "/api/v1/apps/"+wid, jsonID(wr["deployment"].(map[string]any)["id"])); d["status"] != "succeeded" {
+		t.Fatalf("webmail deployment: %v\n%s", d, log)
+	}
+	if env := p.call(200, "GET", "/api/v1/apps/"+wid+"/env", nil)["env"].(map[string]any); env["MAIL_HOST"] != "mail.example.test" {
+		t.Fatalf("webmail env = %v", env)
+	}
+	if links := jsonString(p.call(200, "GET", base, nil)["app"].(map[string]any)["links"]); links != "["+wid+"]" {
+		t.Fatalf("mail server links = %s", links)
+	}
+	eventually(t, "webmail login page", func() bool {
+		code, body := h.get("webmail.localhost", "/")
+		return code == 200 && strings.Contains(body, "rcmloginuser")
+	})
+	dc := docker.New(sock)
+	var webmail string
+	for _, c := range func() []docker.ContainerSummary {
+		l, _ := dc.ContainerList(context.Background(), map[string]string{"basalt.app": wid})
+		return l
+	}() {
+		if c.State == "running" {
+			webmail = c.ID
+		}
+	}
+	// IMAPS from the webmail container to mail.example.test:993 answers
+	// with the mail server's greeting (the certificate is the proxy's
+	// internal one here, so it is not verified in this check).
+	probe := `$c = stream_context_create(["ssl" => ["verify_peer" => false, "verify_peer_name" => false]]);
+$s = stream_socket_client("ssl://mail.example.test:993", $e, $m, 5, STREAM_CLIENT_CONNECT, $c);
+echo $s ? fgets($s) : "error: $m";`
+	out, err := exec.Command("docker", "--host", "unix://"+sock, "exec", webmail, "php", "-r", probe).CombinedOutput()
+	if err != nil || !strings.HasPrefix(string(out), "* OK") {
+		t.Fatalf("imaps from webmail: %v %s", err, out)
 	}
 
 	// IMAP over TLS uses the proxy's certificate for the mail host name.
@@ -427,8 +481,18 @@ func TestMailWithDocker(t *testing.T) {
 		t.Fatalf("send limit not enforced: %v", refused)
 	}
 	t.Logf("send limit: %v", refused)
-	p.call(200, "PUT", settings, map[string]any{"send_limit": 0, "relay": nil})
-	eventually(t, "no limit", func() bool { return submit("alice@example.test", "unlimited") == nil })
+	if w := p.call(200, "PUT", settings, map[string]any{"send_limit": 0, "relay": nil})["warning"]; w != nil {
+		t.Logf("settings: %v", w)
+	}
+	var lastErr error
+	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(time.Second) {
+		if lastErr = submit("alice@example.test", "unlimited"); lastErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the limit stays: %v", lastErr)
+		}
+	}
 	if view := p.call(200, "GET", "/api/v1/mail", nil)["settings"].(map[string]any); view["relay"] != nil || view["send_limit"].(float64) != 0 {
 		t.Fatalf("settings = %v", view)
 	}

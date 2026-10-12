@@ -31,6 +31,10 @@ import (
 	"github.com/wiefix/basalt/internal/proxy"
 )
 
+// MailHostKey is the variable a mail template gets the mail server's host
+// name in.
+const MailHostKey = "MAIL_HOST"
+
 // Input types.
 const (
 	InputDomain = "domain" // the app's domain; exactly one per template
@@ -56,6 +60,10 @@ type Template struct {
 	Expose   Expose   `yaml:"expose" json:"expose"`
 	// Notes are shown after installation (first login and the like).
 	Notes string `yaml:"notes" json:"notes"`
+	// Mail: the app uses Basalt's mail server, whose host name the panel
+	// passes as MAIL_HOST (and, on the same server, makes reachable on the
+	// app's network under that name).
+	Mail bool `yaml:"mail" json:"mail,omitempty"`
 
 	Compose string `yaml:"-" json:"-"`
 	// Source is where the template comes from: "builtin" or the host of
@@ -132,9 +140,12 @@ func (t *Template) Validate(ctx context.Context) error {
 	case t.MemoryMB < 0:
 		return errors.New("memory_mb: not negative")
 	}
-	keys := map[string]bool{}
+	keys := map[string]bool{MailHostKey: true} // set by the panel
 	domains := 0
 	sample := map[string]string{}
+	if t.Mail {
+		sample[MailHostKey] = "mail.example.com"
+	}
 	for _, in := range t.Inputs {
 		if !keyRE.MatchString(in.Key) || keys[in.Key] {
 			return fmt.Errorf("input %q: a unique UPPER_CASE key", in.Key)

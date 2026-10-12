@@ -51,7 +51,13 @@ export function MailPage({ user }: { user: User }) {
         )
       ) : (
         <div className="stack">
-          <ServerCard hostname={m.hostname ?? ""} serverId={m.server.server_id} appId={m.server.id} tls={m.tls} />
+          <ServerCard
+            hostname={m.hostname ?? ""}
+            serverId={m.server.server_id}
+            appId={m.server.id}
+            tls={m.tls}
+            webmail={m.server.links ?? []}
+          />
           <ChecksCard checks={m.checks ?? null} admin={admin} />
           {m.settings && <OutgoingCard settings={m.settings} admin={admin} />}
           {m.domains.length === 0 ? (
@@ -132,13 +138,17 @@ function ServerCard({
   serverId,
   appId,
   tls,
+  webmail,
 }: {
   hostname: string;
   serverId: number;
   appId: number;
   tls?: { not_after?: string; error?: string };
+  webmail: number[];
 }) {
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
+  const apps = useQuery({ queryKey: ["apps"], queryFn: api.apps, enabled: webmail.length > 0 });
+  const webmailApps = (apps.data?.apps ?? []).filter((a) => webmail.includes(a.id));
   const status = useQuery({ queryKey: ["app-status", appId], queryFn: () => api.appStatus(appId), refetchInterval: 15_000 });
   const server = servers.data?.servers.find((s) => s.id === serverId);
   const state = status.data?.status.state;
@@ -178,6 +188,27 @@ function ServerCard({
           IMAP <span className="mono">{hostname}:993</span> (SSL/TLS) · SMTP <span className="mono">{hostname}:465</span>{" "}
           (SSL/TLS) or <span className="mono">587</span> (STARTTLS) · user name: the full address. Most clients find these
           settings themselves.
+        </dd>
+        <dt>Webmail</dt>
+        <dd>
+          {webmailApps.length > 0 ? (
+            webmailApps.map((a, i) => (
+              <span key={a.id}>
+                {i > 0 && " · "}
+                {a.domains[0] ? (
+                  <a href={`https://${a.domains[0]}`} target="_blank" rel="noreferrer" className="mono">
+                    {a.domains[0]}
+                  </a>
+                ) : (
+                  <Link to={`/apps/${a.id}`}>{a.name}</Link>
+                )}
+              </span>
+            ))
+          ) : (
+            <span className="muted">
+              none yet: install <Link to="/catalog">Roundcube from the Catalog</Link> to read mail in the browser
+            </span>
+          )}
         </dd>
       </dl>
     </div>
@@ -225,6 +256,7 @@ function OutgoingCard({ settings, admin }: { settings: MailSettings; admin: bool
 
 function OutgoingModal({ settings, onClose }: { settings: MailSettings; onClose: () => void }) {
   const qc = useQueryClient();
+  const toast = useToast();
   const r = settings.relay;
   const [useRelay, setUseRelay] = useState(!!r);
   const [host, setHost] = useState(r?.host ?? "");
@@ -243,7 +275,8 @@ function OutgoingModal({ settings, onClose }: { settings: MailSettings; onClose:
       }
       return api.updateMailSettings({ relay, send_limit: Number(limit) || 0 });
     },
-    onSuccess: () => {
+    onSuccess: (r) => {
+      if (r.warning) toast(r.warning, true);
       qc.invalidateQueries({ queryKey: ["mail"] });
       onClose();
     },
