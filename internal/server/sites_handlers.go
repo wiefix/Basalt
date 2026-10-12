@@ -76,6 +76,7 @@ func (s *Server) SyncSites(ctx context.Context, serverID int64) {
 		s.log.Warn("push sftp accounts", "server_id", serverID, "err", err)
 	}
 	s.PushDNS(ctx, serverID)
+	s.PushHealth(ctx, serverID)
 	if err := s.SyncApps(ctx, serverID); err != nil {
 		s.log.Warn("sync apps", "server_id", serverID, "err", err)
 	}

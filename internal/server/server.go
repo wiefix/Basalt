@@ -83,8 +83,9 @@ type Server struct {
 	catalog           func() ([]*catalog.Template, error)
 	tplMu             sync.Mutex
 	catalogMu         sync.Mutex
-	remote            *remoteCatalog            // the downloaded catalog
-	catalogFetchMu    sync.Mutex                // one download at a time
+	remote            *remoteCatalog // the downloaded catalog
+	catalogFetchMu    sync.Mutex     // one download at a time
+	health            healthChecks
 	tplUpdates        map[int64]*templateUpdate // running or failed template updates
 	dataDir           string
 	restic            string
@@ -226,6 +227,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handlePutRecord))
 	mux.Handle("DELETE /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handleDeleteRecord))
 
+	mux.Handle("GET /api/v1/health-checks", s.requireRole(store.RoleViewer, s.handleHealthChecks))
+	mux.Handle("POST /api/v1/health-checks", s.requireRole(store.RoleAdmin, s.handleCreateHealthCheck))
+	mux.Handle("PUT /api/v1/health-checks/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateHealthCheck))
+	mux.Handle("DELETE /api/v1/health-checks/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteHealthCheck))
+	mux.Handle("GET /api/v1/health-checks/{id}/events", s.requireRole(store.RoleViewer, s.handleHealthEvents))
 	mux.Handle("GET /api/v1/catalog", s.requireRole(store.RoleViewer, s.handleCatalog))
 	mux.Handle("POST /api/v1/catalog/{id}/install", s.requireRole(store.RoleAdmin, s.handleInstall))
 	mux.Handle("PUT /api/v1/catalog/source", s.requireRole(store.RoleAdmin, s.handleCatalogSource))
@@ -324,6 +330,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go s.dnsLoop(ctx)
 	go s.refreshMailLoop(ctx)
 	go s.catalogLoop(ctx)
+	go s.healthLoop(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

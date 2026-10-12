@@ -17,6 +17,7 @@ import { BackupsPage } from "./pages/Backups";
 import { DNSPage, ZonePage } from "./pages/DNS";
 import { MailPage } from "./pages/Mail";
 import { CatalogPage } from "./pages/Catalog";
+import { MonitoringPage } from "./pages/Monitoring";
 import { AccountPage } from "./pages/Account";
 
 // The signed-in user, or null when signed out. A 401 is a normal answer
@@ -97,6 +98,9 @@ function Shell({ user }: { user: User }) {
         <NavLink className="nav-link" to="/mail">
           <Icon name="mail" /> Mail
         </NavLink>
+        <NavLink className="nav-link" to="/monitoring">
+          <Icon name="pulse" /> Monitoring
+        </NavLink>
         <NavLink className="nav-link" to="/dns">
           <Icon name="route" /> DNS
         </NavLink>
@@ -143,6 +147,7 @@ function Shell({ user }: { user: User }) {
           <Route path="/databases/:id/*" element={<AppPage user={user} />} />
           <Route path="/mail" element={<MailPage user={user} />} />
           <Route path="/catalog" element={<CatalogPage user={user} />} />
+          <Route path="/monitoring" element={<MonitoringPage user={user} />} />
           <Route path="/dns" element={<DNSPage user={user} />} />
           <Route path="/dns/:id" element={<ZonePage user={user} />} />
           <Route path="/registries" element={<RegistriesPage user={user} />} />

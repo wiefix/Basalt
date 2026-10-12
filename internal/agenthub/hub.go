@@ -52,6 +52,7 @@ type Hub struct {
 	conns     map[int64]*conn
 	onConnect func(ctx context.Context, serverID int64)
 	onACME    func(ctx context.Context, serverID int64, c agentproto.ACMEChallenge) error
+	onHealth  func(serverID int64, r agentproto.HealthReport)
 
 	installScript []byte
 	binariesDir   string
@@ -66,6 +67,10 @@ func (h *Hub) OnConnect(f func(ctx context.Context, serverID int64)) { h.onConne
 func (h *Hub) OnACMEChallenge(f func(ctx context.Context, serverID int64, c agentproto.ACMEChallenge) error) {
 	h.onACME = f
 }
+
+// OnHealthReport registers the handler of health check results from
+// agents. Call before serving.
+func (h *Hub) OnHealthReport(f func(serverID int64, r agentproto.HealthReport)) { h.onHealth = f }
 
 type conn struct {
 	peer   *agentproto.Peer
@@ -339,6 +344,18 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 		}
 		// Only apps placed on this server are stored.
 		return nil, h.db.InsertAppMetrics(ctx, id, apps)
+	case agentproto.TypeHealthReport:
+		var r agentproto.HealthReport
+		if err := json.Unmarshal(payload, &r); err != nil {
+			return nil, err
+		}
+		if len(r.Results) > 10*agentproto.MaxHealthChecks {
+			return nil, errors.New("too many health results")
+		}
+		if h.onHealth != nil {
+			h.onHealth(id, r)
+		}
+		return nil, nil
 	case agentproto.TypeACMEChallenge:
 		var c agentproto.ACMEChallenge
 		if err := json.Unmarshal(payload, &c); err != nil {

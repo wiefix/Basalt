@@ -81,6 +81,7 @@ func startPanelWith(t *testing.T, o server.Options) *panel {
 	}
 	srv := server.New(o)
 	hub.OnACMEChallenge(srv.ACMEChallenge)
+	hub.OnHealthReport(srv.HealthReport)
 	api := httptest.NewServer(srv.Handler())
 	t.Cleanup(api.Close)
 

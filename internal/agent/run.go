@@ -100,6 +100,7 @@ type Agent struct {
 	mysql   string
 	docker  string
 
+	health      *healthManager
 	mailCheck   *mailcheck.Checker
 	mailCheckMu sync.Mutex // one deliverability check at a time
 
@@ -145,6 +146,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		sftp:            sftp,
 		dns:             newDNSManager(cfg, log.With("subsystem", "dns")),
 		acme:            newACMERelay(cfg, log.With("subsystem", "acme")),
+		health:          newHealthManager(log.With("subsystem", "health")),
 		mailCheck:       &mailcheck.Checker{Resolvers: cfg.Resolvers, SMTPProbes: cfg.MailCheckProbes},
 		apps:            apps,
 		backups:         backups,
@@ -175,6 +177,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.dns.run(ctx)
 	go a.acme.run(ctx)
 	go a.apps.run(ctx)
+	defer a.health.stop()
 
 	backoff := minBackoff
 	for {
@@ -263,6 +266,7 @@ func (a *Agent) session(ctx context.Context) error {
 	defer a.acme.setPanel(nil)
 	go a.maybeRenew(ctx, peer)
 	go a.reportMetrics(ctx, peer)
+	go a.health.report(ctx, peer)
 
 	return <-runErr
 }
@@ -314,6 +318,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return a.MailCert(ctx, req)
+	case agentproto.TypeHealthApply:
+		var req agentproto.HealthApply
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.health.Apply(ctx, req)
 	case agentproto.TypeDNSApply:
 		var st agentproto.DNSApply
 		if err := json.Unmarshal(payload, &st); err != nil {

@@ -198,6 +198,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	})
 	hub.OnConnect(api.SyncSites)
 	hub.OnACMEChallenge(api.ACMEChallenge)
+	hub.OnHealthReport(api.HealthReport)
 
 	// Run both listeners; the first failure stops the other.
 	ctx, cancel := context.WithCancelCause(ctx)

@@ -457,6 +457,34 @@ export interface AppTemplateInfo {
   update: { revision: number; state: "backing_up" | "failed"; backup_id?: number; error?: string } | null;
 }
 
+export interface HealthCheck {
+  id: number;
+  name: string;
+  kind: "http" | "https" | "tcp";
+  host: string;
+  port: number;
+  path: string;
+  host_header: string;
+  insecure: boolean;
+  interval: number;
+  timeout: number;
+  status: "unknown" | "up" | "down";
+  status_since: string | null;
+  results: { server_id: number; server_name: string; ok: boolean; latency_ms: number; error?: string; at: string; stale: boolean }[];
+}
+
+export interface HealthCheckInput {
+  name: string;
+  kind: string;
+  host: string;
+  port: number;
+  path: string;
+  host_header: string;
+  insecure: boolean;
+  interval: number;
+  timeout: number;
+}
+
 export interface MailRelay {
   host: string;
   port: number;
@@ -673,6 +701,12 @@ export const api = {
   appTemplate: (id: number) => get<AppTemplateInfo>(`/api/v1/apps/${id}/template`),
   updateTemplate: (id: number, b: { inputs: Record<string, string>; backup: boolean }) =>
     post<{ update: AppTemplateInfo["update"] }>(`/api/v1/apps/${id}/template-update`, b),
+  healthChecks: () => get<{ checks: HealthCheck[] }>("/api/v1/health-checks"),
+  createHealthCheck: (b: HealthCheckInput) => post<{ check: { id: number } }>("/api/v1/health-checks", b),
+  updateHealthCheck: (id: number, b: HealthCheckInput) => put<void>(`/api/v1/health-checks/${id}`, b),
+  deleteHealthCheck: (id: number) => del<void>(`/api/v1/health-checks/${id}`),
+  healthEvents: (id: number) =>
+    get<{ events: { status: string; detail: string; at: string }[] }>(`/api/v1/health-checks/${id}/events`),
   mail: () => get<MailOverview>("/api/v1/mail"),
   createMail: (b: { server_id: number; hostname: string; memory_mb: number }) =>
     post<{ server: App; deploy_error?: string }>("/api/v1/mail", b),
