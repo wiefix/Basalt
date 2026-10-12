@@ -1,8 +1,8 @@
 import { useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router";
-import { api, can, type App, type Template, type User } from "../api";
-import { ErrorBox, Field, Icon, Loading, Modal } from "../components/ui";
+import { api, can, type App, type CatalogSource, type Template, type User } from "../api";
+import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useConfirm, useToast } from "../components/ui";
 
 export function CatalogPage({ user }: { user: User }) {
   const catalog = useQuery({ queryKey: ["catalog"], queryFn: api.catalog });
@@ -28,6 +28,7 @@ export function CatalogPage({ user }: { user: User }) {
           <div className="sub">Apps installed in one click, each with its own network, volumes and HTTPS domain.</div>
         </div>
       </div>
+      {admin && <SourceCard source={catalog.data.source} />}
       <div className="row wrap" style={{ marginBottom: 16 }}>
         <input className="input" style={{ maxWidth: 280 }} placeholder="Search" value={filter} onChange={(e) => setFilter(e.target.value)} />
         <div className="segmented" style={{ flexWrap: "wrap" }}>
@@ -57,6 +58,7 @@ export function CatalogPage({ user }: { user: User }) {
                   <h3 style={{ margin: 0 }}>{t.name}</h3>
                   <div className="faint small">
                     {t.category} · {t.version}
+                    {t.source && t.source !== "builtin" && <> · from {t.source}</>}
                   </div>
                 </div>
               </div>
@@ -208,6 +210,153 @@ function InstallModal({ template: t, onClose }: { template: Template; onClose: (
         {showCompose && <pre className="logbox">{t.compose}</pre>}
         <div className="faint small">
           Installed apps appear under <Link to="/apps">Apps</Link>, with deployments, logs and backups.
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// SourceCard shows the catalog the panel downloads more templates from.
+function SourceCard({ source }: { source: CatalogSource | null }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [editing, setEditing] = useState(false);
+  const refresh = useMutation({
+    mutationFn: api.refreshCatalog,
+    onSettled: () => qc.invalidateQueries({ queryKey: ["catalog"] }),
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  const remove = async () => {
+    const ok = await confirm({
+      title: "Stop using this catalog?",
+      body: <p>Its templates disappear from the catalog. Apps installed from them keep running, without updates.</p>,
+      confirm: "Remove",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.setCatalogSource({ url: "", key: "", allow_private: false });
+      qc.invalidateQueries({ queryKey: ["catalog"] });
+    } catch (e) {
+      toast(errorMessage(e), true);
+    }
+  };
+  return (
+    <div className="card card-body stack" style={{ marginBottom: 16 }}>
+      {!source ? (
+        <div className="row wrap" style={{ justifyContent: "space-between" }}>
+          <span className="muted small">
+            Built-in templates only. Add a catalog to get more apps and updates between Basalt releases.
+          </span>
+          <button className="btn sm" onClick={() => setEditing(true)}>
+            <Icon name="plus" size={14} /> Add a catalog
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="row wrap" style={{ justifyContent: "space-between" }}>
+            <div style={{ minWidth: 0 }}>
+              <div className="mono small" style={{ overflowWrap: "anywhere" }}>
+                {source.url}
+              </div>
+              <div className="faint small">
+                {source.templates} templates · signed by {source.key ? "your key" : "Basalt"}
+                {source.generated && <> · published {formatDate(source.generated)}</>}
+                {source.fetched_at && <> · checked {formatDate(source.fetched_at)}</>}
+              </div>
+            </div>
+            <div className="row">
+              <button className="btn sm" onClick={() => refresh.mutate()} disabled={refresh.isPending}>
+                <Icon name="refresh" size={14} /> {refresh.isPending ? "Checking…" : "Check now"}
+              </button>
+              <button className="btn sm icon" title="Edit" onClick={() => setEditing(true)}>
+                <Icon name="edit" size={14} />
+              </button>
+              <button className="btn sm icon ghost" title="Remove" onClick={remove}>
+                <Icon name="trash" size={14} />
+              </button>
+            </div>
+          </div>
+          {source.error && (
+            <div className="alert warn">
+              The last check failed{source.error_at ? ` (${formatDate(source.error_at)})` : ""}: {source.error}. The
+              templates it had before are still offered.
+            </div>
+          )}
+          {source.skipped.length > 0 && (
+            <div className="faint small">
+              Skipped (this panel cannot read them; updating Basalt may help): {source.skipped.join("; ")}
+            </div>
+          )}
+        </>
+      )}
+      {editing && <SourceModal source={source} onClose={() => setEditing(false)} />}
+    </div>
+  );
+}
+
+function SourceModal({ source, onClose }: { source: CatalogSource | null; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [url, setURL] = useState(source?.url ?? "");
+  const [key, setKey] = useState(source?.key ?? "");
+  const [allowPrivate, setAllowPrivate] = useState(source?.allow_private ?? false);
+  const save = useMutation({
+    mutationFn: () => api.setCatalogSource({ url: url.trim(), key: key.trim(), allow_private: allowPrivate }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["catalog"] });
+      onClose();
+    },
+  });
+  return (
+    <Modal
+      title="Catalog source"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" form="catalog-source-form" disabled={save.isPending}>
+            {save.isPending ? "Checking…" : "Save"}
+          </button>
+        </>
+      }
+    >
+      <form
+        id="catalog-source-form"
+        className="form"
+        onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          save.mutate();
+        }}
+      >
+        <ErrorBox error={save.error} />
+        <Field
+          label="Index URL"
+          help="A catalog.json built with basalt catalog build; its signature is read from the same URL with .sig added."
+        >
+          <input
+            className="input mono"
+            value={url}
+            onChange={(e) => setURL(e.target.value)}
+            placeholder="https://example.com/catalog.json"
+            required
+          />
+        </Field>
+        <Field
+          label="Signing key"
+          help="For your own catalog: the public key (ssh-ed25519 …) it is signed with by ssh-keygen -Y sign -n basalt-catalog. Empty: Basalt's key."
+        >
+          <input className="input mono" value={key} onChange={(e) => setKey(e.target.value)} placeholder="ssh-ed25519 AAAA…" />
+        </Field>
+        <label className="row small">
+          <input type="checkbox" checked={allowPrivate} onChange={(e) => setAllowPrivate(e.target.checked)} />
+          The catalog is on a private network (allows private addresses and plain http)
+        </label>
+        <div className="faint small">
+          The catalog is saved only if it downloads and its signature checks out. Its templates pass the same checks as
+          the built-in ones; where both have an app, the newer revision is offered.
         </div>
       </form>
     </Modal>

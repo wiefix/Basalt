@@ -22,6 +22,7 @@ import (
 	"github.com/wiefix/basalt/internal/agenthub"
 	"github.com/wiefix/basalt/internal/auth"
 	"github.com/wiefix/basalt/internal/buildinfo"
+	"github.com/wiefix/basalt/internal/catalog"
 	"github.com/wiefix/basalt/internal/compose"
 	"github.com/wiefix/basalt/internal/config"
 	"github.com/wiefix/basalt/internal/logging"
@@ -39,6 +40,8 @@ Commands:
   agent     run the agent on a managed host
             (agent enroll: register this host with a panel)
   proxy     run the web proxy (embedded Caddy) on a managed host
+  catalog   catalog build DIR: check the app templates in DIR and print
+            the catalog index (sign it with ssh-keygen -Y sign -n basalt-catalog)
   version   print version information
 
 Run "basalt <command> -h" for command flags.
@@ -65,6 +68,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = runAgent(ctx, args[1:], stderr)
 	case "proxy":
 		err = runProxy(ctx, args[1:], stderr)
+	case "catalog":
+		err = runCatalog(ctx, args[1:], stdout)
 	case "version", "-version", "--version":
 		fmt.Fprintln(stdout, buildinfo.String())
 		return 0
@@ -335,4 +340,18 @@ func splitList(v string) []string {
 		}
 	}
 	return out
+}
+
+// runCatalog builds a catalog index from a directory of templates (one
+// directory per template with template.yaml and compose.yaml).
+func runCatalog(ctx context.Context, args []string, stdout io.Writer) error {
+	if len(args) != 2 || args[0] != "build" {
+		return errors.New("usage: basalt catalog build DIR > catalog.json")
+	}
+	data, err := catalog.BuildIndex(ctx, os.DirFS(args[1]), ".", time.Now())
+	if err != nil {
+		return fmt.Errorf("%s: %w", args[1], err)
+	}
+	_, err = stdout.Write(append(data, '\n'))
+	return err
 }

@@ -19,12 +19,24 @@ type templateView struct {
 	Compose string `json:"compose"`
 }
 
-// templates returns the catalog (tests replace it through Options).
+// templates returns the catalog: the built-in templates merged with the
+// downloaded ones (tests replace the built-in ones through Options).
 func (s *Server) templates() ([]*catalog.Template, error) {
+	builtin := catalog.Builtin
 	if s.catalog != nil {
-		return s.catalog()
+		builtin = s.catalog
 	}
-	return catalog.Builtin()
+	list, err := builtin()
+	if err != nil {
+		return nil, err
+	}
+	s.catalogMu.Lock()
+	remote := s.remote
+	s.catalogMu.Unlock()
+	if remote == nil {
+		return catalog.Merge(list, nil, ""), nil
+	}
+	return catalog.Merge(list, remote.templates, remote.source), nil
 }
 
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -37,7 +49,12 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request, p *princi
 	for i, t := range list {
 		out[i] = templateView{Template: t, Compose: t.Compose}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"templates": out})
+	src, err := s.viewCatalogSource(r.Context())
+	if err != nil {
+		s.internalError(w, r, "describe catalog source", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"templates": out, "source": src})
 }
 
 type installRequest struct {

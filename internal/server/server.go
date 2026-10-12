@@ -79,6 +79,9 @@ type Server struct {
 	mailCheckEvery time.Duration
 	catalog        func() ([]*catalog.Template, error)
 	tplMu          sync.Mutex
+	catalogMu      sync.Mutex
+	remote         *remoteCatalog            // the downloaded catalog
+	catalogFetchMu sync.Mutex                // one download at a time
 	tplUpdates     map[int64]*templateUpdate // running or failed template updates
 	dataDir        string
 	restic         string
@@ -222,6 +225,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/catalog", s.requireRole(store.RoleViewer, s.handleCatalog))
 	mux.Handle("POST /api/v1/catalog/{id}/install", s.requireRole(store.RoleAdmin, s.handleInstall))
+	mux.Handle("PUT /api/v1/catalog/source", s.requireRole(store.RoleAdmin, s.handleCatalogSource))
+	mux.Handle("POST /api/v1/catalog/refresh", s.requireRole(store.RoleAdmin, s.handleCatalogRefresh))
 	mux.Handle("GET /api/v1/apps/{id}/template", s.requireRole(store.RoleViewer, s.handleAppTemplate))
 	mux.Handle("POST /api/v1/apps/{id}/template-update", s.requireRole(store.RoleAdmin, s.handleTemplateUpdate))
 	mux.Handle("GET /api/v1/mail", s.requireRole(store.RoleViewer, s.handleMailOverview))
@@ -315,6 +320,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go s.backupLoop(ctx)
 	go s.dnsLoop(ctx)
 	go s.refreshMailLoop(ctx)
+	go s.catalogLoop(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

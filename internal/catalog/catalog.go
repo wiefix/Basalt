@@ -58,6 +58,9 @@ type Template struct {
 	Notes string `yaml:"notes" json:"notes"`
 
 	Compose string `yaml:"-" json:"-"`
+	// Source is where the template comes from: "builtin" or the host of
+	// the catalog it was downloaded from (set by Merge).
+	Source string `yaml:"-" json:"source,omitempty"`
 	// What the compose file runs, for display.
 	Services []Service `yaml:"-" json:"services"`
 	Volumes  []string  `yaml:"-" json:"volumes"`

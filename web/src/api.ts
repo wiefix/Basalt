@@ -432,6 +432,19 @@ export interface Template {
   services: { name: string; image: string }[];
   volumes: string[] | null;
   compose: string;
+  source?: string;
+}
+
+export interface CatalogSource {
+  url: string;
+  key: string;
+  allow_private: boolean;
+  generated?: string;
+  fetched_at?: string;
+  error?: string;
+  error_at?: string;
+  templates: number;
+  skipped: string[];
 }
 
 export interface AppTemplateInfo {
@@ -651,7 +664,10 @@ export const api = {
     put<{ record: DNSRecord }>(`/api/v1/dns/zones/${zoneId}/records/${id}`, r),
   deleteRecord: (zoneId: number, id: number) => del<void>(`/api/v1/dns/zones/${zoneId}/records/${id}`),
 
-  catalog: () => get<{ templates: Template[] }>("/api/v1/catalog"),
+  catalog: () => get<{ templates: Template[]; source: CatalogSource | null }>("/api/v1/catalog"),
+  setCatalogSource: (b: { url: string; key: string; allow_private: boolean }) =>
+    put<{ source: CatalogSource | null }>("/api/v1/catalog/source", b),
+  refreshCatalog: () => post<{ source: CatalogSource }>("/api/v1/catalog/refresh"),
   installTemplate: (id: string, b: { server_id: number; name: string; inputs: Record<string, string> }) =>
     post<{ app: App; notes: string; deploy_error?: string }>(`/api/v1/catalog/${id}/install`, b),
   appTemplate: (id: number) => get<AppTemplateInfo>(`/api/v1/apps/${id}/template`),
