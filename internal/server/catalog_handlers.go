@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/wiefix/basalt/internal/catalog"
 	"github.com/wiefix/basalt/internal/store"
@@ -17,7 +19,13 @@ type templateView struct {
 	Compose string `json:"compose"`
 }
 
-func (s *Server) templates() ([]*catalog.Template, error) { return catalog.Builtin() }
+// templates returns the catalog (tests replace it through Options).
+func (s *Server) templates() ([]*catalog.Template, error) {
+	if s.catalog != nil {
+		return s.catalog()
+	}
+	return catalog.Builtin()
+}
 
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request, p *principal) {
 	list, err := s.templates()
@@ -128,4 +136,263 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request, p *princi
 		resp["deployment"] = viewDeployment(dep, false)
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// templateUpdate is an update of an installed app to a newer revision of
+// its template, while it runs: the backup first, then the deployment.
+type templateUpdate struct {
+	Revision int    `json:"revision"`
+	State    string `json:"state"` // backing_up, failed
+	BackupID int64  `json:"backup_id,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+func (s *Server) templateUpdate(appID int64) *templateUpdate {
+	s.tplMu.Lock()
+	defer s.tplMu.Unlock()
+	if u := s.tplUpdates[appID]; u != nil {
+		c := *u
+		return &c
+	}
+	return nil
+}
+
+func (s *Server) setTemplateUpdate(appID int64, u *templateUpdate) {
+	s.tplMu.Lock()
+	defer s.tplMu.Unlock()
+	if u == nil {
+		delete(s.tplUpdates, appID)
+	} else {
+		s.tplUpdates[appID] = u
+	}
+}
+
+// appTemplate returns the catalog template of an installed app (nil if
+// the app is not from the catalog or the template is gone).
+func (s *Server) appTemplate(app *store.App) *catalog.Template {
+	if app.Template == "" {
+		return nil
+	}
+	list, err := s.templates()
+	if err != nil {
+		return nil
+	}
+	return catalog.Find(list, app.Template)
+}
+
+// viewAppFull is viewApp with whether a template update is available.
+func (s *Server) viewAppFull(app *store.App) appView {
+	v := viewApp(app)
+	if t := s.appTemplate(app); t != nil && t.Revision > app.TemplateRevision {
+		v.TemplateUpdate = t.Version
+	}
+	return v
+}
+
+type imageChange struct {
+	Service string `json:"service"`
+	From    string `json:"from,omitempty"` // empty: a new service
+	To      string `json:"to,omitempty"`   // empty: a removed service
+}
+
+// imageChanges compares the images an app runs with a template's.
+func imageChanges(app *store.App, t *catalog.Template) []imageChange {
+	out := []imageChange{}
+	old := map[string]string{}
+	for _, sv := range app.Summary.Services {
+		old[sv.Name] = sv.Image
+	}
+	for _, sv := range t.Services {
+		if old[sv.Name] != sv.Image {
+			out = append(out, imageChange{Service: sv.Name, From: old[sv.Name], To: sv.Image})
+		}
+		delete(old, sv.Name)
+	}
+	for name, img := range old {
+		out = append(out, imageChange{Service: name, From: img})
+	}
+	return out
+}
+
+// handleAppTemplate describes an installed app's template and its update.
+func (s *Server) handleAppTemplate(w http.ResponseWriter, r *http.Request, p *principal) {
+	app, ok := s.pathApp(w, r)
+	if !ok {
+		return
+	}
+	if app.Template == "" {
+		writeError(w, http.StatusNotFound, "this app was not installed from the catalog")
+		return
+	}
+	out := map[string]any{"installed_revision": app.TemplateRevision, "template": nil, "update_available": false,
+		"update": s.templateUpdate(app.ID)}
+	t := s.appTemplate(app)
+	if t != nil {
+		out["template"] = map[string]any{"id": t.ID, "name": t.Name, "version": t.Version, "revision": t.Revision,
+			"notes": t.Notes, "website": t.Website}
+		if t.Revision > app.TemplateRevision {
+			env, err := s.appEnv(app)
+			if err != nil {
+				s.internalError(w, r, "read app environment", err)
+				return
+			}
+			out["update_available"] = true
+			out["images"] = imageChanges(app, t)
+			out["needs"] = nonNil(t.Missing(env))
+		}
+	}
+	_, err := s.db.BackupPolicy(r.Context(), appTarget(app).BackupTarget)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.internalError(w, r, "load backup policy", err)
+		return
+	}
+	out["backups"] = err == nil
+	writeJSON(w, http.StatusOK, out)
+}
+
+type templateUpdateRequest struct {
+	Inputs map[string]string `json:"inputs"`
+	// Backup backs up the app's volumes first (needs a backup policy).
+	Backup bool `json:"backup"`
+}
+
+// handleTemplateUpdate updates an installed app to the newest revision of
+// its template: optionally a backup first, then the new compose file with
+// the app's values kept (secrets the template added are generated), then
+// a deployment. Rolling back the deployment goes back to the old file.
+func (s *Server) handleTemplateUpdate(w http.ResponseWriter, r *http.Request, p *principal) {
+	app, ok := s.pathApp(w, r)
+	if !ok {
+		return
+	}
+	var req templateUpdateRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	t := s.appTemplate(app)
+	switch {
+	case app.Template == "":
+		writeError(w, http.StatusNotFound, "this app was not installed from the catalog")
+		return
+	case t == nil:
+		writeError(w, http.StatusConflict, "the catalog no longer has this app")
+		return
+	case t.Revision <= app.TemplateRevision:
+		writeError(w, http.StatusConflict, "the app is up to date")
+		return
+	}
+	if u := s.templateUpdate(app.ID); u != nil && u.State == "backing_up" {
+		writeError(w, http.StatusConflict, "an update is already running")
+		return
+	}
+	env, err := s.appEnv(app)
+	if err != nil {
+		s.internalError(w, r, "read app environment", err)
+		return
+	}
+	newEnv, added, err := t.Complete(env, req.Inputs)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	cf, err := s.parseCompose(r.Context(), []byte(t.Compose), newEnv, t.Expose.Service, t.Expose.Port)
+	if err != nil {
+		s.internalError(w, r, "parse template "+t.ID, err)
+		return
+	}
+	u := &templateUpdate{Revision: t.Revision, State: "backing_up"}
+	if req.Backup {
+		target := appTarget(app)
+		policy, err := s.db.BackupPolicy(r.Context(), target.BackupTarget)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusUnprocessableEntity, "choose where to back it up under Backups first, or update without a backup")
+			return
+		} else if err != nil {
+			s.internalError(w, r, "load backup policy", err)
+			return
+		}
+		if !s.backupsAvailable(w, r, app.ServerID) {
+			return
+		}
+		b, err := s.startBackup(r.Context(), target, policy, "manual", &p.user.ID)
+		var de *deployError
+		switch {
+		case errors.As(err, &de):
+			writeError(w, de.status, de.msg)
+			return
+		case errors.Is(err, store.ErrBackupInProgress):
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		case err != nil:
+			s.internalError(w, r, "start backup", err)
+			return
+		}
+		u.BackupID = b.ID
+	}
+	s.setTemplateUpdate(app.ID, u)
+	s.audit(r, &p.user.ID, "app.template_update", map[string]any{"app_id": app.ID, "template": t.ID,
+		"from": app.TemplateRevision, "to": t.Revision, "backup_id": u.BackupID, "added": added})
+	go s.runTemplateUpdate(app.ID, t, newEnv, cf, u, &p.user.ID, clientIP(r))
+	writeJSON(w, http.StatusAccepted, map[string]any{"update": u})
+}
+
+// runTemplateUpdate waits for the backup, then applies the new template
+// and deploys it. A failed backup leaves the app as it was.
+func (s *Server) runTemplateUpdate(appID int64, t *catalog.Template, env map[string]string, cf *composeFile,
+	u *templateUpdate, actor *int64, ip string) {
+	ctx, cancel := context.WithTimeout(context.Background(), backupTimeout+time.Minute)
+	defer cancel()
+	fail := func(msg string) {
+		s.setTemplateUpdate(appID, &templateUpdate{Revision: u.Revision, State: "failed", BackupID: u.BackupID, Error: msg})
+		s.log.Warn("template update", "app_id", appID, "err", msg)
+	}
+	if u.BackupID != 0 {
+		target := store.BackupTarget{AppID: appID}
+		for {
+			b, err := s.db.BackupByID(ctx, target, u.BackupID)
+			if err != nil {
+				fail("cannot follow the backup: " + err.Error())
+				return
+			}
+			if b.Status == "succeeded" {
+				break
+			}
+			if b.Status != "running" {
+				fail("the backup failed, so nothing was changed: " + b.Error)
+				return
+			}
+			select {
+			case <-ctx.Done():
+				fail("the backup took too long")
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}
+	app, err := s.db.AppByID(ctx, appID)
+	if err != nil {
+		fail("the app is gone")
+		return
+	}
+	b, _ := json.Marshal(env)
+	sealed := s.box.Seal(b, envAD(app.ID))
+	if err := s.db.SetAppEnv(ctx, app.ID, sealed); err != nil {
+		fail(err.Error())
+		return
+	}
+	app.EnvSealed = sealed
+	if err := s.saveCompose(ctx, app, cf); err != nil {
+		fail(err.Error())
+		return
+	}
+	if err := s.db.SetAppTemplateRevision(ctx, app.ID, t.Revision); err != nil {
+		fail(err.Error())
+		return
+	}
+	app.TemplateRevision = t.Revision
+	if _, err := s.startDeployment(ctx, app, deployOptions{actorID: actor, ip: ip, trigger: "update"}); err != nil {
+		fail("the template was applied, but the deployment did not start: " + err.Error())
+		return
+	}
+	s.setTemplateUpdate(appID, nil)
 }

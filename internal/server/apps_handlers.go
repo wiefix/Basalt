@@ -44,6 +44,8 @@ type appView struct {
 	// Template is the catalog template the app was installed from.
 	Template         string `json:"template,omitempty"`
 	TemplateRevision int    `json:"template_revision,omitempty"`
+	// TemplateUpdate is the version a newer template revision brings.
+	TemplateUpdate string `json:"template_update,omitempty"`
 
 	Port      int                    `json:"port"`
 	Domains   []string               `json:"domains"`
@@ -366,7 +368,7 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request, p *princ
 	}
 	out := make([]appView, len(apps))
 	for i, a := range apps {
-		out[i] = viewApp(a)
+		out[i] = s.viewAppFull(a)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"apps": out})
 }
@@ -376,7 +378,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request, p *princip
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"app": viewApp(app), "sync": s.proxySync(r.Context(), app.ServerID)})
+	writeJSON(w, http.StatusOK, map[string]any{"app": s.viewAppFull(app), "sync": s.proxySync(r.Context(), app.ServerID)})
 }
 
 func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *principal) {

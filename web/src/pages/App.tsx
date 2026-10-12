@@ -21,6 +21,7 @@ import { Stat, SyncBadge } from "./Server";
 import { Chart } from "../components/Chart";
 import { BackupsTab } from "./BackupsTab";
 import { LogView } from "../components/LogView";
+import { TemplateCard } from "./AppTemplate";
 
 export function AppPage({ user }: { user: User }) {
   const id = Number(useParams().id);
@@ -197,6 +198,7 @@ function Overview({ app, user }: { app: App; user: User }) {
         </p>
       </div>
 
+      {app.template && <TemplateCard app={app} user={user} />}
       {app.source === "compose" && <ServicesCard app={app} services={st?.services} />}
       <ResourcesCard app={app} running={st?.state === "running"} />
       {app.source === "database" ? <LinksCard app={app} user={user} /> : app.source !== "mail" && <LinkedDatabases app={app} />}

@@ -127,3 +127,32 @@ func TestPrepare(t *testing.T) {
 		}
 	}
 }
+
+func TestComplete(t *testing.T) {
+	meta := strings.Replace(okMeta, "secrets:", "  - {key: OWNER, label: Owner, type: text, required: true}\nsecrets:", 1)
+	tpl, err := Parse(context.Background(), []byte(meta), []byte(strings.Replace(okCompose, "TITLE: ${TITLE}", "TITLE: ${TITLE}${OWNER}", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := map[string]string{"DOMAIN": "a.example.com", "PASS": "kept-password-123456", "CUSTOM": "mine"}
+	if m := tpl.Missing(old); len(m) != 2 || m[0].Key != "TITLE" || m[1].Key != "OWNER" {
+		t.Fatalf("missing %+v", m)
+	}
+	if _, _, err := tpl.Complete(old, nil); err == nil || !strings.Contains(err.Error(), "Owner") {
+		t.Fatalf("required input: %v", err)
+	}
+	if _, _, err := tpl.Complete(old, map[string]string{"OWNER": "x", "DOMAIN": "b.example.com"}); err == nil {
+		t.Fatal("existing value replaced")
+	}
+	env, added, err := tpl.Complete(old, map[string]string{"OWNER": "boss"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env["PASS"] != old["PASS"] || env["CUSTOM"] != "mine" || env["OWNER"] != "boss" || env["ADMIN_EMAIL"] != "admin@example.com" ||
+		env["TITLE"] != "" || len(env["KEY"]) != 32 || strings.Join(added, ",") != "ADMIN_EMAIL,TITLE,OWNER,KEY" {
+		t.Fatalf("env %v added %v", env, added)
+	}
+	if old["OWNER"] != "" {
+		t.Fatal("the old environment changed")
+	}
+}

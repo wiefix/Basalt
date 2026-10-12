@@ -186,6 +186,7 @@ export interface App {
   read_only: boolean;
   template?: string;
   template_revision?: number;
+  template_update?: string;
   created_at: string;
 }
 
@@ -433,6 +434,16 @@ export interface Template {
   compose: string;
 }
 
+export interface AppTemplateInfo {
+  installed_revision: number;
+  template: { id: string; name: string; version: string; revision: number; notes: string; website: string } | null;
+  update_available: boolean;
+  images?: { service: string; from?: string; to?: string }[];
+  needs?: TemplateInput[];
+  backups: boolean;
+  update: { revision: number; state: "backing_up" | "failed"; backup_id?: number; error?: string } | null;
+}
+
 export interface MailRelay {
   host: string;
   port: number;
@@ -643,6 +654,9 @@ export const api = {
   catalog: () => get<{ templates: Template[] }>("/api/v1/catalog"),
   installTemplate: (id: string, b: { server_id: number; name: string; inputs: Record<string, string> }) =>
     post<{ app: App; notes: string; deploy_error?: string }>(`/api/v1/catalog/${id}/install`, b),
+  appTemplate: (id: number) => get<AppTemplateInfo>(`/api/v1/apps/${id}/template`),
+  updateTemplate: (id: number, b: { inputs: Record<string, string>; backup: boolean }) =>
+    post<{ update: AppTemplateInfo["update"] }>(`/api/v1/apps/${id}/template-update`, b),
   mail: () => get<MailOverview>("/api/v1/mail"),
   createMail: (b: { server_id: number; hostname: string; memory_mb: number }) =>
     post<{ server: App; deploy_error?: string }>("/api/v1/mail", b),

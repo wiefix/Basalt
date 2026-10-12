@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"net/mail"
 	"path"
 	"regexp"
@@ -343,4 +344,61 @@ func Find(list []*Template, id string) *Template {
 		return nil
 	}
 	return list[i]
+}
+
+// Complete returns the environment of an installed app updated to this
+// template: its values are kept; inputs the template added take the
+// value given (or their default) and secrets it added are generated.
+// Added lists the keys added.
+func (t *Template) Complete(env, inputs map[string]string) (out map[string]string, added []string, err error) {
+	out = maps.Clone(env)
+	if out == nil {
+		out = map[string]string{}
+	}
+	for k := range inputs {
+		i := slices.IndexFunc(t.Inputs, func(in Input) bool { return in.Key == k })
+		if i < 0 {
+			return nil, nil, fmt.Errorf("unknown input %s", k)
+		}
+		if _, ok := env[k]; ok {
+			return nil, nil, fmt.Errorf("%s is set already: change it under Environment", t.Inputs[i].Label)
+		}
+	}
+	for _, in := range t.Inputs {
+		if _, ok := out[in.Key]; ok {
+			continue
+		}
+		v := inputs[in.Key]
+		if strings.TrimSpace(v) == "" {
+			v = in.Default
+		}
+		if strings.TrimSpace(v) == "" {
+			if in.Required || in.Type == InputDomain {
+				return nil, nil, fmt.Errorf("the update needs %s", in.Label)
+			}
+		} else if v, err = in.value(v); err != nil {
+			return nil, nil, fmt.Errorf("%s: %w", in.Label, err)
+		}
+		out[in.Key] = v
+		added = append(added, in.Key)
+	}
+	for _, sec := range t.Secrets {
+		if _, ok := out[sec.Key]; !ok {
+			out[sec.Key] = generate(sec.Length, sec.Charset)
+			added = append(added, sec.Key)
+		}
+	}
+	return out, added, nil
+}
+
+// Missing returns the inputs an update to this template would ask for:
+// those the app's environment lacks and that have no default.
+func (t *Template) Missing(env map[string]string) []Input {
+	var out []Input
+	for _, in := range t.Inputs {
+		if _, ok := env[in.Key]; !ok && in.Default == "" {
+			out = append(out, in)
+		}
+	}
+	return out
 }

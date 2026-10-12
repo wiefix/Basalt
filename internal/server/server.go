@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/wiefix/basalt/internal/auth"
+	"github.com/wiefix/basalt/internal/catalog"
 	"github.com/wiefix/basalt/internal/secrets"
 	"github.com/wiefix/basalt/internal/store"
 )
@@ -54,6 +55,8 @@ type Options struct {
 	// MailCheckEvery is how often the panel checks mail deliverability
 	// (default a day; negative: only on request).
 	MailCheckEvery time.Duration
+	// Catalog replaces the built-in app catalog (tests).
+	Catalog func() ([]*catalog.Template, error)
 }
 
 type Server struct {
@@ -74,6 +77,9 @@ type Server struct {
 	mailTLS        mailTLSStatus // the last certificate sync
 	mailCheckMu    sync.Mutex    // one deliverability check at a time
 	mailCheckEvery time.Duration
+	catalog        func() ([]*catalog.Template, error)
+	tplMu          sync.Mutex
+	tplUpdates     map[int64]*templateUpdate // running or failed template updates
 	dataDir        string
 	restic         string
 
@@ -121,6 +127,8 @@ func New(o Options) *Server {
 		imagesKept:     o.ImagesKept,
 		mailPorts:      o.MailHostPorts,
 		mailCheckEvery: o.MailCheckEvery,
+		catalog:        o.Catalog,
+		tplUpdates:     map[int64]*templateUpdate{},
 		dataDir:        o.DataDir,
 		restic:         o.Restic,
 		setupToken:     o.SetupToken,
@@ -214,6 +222,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.Handle("GET /api/v1/catalog", s.requireRole(store.RoleViewer, s.handleCatalog))
 	mux.Handle("POST /api/v1/catalog/{id}/install", s.requireRole(store.RoleAdmin, s.handleInstall))
+	mux.Handle("GET /api/v1/apps/{id}/template", s.requireRole(store.RoleViewer, s.handleAppTemplate))
+	mux.Handle("POST /api/v1/apps/{id}/template-update", s.requireRole(store.RoleAdmin, s.handleTemplateUpdate))
 	mux.Handle("GET /api/v1/mail", s.requireRole(store.RoleViewer, s.handleMailOverview))
 	mux.Handle("POST /api/v1/mail", s.requireRole(store.RoleAdmin, s.handleCreateMail))
 	mux.Handle("PUT /api/v1/mail/settings", s.requireRole(store.RoleAdmin, s.handleMailSettings))

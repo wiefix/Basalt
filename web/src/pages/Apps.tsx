@@ -59,7 +59,10 @@ export function AppsPage({ user }: { user: User }) {
                       <strong>{a.name}</strong>
                     </Link>
                   </td>
-                  <td className="mono muted">{sourceLabel(a)}</td>
+                  <td className="mono muted">
+                    {sourceLabel(a)}
+                    {a.template_update && <span className="badge warn" style={{ marginLeft: 8 }}>update: {a.template_update}</span>}
+                  </td>
                   <td>
                     {a.domains.length === 0 ? (
                       <span className="faint">—</span>
