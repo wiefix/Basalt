@@ -65,7 +65,9 @@ func TestRoutesReachTheProxy(t *testing.T) {
 	agentCtx, stopAgent := context.WithCancel(ctx)
 	agentDone := make(chan struct{})
 	go func() { a.Run(agentCtx); close(agentDone) }()
-	eventually(t, "agent online", func() bool { return p.server(id)["status"] == "online" })
+	// Online comes with the connection, the host's facts with its hello a
+	// moment later (hostname is written with them).
+	eventually(t, "agent online", func() bool { s := p.server(id); return s["status"] == "online" && s["hostname"] != nil })
 
 	routes := "/api/v1/servers/" + id + "/routes"
 	addRoute := func(body map[string]any) (routeID string, sync map[string]any) {

@@ -48,7 +48,10 @@ jobs:
           BASALT_DB_ENGINE_TESTS: "1"
           BASALT_CATALOG_TESTS: "1"
           DOCKER_SOCKET: /var/run/docker.sock
-        run: go test -count=1 -timeout 30m -run 'Live|WithDocker' ./internal/docker ./internal/e2e
+        # Caddy's JSON log lines would bury the test results.
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout 30m -run 'Live|WithDocker' ./internal/docker ./internal/e2e 2>&1 | grep -vE '^\{"level"'
 
   linux:
     name: Linux isolation, PHP, MariaDB

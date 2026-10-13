@@ -67,7 +67,9 @@ func TestLinuxIsolationAndPHP(t *testing.T) {
 		t.Fatal(err)
 	}
 	go a.Run(ctx)
-	eventually(t, "agent online", func() bool { return p.server(sid)["status"] == "online" })
+	// Online comes with the connection, the host's facts with its hello a
+	// moment later (hostname is written with them).
+	eventually(t, "agent online", func() bool { s := p.server(sid); return s["status"] == "online" && s["hostname"] != nil })
 	srv := p.server(sid)
 	versions := srv["php_versions"].([]any)
 	if srv["isolated"] != true || len(versions) == 0 {
