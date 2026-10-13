@@ -375,7 +375,9 @@ func downHealthChecks(ctx context.Context, q queryer) (map[int64]bool, error) {
 // they do.
 func bumpDNSIfFollowed(ctx context.Context, tx *sql.Tx, checkID int64) (bool, error) {
 	var n int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM dns_records WHERE health_check_id = ?`, checkID).Scan(&n); err != nil {
+	if err := tx.QueryRowContext(ctx,
+		`SELECT (SELECT count(*) FROM dns_records WHERE health_check_id = ?) +
+		        (SELECT count(*) FROM proxy_routes WHERE health_check_id = ?)`, checkID, checkID).Scan(&n); err != nil {
 		return false, err
 	}
 	if n == 0 {
@@ -517,7 +519,7 @@ func (db *DB) DNSServers(ctx context.Context) ([]DNSServerStatus, error) {
 // the input of automatic records.
 func DNSTargets(ctx context.Context, q queryer) ([]dns.AutoTarget, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT d.domain, s.public_ips, s.detected_ips, s.last_ip,
+		`SELECT d.domain, s.public_ips, s.detected_ips, s.last_ip, COALESCE(r.health_check_id, 0),
 		        CASE WHEN st.id IS NOT NULL THEN 'site ' || st.name
 		             WHEN a.id IS NOT NULL THEN 'app ' || a.name ELSE 'route' END
 		 FROM proxy_route_domains d
@@ -535,7 +537,8 @@ func DNSTargets(ctx context.Context, q queryer) ([]dns.AutoTarget, error) {
 	for rows.Next() {
 		var domain, public, detected, source string
 		var srv Server
-		if err := rows.Scan(&domain, &public, &detected, &srv.LastIP, &source); err != nil {
+		var check int64
+		if err := rows.Scan(&domain, &public, &detected, &srv.LastIP, &check, &source); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(public), &srv.PublicIPs); err != nil {
@@ -545,7 +548,7 @@ func DNSTargets(ctx context.Context, q queryer) ([]dns.AutoTarget, error) {
 			return nil, err
 		}
 		if ips := srv.DNSAddrs(); len(ips) > 0 {
-			out = append(out, dns.AutoTarget{Domain: domain, IPs: ips, Source: source})
+			out = append(out, dns.AutoTarget{Domain: domain, IPs: ips, Source: source, HealthCheck: check})
 		}
 	}
 	return out, rows.Err()

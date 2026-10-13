@@ -13,21 +13,23 @@ import (
 )
 
 type routeView struct {
-	ID        int64           `json:"id"`
-	Kind      proxy.RouteKind `json:"kind"`
-	Domains   []string        `json:"domains"`
-	Root      string          `json:"root,omitempty"`
-	Upstream  string          `json:"upstream,omitempty"`
-	SiteID    int64           `json:"site_id,omitempty"`
-	AppID     int64           `json:"app_id,omitempty"`
-	TLS       proxy.TLSMode   `json:"tls"`
-	HSTS      bool            `json:"hsts"`
-	CreatedAt time.Time       `json:"created_at"`
+	ID       int64           `json:"id"`
+	Kind     proxy.RouteKind `json:"kind"`
+	Domains  []string        `json:"domains"`
+	Root     string          `json:"root,omitempty"`
+	Upstream string          `json:"upstream,omitempty"`
+	SiteID   int64           `json:"site_id,omitempty"`
+	AppID    int64           `json:"app_id,omitempty"`
+	// DNSChallenge: certificates come through DNS-01 (an app on several servers).
+	DNSChallenge bool          `json:"dns_challenge,omitempty"`
+	TLS          proxy.TLSMode `json:"tls"`
+	HSTS         bool          `json:"hsts"`
+	CreatedAt    time.Time     `json:"created_at"`
 }
 
 func viewRoute(r *store.ProxyRoute) routeView {
 	return routeView{
-		ID: r.ID, Kind: r.Kind, Domains: r.Domains, Root: r.Root, Upstream: r.Upstream, SiteID: r.SiteID, AppID: r.AppID,
+		ID: r.ID, Kind: r.Kind, Domains: r.Domains, Root: r.Root, Upstream: r.Upstream, SiteID: r.SiteID, AppID: r.AppID, DNSChallenge: r.DNSChallenge,
 		TLS: r.TLS, HSTS: r.HSTS, CreatedAt: r.CreatedAt,
 	}
 }

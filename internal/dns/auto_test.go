@@ -2,6 +2,7 @@ package dns
 
 import (
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -138,5 +139,39 @@ func TestServiceRecords(t *testing.T) {
 	}
 	if err := z.Validate(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAutoRecordsFollowChecks(t *testing.T) {
+	ip := netip.MustParseAddr
+	z := Zone{Name: "example.com"}
+	targets := []AutoTarget{
+		// An app on two servers, each copy with its health check.
+		{Domain: "app.example.com", IPs: []netip.Addr{ip("203.0.113.1")}, Source: "app a", HealthCheck: 7},
+		{Domain: "app.example.com", IPs: []netip.Addr{ip("203.0.113.2")}, Source: "app a", HealthCheck: 8},
+		// An address also used by something without a check is always served.
+		{Domain: "mixed.example.com", IPs: []netip.Addr{ip("203.0.113.1")}, Source: "app b", HealthCheck: 7},
+		{Domain: "mixed.example.com", IPs: []netip.Addr{ip("203.0.113.1")}, Source: "route"},
+	}
+	var got []string
+	for _, r := range AutoRecords(&z, []string{"example.com"}, targets) {
+		got = append(got, r.Name+" "+r.Value+" ttl="+strconv.Itoa(int(r.TTL))+" check="+strconv.Itoa(int(r.HealthCheck)))
+	}
+	want := "app 203.0.113.1 ttl=60 check=7, app 203.0.113.2 ttl=60 check=8, mixed 203.0.113.1 ttl=300 check=0"
+	if strings.Join(got, ", ") != want {
+		t.Fatalf("got  %s\nwant %s", strings.Join(got, ", "), want)
+	}
+	// With check 7 down only the other copy answers.
+	recs := AutoRecords(&z, []string{"example.com"}, targets)
+	for _, r := range recs {
+		z.Records = append(z.Records, r.Record)
+	}
+	Failover(&z, func(id int64) bool { return id == 7 })
+	var served []string
+	for _, r := range z.Records {
+		served = append(served, r.Name+" "+r.Value)
+	}
+	if strings.Join(served, ", ") != "app 203.0.113.2, mixed 203.0.113.1" {
+		t.Fatalf("served %v", served)
 	}
 }

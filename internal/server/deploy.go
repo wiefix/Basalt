@@ -57,6 +57,26 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 	if !s.agents.Connected(app.ServerID) {
 		return nil, &deployError{status: http.StatusConflict, msg: "the server is offline"}
 	}
+	// The primary server first, then each replica that is online; an
+	// offline replica keeps running what it ran.
+	targets := []deployTarget{{id: app.ServerID}}
+	var skipped []string
+	for _, id := range app.Replicas {
+		name := fmt.Sprintf("server #%d", id)
+		if srv, err := s.db.ServerByID(ctx, id); err == nil {
+			name = srv.Name
+		}
+		if s.agents.Connected(id) {
+			targets = append(targets, deployTarget{id: id, name: name})
+		} else {
+			skipped = append(skipped, name)
+		}
+	}
+	if len(app.Replicas) > 0 {
+		if srv, err := s.db.ServerByID(ctx, app.ServerID); err == nil {
+			targets[0].name = srv.Name
+		}
+	}
 	env, err := s.appEnv(app)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt app env: %w", err)
@@ -154,8 +174,11 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 	for _, w := range warnings {
 		notes += "Warning: " + w + "\n"
 	}
+	for _, name := range skipped {
+		notes += "Warning: " + name + " is offline; it keeps running the previous deployment.\n"
+	}
 	live.append(notes)
-	go s.runDeployment(app.ServerID, dep.ID, spec, live, deploymentExtras{
+	go s.runDeployment(targets, dep.ID, spec, live, deploymentExtras{
 		commitMessage: keepMessage, compose: composeContent, notes: notes})
 	return dep, nil
 }
@@ -194,20 +217,58 @@ func (s *Server) gitSource(ctx context.Context, app *store.App) (*agentproto.Git
 	return g, nil
 }
 
-func (s *Server) runDeployment(serverID, depID int64, spec agentproto.AppSpec, live *liveLog, x deploymentExtras) {
+// deployTarget is a server a deployment runs on; name is set when the app
+// runs on several (it heads that server's part of the log).
+type deployTarget struct {
+	id   int64
+	name string
+}
+
+func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentproto.AppSpec, live *liveLog, x deploymentExtras) {
 	ctx, cancel := context.WithTimeout(context.Background(), deployTimeout)
 	defer cancel()
+	// One server after the other: the first that fails stops the rest, so
+	// they keep the previous version rather than a half-tested new one.
 	var resp agentproto.AppDeployResponse
-	err := s.agents.Stream(ctx, serverID, agentproto.TypeAppDeploy, spec, &resp, func(raw json.RawMessage) error {
-		var c agentproto.LogChunk
-		if json.Unmarshal(raw, &c) == nil {
-			live.append(c.Text)
+	var log strings.Builder
+	for i, t := range targets {
+		if t.name != "" {
+			head := "=== " + t.name + " ===\n"
+			live.append(head)
+			log.WriteString(head)
 		}
-		return nil
-	})
-	if err != nil {
-		resp = agentproto.AppDeployResponse{Error: "server unreachable: " + err.Error()}
+		var r agentproto.AppDeployResponse
+		err := s.agents.Stream(ctx, t.id, agentproto.TypeAppDeploy, spec, &r, func(raw json.RawMessage) error {
+			var c agentproto.LogChunk
+			if json.Unmarshal(raw, &c) == nil {
+				live.append(c.Text)
+			}
+			return nil
+		})
+		if err != nil {
+			r = agentproto.AppDeployResponse{Error: "server unreachable: " + err.Error()}
+		}
+		log.WriteString(r.Log)
+		if i == 0 {
+			resp = r
+			// Replicas build exactly the commit the first server built.
+			if spec.Git != nil && agentproto.ValidCommit(r.Commit) {
+				g := *spec.Git
+				g.Commit = r.Commit
+				spec.Git = &g
+			}
+		}
+		if !r.OK {
+			resp.OK = false
+			if t.name != "" {
+				resp.Error = t.name + ": " + r.Error
+			} else {
+				resp.Error = r.Error
+			}
+			break
+		}
 	}
+	resp.Log = log.String()
 	if resp.CommitMessage == "" {
 		resp.CommitMessage = x.commitMessage
 	}

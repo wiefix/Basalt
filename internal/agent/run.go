@@ -259,6 +259,7 @@ func (a *Agent) session(ctx context.Context) error {
 	hello.Docker, hello.DockerSecurity = a.dockerVersion(ctx)
 	hello.Restic = a.backups.Version(ctx)
 	hello.DNSPort, hello.DNSError = a.dns.Status()
+	hello.HTTPSPort = a.proxy.opts.HTTPSPort
 	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
 		return err
 	}

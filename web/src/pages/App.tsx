@@ -1,7 +1,18 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
-import { api, appPath, can, sourceLabel, type App, type AppVolume, type Deployment, type ServiceStatus, type User } from "../api";
+import {
+  api,
+  appPath,
+  can,
+  sourceLabel,
+  type App,
+  type AppPlacement,
+  type AppVolume,
+  type Deployment,
+  type ServiceStatus,
+  type User,
+} from "../api";
 import {
   CodeBox,
   ErrorBox,
@@ -80,7 +91,7 @@ export function AppPage({ user }: { user: User }) {
         {can(user, "admin") && tab(`${base}/settings`, "Settings")}
       </div>
       <Routes>
-        <Route index element={<Overview app={a} user={user} />} />
+        <Route index element={<Overview app={a} user={user} placements={app.data.placements ?? []} />} />
         <Route path="connection" element={<ConnectionTab app={a} />} />
         <Route path="backups" element={<BackupsTab target={{ base: `/api/v1/apps/${a.id}`, name: a.name }} user={user} />} />
         <Route path="logs" element={<LogsTab app={a} />} />
@@ -99,7 +110,7 @@ function DeployBadge({ status }: { status: Deployment["status"] }) {
   return <span className={`badge ${cls}`}>{status === "running" ? "deploying" : status}</span>;
 }
 
-function Overview({ app, user }: { app: App; user: User }) {
+function Overview({ app, user, placements }: { app: App; user: User; placements: AppPlacement[] }) {
   const qc = useQueryClient();
   const toast = useToast();
   const confirm = useConfirm();
@@ -199,6 +210,7 @@ function Overview({ app, user }: { app: App; user: User }) {
       </div>
 
       {app.template && <TemplateCard app={app} user={user} />}
+      {(app.source === "image" || app.source === "git") && <ServersCard app={app} user={user} placements={placements} />}
       {app.source === "compose" && <ServicesCard app={app} services={st?.services} />}
       <ResourcesCard app={app} running={st?.state === "running"} />
       {app.source === "database" ? <LinksCard app={app} user={user} /> : app.source !== "mail" && <LinkedDatabases app={app} />}
@@ -375,17 +387,20 @@ function StreamBadge({ state, ended }: { state: StreamState; ended: string | nul
 function LogsTab({ app }: { app: App }) {
   const services = app.compose?.services ?? [];
   const [service, setService] = useState(app.service || services[0]?.name || "");
+  const [server, setServer] = useState(0); // 0: the primary server
+  const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers, enabled: app.replicas.length > 0 });
+  const serverName = (id: number) => servers.data?.servers.find((s) => s.id === id)?.name ?? `server #${id}`;
   const [tail, setTail] = useState(200);
   const [live, setLive] = useState(true);
   const [text, setText] = useState("");
   const [ended, setEnded] = useState<string | null>(null);
   const snapshot = useQuery({
-    queryKey: ["app-logs", app.id, tail, service],
-    queryFn: () => api.appLogs(app.id, tail, service),
+    queryKey: ["app-logs", app.id, tail, service, server],
+    queryFn: () => api.appLogs(app.id, tail, service, server),
     enabled: !live,
     retry: false,
   });
-  const state = useEventStream(live ? api.appLogsStreamUrl(app.id, tail, service) : null, {
+  const state = useEventStream(live ? api.appLogsStreamUrl(app.id, tail, service, server) : null, {
     open: () => {
       setText(""); // a (re)connected stream starts with the last lines again
       setEnded(null);
@@ -401,6 +416,16 @@ function LogsTab({ app }: { app: App }) {
           {live && <StreamBadge state={state} ended={ended} />}
         </div>
         <div className="row">
+          {app.replicas.length > 0 && (
+            <select className="input" style={{ width: "auto", height: 28 }} value={server} onChange={(e) => setServer(Number(e.target.value))}>
+              <option value={0}>{serverName(app.server_id)}</option>
+              {app.replicas.map((id) => (
+                <option key={id} value={id}>
+                  {serverName(id)}
+                </option>
+              ))}
+            </select>
+          )}
           {services.length > 0 && (
             <select className="input" style={{ width: "auto", height: 28 }} value={service} onChange={(e) => setService(e.target.value)}>
               {services.map((s) => (
@@ -1139,6 +1164,132 @@ function ResourcesCard({ app, running }: { app: App; running: boolean }) {
       <div className="card card-body">
         <h3>Network traffic · last hour</h3>
         <Chart points={traffic} format={(v) => `${formatBytes(v)}/s`} />
+      </div>
+    </div>
+  );
+}
+
+const checkBadge: Record<string, string> = { up: "badge ok", down: "badge err", unknown: "badge plain" };
+
+// ServersCard lists the servers an app runs on and lets admins add or
+// remove replicas.
+function ServersCard({ app, user, placements }: { app: App; user: User; placements: AppPlacement[] }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
+  const [target, setTarget] = useState<number | "">("");
+  const admin = can(user, "admin");
+  const list = placements.length > 0 ? placements : [{ server_id: app.server_id, primary: true } as AppPlacement];
+  const on = new Set(list.map((p) => p.server_id));
+  const candidates = (servers.data?.servers ?? []).filter((s) => s.docker && !on.has(s.id));
+  const name = (id: number) => servers.data?.servers.find((s) => s.id === id)?.name ?? `server #${id}`;
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["app", app.id] });
+    qc.invalidateQueries({ queryKey: ["apps"] });
+    qc.invalidateQueries({ queryKey: ["deployments", app.id] });
+    qc.invalidateQueries({ queryKey: ["health-checks"] });
+  };
+  const add = useMutation({
+    mutationFn: () => api.addReplica(app.id, Number(target || candidates[0]?.id)),
+    onSuccess: (r) => {
+      setTarget("");
+      refresh();
+      toast(
+        r.deploy_error
+          ? `Added; deploy to start it there (${r.deploy_error})`
+          : r.deploying
+            ? "Added; the current version is being deployed there"
+            : "Added; the next deployment runs there too",
+        !!r.deploy_error,
+      );
+    },
+  });
+  const remove = async (id: number) => {
+    const ok = await confirm({
+      title: `Stop running ${app.name} on ${name(id)}?`,
+      body: <p>Its domains stop pointing at {name(id)} and its containers there are removed.</p>,
+      confirm: "Remove",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const r = await api.removeReplica(app.id, id);
+      refresh();
+      if (r.cleanup_error) toast(`Removed; cleanup pending: ${r.cleanup_error}`, true);
+    } catch (e) {
+      toast(errorMessage(e), true);
+    }
+  };
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Servers</h2>
+      </div>
+      <div className="table-wrap">
+        <table className="table">
+          <tbody>
+            {list.map((p) => (
+              <tr key={p.server_id}>
+                <td>
+                  <Link to={`/servers/${p.server_id}`}>
+                    <strong>{name(p.server_id)}</strong>
+                  </Link>
+                  {p.primary && list.length > 1 && <span className="faint small"> · primary</span>}
+                </td>
+                <td>
+                  {p.health_check ? (
+                    <Link
+                      to="/monitoring"
+                      className={checkBadge[p.status ?? "unknown"] ?? "badge"}
+                      title="Its health check: DNS leaves out a server whose copy is down (unless every copy is)"
+                    >
+                      {p.status ?? "unknown"}
+                    </Link>
+                  ) : null}
+                </td>
+                <td className="num">
+                  {admin && !p.primary && (
+                    <button className="btn sm icon ghost" title="Remove" onClick={() => remove(p.server_id)}>
+                      <Icon name="trash" size={14} />
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="card-body stack">
+        <p className="faint small" style={{ margin: 0 }}>
+          {list.length > 1
+            ? "Every deployment runs on each server in turn. DNS answers with the servers whose copy passes its health check (HTTPS on /, editable under Monitoring); certificates come through DNS."
+            : "Run the app on more servers for failover: DNS then answers only with the servers whose copy is up. It needs domains in a zone under DNS, and no volumes or linked databases (each server keeps its own copy)."}
+        </p>
+        {admin &&
+          (candidates.length === 0 ? (
+            <p className="faint small" style={{ margin: 0 }}>No other server with Docker.</p>
+          ) : (
+            <form
+              className="row wrap"
+              onSubmit={(e: FormEvent) => {
+                e.preventDefault();
+                add.mutate();
+              }}
+            >
+              <select className="input" style={{ width: "auto", minWidth: 180 }} value={target || candidates[0].id} onChange={(e) => setTarget(Number(e.target.value))}>
+                {candidates.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} {s.status !== "online" ? `(${s.status})` : ""}
+                  </option>
+                ))}
+              </select>
+              <button className="btn sm" disabled={add.isPending}>
+                <Icon name="plus" size={14} /> Run here too
+              </button>
+            </form>
+          ))}
+        <ErrorBox error={add.error} />
       </div>
     </div>
   );

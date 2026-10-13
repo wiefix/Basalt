@@ -134,18 +134,20 @@ func nameTaken(err error) error {
 }
 
 func (db *DB) CreateHealthCheck(ctx context.Context, c *HealthCheck) error {
-	return db.healthWrite(ctx, func(tx *sql.Tx) error {
-		var created int64
-		err := tx.QueryRowContext(ctx,
-			`INSERT INTO health_checks (name, kind, host, port, path, host_header, insecure, interval_s, timeout_s)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at`,
-			c.Name, c.Kind, c.Host, c.Port, c.Path, c.HostHeader, c.Insecure, c.Interval, c.Timeout).Scan(&c.ID, &created)
-		if err != nil {
-			return nameTaken(err)
-		}
-		c.Status, c.CreatedAt = HealthUnknown, time.Unix(created, 0)
-		return nil
-	})
+	return db.healthWrite(ctx, func(tx *sql.Tx) error { return insertHealthCheck(ctx, tx, c) })
+}
+
+func insertHealthCheck(ctx context.Context, tx *sql.Tx, c *HealthCheck) error {
+	var created int64
+	err := tx.QueryRowContext(ctx,
+		`INSERT INTO health_checks (name, kind, host, port, path, host_header, insecure, interval_s, timeout_s)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at`,
+		c.Name, c.Kind, c.Host, c.Port, c.Path, c.HostHeader, c.Insecure, c.Interval, c.Timeout).Scan(&c.ID, &created)
+	if err != nil {
+		return nameTaken(err)
+	}
+	c.Status, c.CreatedAt = HealthUnknown, time.Unix(created, 0)
+	return nil
 }
 
 // UpdateHealthCheck changes a check; its status starts over. It reports

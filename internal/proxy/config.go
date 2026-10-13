@@ -73,7 +73,7 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 	if o.HTTPPort == 0 || o.HTTPSPort == 0 {
 		return nil, "", fmt.Errorf("HTTP and HTTPS ports are required")
 	}
-	var internalNames, wildcardNames []string
+	var internalNames, dnsNames []string
 	var routes, wildcardRoutes []any
 	filesystems := []any{}
 	for _, r := range d.Routes {
@@ -87,8 +87,8 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 			switch {
 			case r.TLS == TLSInternal || !PublicCertEligible(dom):
 				internalNames = append(internalNames, dom)
-			case IsWildcard(dom):
-				wildcardNames = append(wildcardNames, dom)
+			case IsWildcard(dom) || r.DNSChallenge:
+				dnsNames = append(dnsNames, dom)
 			}
 		}
 		handlers, fsEntry := routeHandlers(r)
@@ -131,7 +131,7 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 				"grace_period": "10s",
 				"servers":      obj{"basalt": server},
 			},
-			"tls": obj{"automation": obj{"policies": tlsPolicies(internalNames, wildcardNames, d.ACMEEmail, o)}},
+			"tls": obj{"automation": obj{"policies": tlsPolicies(internalNames, dnsNames, d.ACMEEmail, o)}},
 			// Never touch the host's trust store with the internal CA root.
 			"pki": obj{"certificate_authorities": obj{"local": obj{"install_trust": false}}},
 		},
@@ -213,7 +213,7 @@ func routeHandlers(r Route) (handlers []any, fsEntry obj) {
 	return handlers, fsEntry
 }
 
-func tlsPolicies(internalNames, wildcardNames []string, email string, o BuildOptions) []any {
+func tlsPolicies(internalNames, dnsNames []string, email string, o BuildOptions) []any {
 	var policies []any
 	if len(internalNames) > 0 {
 		policies = append(policies, obj{
@@ -232,9 +232,10 @@ func tlsPolicies(internalNames, wildcardNames []string, email string, o BuildOpt
 		}
 		return out
 	}
-	if len(wildcardNames) > 0 {
-		// A CA issues wildcards only through the DNS-01 challenge.
-		policies = append(policies, obj{"subjects": wildcardNames, "issuers": issuers(true)})
+	if len(dnsNames) > 0 {
+		// A CA issues wildcards only through the DNS-01 challenge; names
+		// served by several servers use it too.
+		policies = append(policies, obj{"subjects": dnsNames, "issuers": issuers(true)})
 	}
 	return append(policies, obj{"issuers": issuers(false)})
 }

@@ -143,7 +143,7 @@ func TestComposeMigrationKeepsData(t *testing.T) {
 		t.Fatal("foreign keys left off")
 	}
 	// Cascades work against the rebuilt table.
-	if err := db.DeleteApp(ctx, 7); err != nil {
+	if _, err := db.DeleteApp(ctx, 7); err != nil {
 		t.Fatal(err)
 	}
 	var n int

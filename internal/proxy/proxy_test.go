@@ -203,3 +203,50 @@ func TestWildcardDomains(t *testing.T) {
 		t.Fatalf("default policy: %s", b)
 	}
 }
+
+// A route served by several servers takes its certificates through DNS-01:
+// an HTTP challenge could reach another server.
+func TestDNSChallengeRoute(t *testing.T) {
+	d := Desired{Routes: []Route{
+		{ID: 1, Kind: KindReverseProxy, AppID: 1, Domains: []string{"app.example.com"}, DNSChallenge: true},
+		{ID: 2, Kind: KindReverseProxy, AppID: 2, Domains: []string{"one.example.com"}},
+		{ID: 3, Kind: KindReverseProxy, AppID: 3, Domains: []string{"app.localhost"}, DNSChallenge: true},
+	}}
+	if err := d.Validate(""); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Build(d, BuildOptions{Dir: "/p", HTTPPort: 80, HTTPSPort: 443})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c struct {
+		Apps struct {
+			TLS struct {
+				Automation struct {
+					Policies []struct {
+						Subjects []string         `json:"subjects"`
+						Issuers  []map[string]any `json:"issuers"`
+					} `json:"policies"`
+				} `json:"automation"`
+			} `json:"tls"`
+		} `json:"apps"`
+	}
+	if err := json.Unmarshal(cfg, &c); err != nil {
+		t.Fatal(err)
+	}
+	p := c.Apps.TLS.Automation.Policies
+	// Local names keep the internal CA; the replicated public name gets
+	// DNS-01; everything else the default policy.
+	if len(p) != 3 || strings.Join(p[0].Subjects, ",") != "app.localhost" || strings.Join(p[1].Subjects, ",") != "app.example.com" ||
+		len(p[2].Subjects) != 0 {
+		t.Fatalf("policies: %+v", p)
+	}
+	b, _ := json.Marshal(p[1].Issuers)
+	if !strings.Contains(string(b), `"provider":{"name":"basalt","socket":"/p/acme.sock"}`) {
+		t.Fatalf("issuers: %s", b)
+	}
+	b, _ = json.Marshal(p[2].Issuers)
+	if strings.Contains(string(b), "acme.sock") {
+		t.Fatalf("default policy uses DNS-01: %s", b)
+	}
+}

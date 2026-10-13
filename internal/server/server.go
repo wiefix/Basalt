@@ -265,6 +265,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/apps/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateApp))
 	mux.Handle("DELETE /api/v1/apps/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteApp))
 	mux.Handle("PUT /api/v1/apps/{id}/domains", s.requireRole(store.RoleAdmin, s.handleSetAppDomains))
+	mux.Handle("POST /api/v1/apps/{id}/replicas", s.requireRole(store.RoleAdmin, s.handleAddReplica))
+	mux.Handle("DELETE /api/v1/apps/{id}/replicas/{sid}", s.requireRole(store.RoleAdmin, s.handleRemoveReplica))
 	mux.Handle("POST /api/v1/apps/{id}/deploy-key", s.requireRole(store.RoleAdmin, s.handleRegenerateDeployKey))
 	mux.Handle("GET /api/v1/apps/{id}/webhook", s.requireRole(store.RoleAdmin, s.handleGetWebhook))
 	mux.Handle("PUT /api/v1/apps/{id}/webhook", s.requireRole(store.RoleAdmin, s.handleSetWebhook))

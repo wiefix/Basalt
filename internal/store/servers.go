@@ -41,7 +41,9 @@ type Server struct {
 	// are set by an admin and replace them when not empty.
 	DetectedIPs []string
 	PublicIPs   []string
-	CreatedAt   time.Time
+	// HTTPSPort is the port its proxy serves HTTPS on.
+	HTTPSPort int
+	CreatedAt time.Time
 }
 
 // DNSAddrs are the addresses automatic DNS records point to: the ones an
@@ -74,7 +76,7 @@ var ErrNameTaken = errors.New("name already in use")
 const serverColumns = `id, name, enrolled_at IS NOT NULL, enroll_expires_at, COALESCE(cert_fp, ''),
 	COALESCE(prev_cert_fp, ''), cert_expires_at, hostname, os, arch, kernel, distro, agent_version,
 	cpu_count, mem_total, last_seen_at, last_ip, php_versions, isolated, docker, docker_security, restic,
-	detected_ips, public_ips, created_at`
+	detected_ips, public_ips, https_port, created_at`
 
 func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 	var s Server
@@ -84,7 +86,7 @@ func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 	err := row.Scan(&s.ID, &s.Name, &s.Enrolled, &enrollExp, &s.CertFP, &s.PrevCertFP, &certExp,
 		&s.Hostname, &s.OS, &s.Arch, &s.Kernel, &s.Distro, &s.AgentVersion,
 		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &phpVersions, &s.Isolated, &s.Docker, &dockerSec, &s.Restic,
-		&detected, &public, &created)
+		&detected, &public, &s.HTTPSPort, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -178,9 +180,9 @@ func (db *DB) UpdateServerHello(ctx context.Context, id int64, s Server) error {
 	return db.execOne(ctx,
 		`UPDATE servers SET hostname = ?, os = ?, arch = ?, kernel = ?, distro = ?, agent_version = ?,
 		 cpu_count = ?, mem_total = ?, last_ip = ?, last_seen_at = ?, php_versions = ?, isolated = ?, docker = ?,
-		 docker_security = ?, detected_ips = ? WHERE id = ?`,
+		 docker_security = ?, detected_ips = ?, https_port = ? WHERE id = ?`,
 		s.Hostname, s.OS, s.Arch, s.Kernel, s.Distro, s.AgentVersion, s.CPUCount, s.MemTotal,
-		s.LastIP, s.LastSeen.Unix(), string(php), s.Isolated, s.Docker, sec, string(detected), id)
+		s.LastIP, s.LastSeen.Unix(), string(php), s.Isolated, s.Docker, sec, string(detected), s.HTTPSPort, id)
 }
 
 // SetServerPublicIPs sets the addresses automatic DNS records use for the

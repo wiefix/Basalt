@@ -52,9 +52,13 @@ type Route struct {
 	// upstream is the app's current container, looked up by the proxy in a
 	// table the agent keeps up to date (no config reload on deploy), so
 	// Upstream stays empty. Without a running container the app gets 503.
-	AppID int64   `json:"app_id,omitempty"`
-	TLS   TLSMode `json:"tls"`
-	HSTS  bool    `json:"hsts,omitempty"`
+	AppID int64 `json:"app_id,omitempty"`
+	// DNSChallenge obtains the route's public certificates through the
+	// DNS-01 challenge: an app on several servers, where an HTTP challenge
+	// may reach another one of them.
+	DNSChallenge bool    `json:"dns_challenge,omitempty"`
+	TLS          TLSMode `json:"tls"`
+	HSTS         bool    `json:"hsts,omitempty"`
 }
 
 // Desired is the complete proxy state the panel wants on one host.

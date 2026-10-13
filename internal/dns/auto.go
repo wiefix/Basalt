@@ -16,6 +16,9 @@ type AutoTarget struct {
 	Domain string
 	IPs    []netip.Addr
 	Source string
+	// HealthCheck, when set, is the check the addresses follow (an app
+	// replica): they are left out while it is down (see Failover).
+	HealthCheck int64
 }
 
 // AutoRecord is a generated record and what it was generated for.
@@ -55,6 +58,7 @@ func AutoRecords(z *Zone, zones []string, targets []AutoTarget) []AutoRecord {
 	}
 	type entry struct {
 		ips     []netip.Addr
+		checks  []int64 // of each address
 		sources []string
 	}
 	byName := map[string]*entry{}
@@ -75,8 +79,12 @@ func AutoRecords(z *Zone, zones []string, targets []AutoTarget) []AutoRecord {
 			byName[name] = e
 		}
 		for _, ip := range t.IPs {
-			if !slices.Contains(e.ips, ip) {
+			if i := slices.Index(e.ips, ip); i < 0 {
 				e.ips = append(e.ips, ip)
+				e.checks = append(e.checks, t.HealthCheck)
+			} else if t.HealthCheck == 0 {
+				// Also served by something that follows no check: always up.
+				e.checks[i] = 0
 			}
 		}
 		if !slices.Contains(e.sources, t.Source) {
@@ -86,12 +94,16 @@ func AutoRecords(z *Zone, zones []string, targets []AutoTarget) []AutoRecord {
 	var out []AutoRecord
 	for name, e := range byName {
 		src := strings.Join(e.sources, ", ")
-		for _, ip := range e.ips {
+		for i, ip := range e.ips {
 			typ := TypeAAAA
 			if ip.Is4() {
 				typ = TypeA
 			}
-			out = append(out, AutoRecord{Record: Record{Name: name, Type: typ, TTL: AutoTTL, Value: ip.String()}, Source: src})
+			r := Record{Name: name, Type: typ, TTL: AutoTTL, Value: ip.String(), HealthCheck: e.checks[i]}
+			if r.HealthCheck != 0 {
+				r.TTL = FailoverTTL
+			}
+			out = append(out, AutoRecord{Record: r, Source: src})
 		}
 	}
 	slices.SortFunc(out, func(a, b AutoRecord) int {

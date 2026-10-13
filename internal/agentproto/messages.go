@@ -103,6 +103,8 @@ type Hello struct {
 	// PublicIPs are the public addresses on the host's interfaces; the
 	// panel publishes them in automatic DNS records.
 	PublicIPs []string `json:"public_ips,omitempty"`
+	// HTTPSPort is the port the proxy serves HTTPS on (0: unknown, 443).
+	HTTPSPort int `json:"https_port,omitempty"`
 }
 
 type Metrics struct {

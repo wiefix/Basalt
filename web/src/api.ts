@@ -187,7 +187,17 @@ export interface App {
   template?: string;
   template_revision?: number;
   template_update?: string;
+  // Other servers the app runs on (image and git apps).
+  replicas: number[];
   created_at: string;
+}
+
+// A server an app runs on, with the health check its copy follows.
+export interface AppPlacement {
+  server_id: number;
+  primary: boolean;
+  health_check?: number;
+  status?: "unknown" | "up" | "down";
 }
 
 export interface AppSettings {
@@ -734,7 +744,11 @@ export const api = {
     del<void>(`/api/v1/mail/domains/${domainId}/mailboxes/${encodeURIComponent(id)}`),
 
   apps: () => get<{ apps: App[] }>("/api/v1/apps"),
-  app: (id: number) => get<{ app: App; sync: Sync }>(`/api/v1/apps/${id}`),
+  app: (id: number) => get<{ app: App; sync: Sync; placements: AppPlacement[] }>(`/api/v1/apps/${id}`),
+  addReplica: (id: number, serverId: number) =>
+    post<{ app?: App; deploying: boolean; deploy_error?: string }>(`/api/v1/apps/${id}/replicas`, { server_id: serverId }),
+  removeReplica: (id: number, serverId: number) =>
+    del<{ app?: App; cleanup_error?: string }>(`/api/v1/apps/${id}/replicas/${serverId}`),
   createApp: (
     b: AppSettings & {
       source: string;
@@ -773,11 +787,11 @@ export const api = {
   deployment: (id: number, did: number) => get<{ deployment: Deployment }>(`/api/v1/apps/${id}/deployments/${did}`),
   appMetrics: (id: number, minutes: number) => get<{ metrics: AppMetrics[] }>(`/api/v1/apps/${id}/metrics?minutes=${minutes}`),
   appStatus: (id: number) => get<{ status: AppStatus }>(`/api/v1/apps/${id}/status`),
-  appLogs: (id: number, tail: number, service = "") =>
-    get<{ log: string }>(`/api/v1/apps/${id}/logs?tail=${tail}${service ? `&service=${encodeURIComponent(service)}` : ""}`),
+  appLogs: (id: number, tail: number, service = "", server = 0) =>
+    get<{ log: string }>(`/api/v1/apps/${id}/logs?tail=${tail}${service ? `&service=${encodeURIComponent(service)}` : ""}${server ? `&server=${server}` : ""}`),
   // Server-sent event streams (see useEventStream).
-  appLogsStreamUrl: (id: number, tail: number, service = "") =>
-    `/api/v1/apps/${id}/logs/stream?tail=${tail}${service ? `&service=${encodeURIComponent(service)}` : ""}`,
+  appLogsStreamUrl: (id: number, tail: number, service = "", server = 0) =>
+    `/api/v1/apps/${id}/logs/stream?tail=${tail}${service ? `&service=${encodeURIComponent(service)}` : ""}${server ? `&server=${server}` : ""}`,
   deploymentStreamUrl: (id: number, did: number) => `/api/v1/apps/${id}/deployments/${did}/stream`,
 
   backupStorages: () => get<{ storages: BackupStorage[] }>("/api/v1/backup-storages"),

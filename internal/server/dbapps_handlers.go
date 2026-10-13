@@ -162,6 +162,9 @@ func (s *Server) handleLinkApp(w http.ResponseWriter, r *http.Request, p *princi
 	case target.ServerID != dbApp.ServerID:
 		writeError(w, http.StatusUnprocessableEntity, "the app runs on another server")
 		return
+	case len(target.Replicas) > 0:
+		writeError(w, http.StatusUnprocessableEntity, "the app runs on several servers; a database is reachable on one")
+		return
 	case len(dbApp.Links) >= agentproto.MaxAttach && !slices.Contains(dbApp.Links, target.ID):
 		writeError(w, http.StatusUnprocessableEntity, "too many linked apps")
 		return

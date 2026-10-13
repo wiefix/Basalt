@@ -51,9 +51,11 @@ type App struct {
 	Volumes   []agentproto.AppVolume
 	MemoryMB  int
 	CPUs      float64
-	ReadOnly  bool // read-only root filesystem (image and git apps)
-	RouteID   int64
+	ReadOnly  bool  // read-only root filesystem (image and git apps)
+	RouteID   int64 // the route on the primary server
 	Domains   []string
+	// Replicas are the other servers the app runs on (image and git apps).
+	Replicas  []int64
 	TLS       proxy.TLSMode
 	CreatedAt time.Time
 }
@@ -182,8 +184,10 @@ const appQuery = `SELECT a.id, a.server_id, a.name, a.source, a.image, a.git_url
 	a.git_context, a.deploy_key, a.deploy_key_public, a.webhook_secret, a.auto_deploy,
 	a.compose, a.compose_summary, a.service, a.engine, a.engine_version, a.hostname, a.template, a.template_revision,
 	(SELECT COALESCE(json_group_array(l.app_id), '[]') FROM (SELECT app_id FROM app_links WHERE database_id = a.id ORDER BY app_id) l),
+	(SELECT COALESCE(json_group_array(p.server_id), '[]') FROM (SELECT server_id FROM proxy_routes
+	 WHERE app_id = a.id AND server_id != a.server_id ORDER BY server_id) p),
 	a.port, a.env, a.volumes, a.memory_mb, a.cpus, a.read_only, a.created_at, r.id, r.tls, COALESCE(d.domain, '')
-	FROM apps a JOIN proxy_routes r ON r.app_id = a.id
+	FROM apps a JOIN proxy_routes r ON r.app_id = a.id AND r.server_id = a.server_id
 	LEFT JOIN proxy_route_domains d ON d.route_id = r.id`
 
 func scanApps(rows *sql.Rows) ([]*App, error) {
@@ -192,10 +196,10 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 	for rows.Next() {
 		var a App
 		var created int64
-		var vols, domain, summary, links string
+		var vols, domain, summary, links, replicas string
 		if err := rows.Scan(&a.ID, &a.ServerID, &a.Name, &a.Source, &a.Image, &a.Git.URL, &a.Git.Branch,
 			&a.Git.Dockerfile, &a.Git.Context, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
-			&a.ComposeSealed, &summary, &a.Service, &a.Engine, &a.EngineVersion, &a.Hostname, &a.Template, &a.TemplateRevision, &links, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
+			&a.ComposeSealed, &summary, &a.Service, &a.Engine, &a.EngineVersion, &a.Hostname, &a.Template, &a.TemplateRevision, &links, &replicas, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
 			return nil, err
 		}
 		if n := len(out); n > 0 && out[n-1].ID == a.ID {
@@ -209,6 +213,9 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(links), &a.Links); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(replicas), &a.Replicas); err != nil {
 			return nil, err
 		}
 		a.CreatedAt = time.Unix(created, 0)
@@ -244,9 +251,12 @@ func (db *DB) AppByID(ctx context.Context, id int64) (*App, error) {
 	return apps[0], nil
 }
 
-// AppIDsOnServer lists the IDs of all apps placed on a server.
+// AppIDsOnServer lists the IDs of all apps placed on a server, replicas
+// included.
 func (db *DB) AppIDsOnServer(ctx context.Context, serverID int64) ([]int64, error) {
-	rows, err := db.R.QueryContext(ctx, `SELECT id FROM apps WHERE server_id = ? ORDER BY id`, serverID)
+	rows, err := db.R.QueryContext(ctx,
+		`SELECT id FROM apps WHERE server_id = ?
+		 UNION SELECT app_id FROM proxy_routes WHERE server_id = ? AND app_id IS NOT NULL ORDER BY 1`, serverID, serverID)
 	if err != nil {
 		return nil, err
 	}
@@ -331,51 +341,214 @@ func (db *DB) SetAppEnv(ctx context.Context, id int64, sealed []byte) error {
 	return db.execOne(ctx, `UPDATE apps SET env = ? WHERE id = ?`, sealed, id)
 }
 
-// SetAppDomains replaces the domains an app answers to.
+// SetAppDomains replaces the domains an app answers to, on every server
+// it runs on.
 func (db *DB) SetAppDomains(ctx context.Context, appID int64, domains []string) error {
 	tx, err := db.W.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var serverID, routeID int64
-	err = tx.QueryRowContext(ctx,
-		`SELECT a.server_id, r.id FROM apps a JOIN proxy_routes r ON r.app_id = a.id WHERE a.id = ?`,
-		appID).Scan(&serverID, &routeID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
+	routes, err := appRoutes(ctx, tx, appID)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_route_domains WHERE route_id = ?`, routeID); err != nil {
-		return err
+	if len(routes) == 0 {
+		return ErrNotFound
 	}
-	if err := insertDomains(ctx, tx, serverID, routeID, domains); err != nil {
-		return err
-	}
-	if err := bumpProxyRevision(ctx, tx, serverID); err != nil {
-		return err
+	for _, r := range routes {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_route_domains WHERE route_id = ?`, r.RouteID); err != nil {
+			return err
+		}
+		if err := insertDomains(ctx, tx, r.ServerID, r.RouteID, domains); err != nil {
+			return err
+		}
+		if err := bumpProxyRevision(ctx, tx, r.ServerID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
 
-// DeleteApp removes the app, its route and deployments (by cascade).
-func (db *DB) DeleteApp(ctx context.Context, id int64) error {
+// DeleteApp removes the app, its routes and deployments (by cascade) and
+// the health checks of its placements. It returns the servers it ran on.
+func (db *DB) DeleteApp(ctx context.Context, id int64) ([]int64, error) {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	routes, err := appRoutes(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	if len(routes) == 0 {
+		return nil, ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM apps WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	var servers []int64
+	checks := false
+	for _, r := range routes {
+		servers = append(servers, r.ServerID)
+		if r.HealthCheck != 0 {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM health_checks WHERE id = ?`, r.HealthCheck); err != nil {
+				return nil, err
+			}
+			checks = true
+		}
+		if err := bumpProxyRevision(ctx, tx, r.ServerID); err != nil {
+			return nil, err
+		}
+	}
+	if checks {
+		if err := bumpHealthRevision(ctx, tx); err != nil {
+			return nil, err
+		}
+	}
+	return servers, tx.Commit()
+}
+
+// AppPlacement is a server an app runs on: its route there and the health
+// check that route follows.
+type AppPlacement struct {
+	ServerID    int64
+	RouteID     int64
+	Primary     bool
+	HealthCheck int64  // 0: none
+	CheckStatus string // of HealthCheck
+}
+
+func appRoutes(ctx context.Context, q queryer, appID int64) ([]AppPlacement, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT r.server_id, r.id, r.server_id = a.server_id, COALESCE(r.health_check_id, 0), COALESCE(h.status, '')
+		 FROM proxy_routes r JOIN apps a ON a.id = r.app_id
+		 LEFT JOIN health_checks h ON h.id = r.health_check_id
+		 WHERE r.app_id = ? ORDER BY r.server_id != a.server_id, r.server_id`, appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AppPlacement
+	for rows.Next() {
+		var p AppPlacement
+		if err := rows.Scan(&p.ServerID, &p.RouteID, &p.Primary, &p.HealthCheck, &p.CheckStatus); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// AppPlacements lists the servers an app runs on, the primary first.
+func (db *DB) AppPlacements(ctx context.Context, appID int64) ([]AppPlacement, error) {
+	return appRoutes(ctx, db.R, appID)
+}
+
+// ErrReplicaExists: the app already runs on that server.
+var ErrReplicaExists = errors.New("the app already runs on this server")
+
+// AddAppReplica places an app on one more server: a route there with the
+// app's domains, following check (created here). primaryCheck, when not
+// nil, is created for the primary route too (the first replica).
+func (db *DB) AddAppReplica(ctx context.Context, appID, serverID int64, check, primaryCheck *HealthCheck) error {
 	tx, err := db.W.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	var serverID int64
-	err = tx.QueryRowContext(ctx, `DELETE FROM apps WHERE id = ? RETURNING server_id`, id).Scan(&serverID)
+	var primaryRoute int64
+	var tls string
+	err = tx.QueryRowContext(ctx,
+		`SELECT r.id, r.tls FROM apps a JOIN proxy_routes r ON r.app_id = a.id AND r.server_id = a.server_id WHERE a.id = ?`,
+		appID).Scan(&primaryRoute, &tls)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
+	if err := insertHealthCheck(ctx, tx, check); err != nil {
+		return err
+	}
+	if primaryCheck != nil {
+		if err := insertHealthCheck(ctx, tx, primaryCheck); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE proxy_routes SET health_check_id = ? WHERE id = ?`, primaryCheck.ID, primaryRoute); err != nil {
+			return err
+		}
+	}
+	var routeID int64
+	err = tx.QueryRowContext(ctx,
+		`INSERT INTO proxy_routes (server_id, kind, tls, app_id, health_check_id) VALUES (?, 'reverse_proxy', ?, ?, ?) RETURNING id`,
+		serverID, tls, appID, check.ID).Scan(&routeID)
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return ErrReplicaExists
+		}
+		return err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO proxy_route_domains (server_id, domain, route_id) SELECT ?, domain, ? FROM proxy_route_domains WHERE route_id = ?`,
+		serverID, routeID, primaryRoute); err != nil {
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return errors.New("one of the app's domains is already served by something else on that server")
+		}
+		return err
+	}
 	if err := bumpProxyRevision(ctx, tx, serverID); err != nil {
+		return err
+	}
+	if err := bumpHealthRevision(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RemoveAppReplica takes an app off a server other than its primary one,
+// with the health check of that placement. Once no replica is left, the
+// primary's check goes too.
+func (db *DB) RemoveAppReplica(ctx context.Context, appID, serverID int64) error {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	routes, err := appRoutes(ctx, tx, appID)
+	if err != nil {
+		return err
+	}
+	var drop []int64 // health checks
+	found := false
+	for _, r := range routes {
+		if r.ServerID != serverID || r.Primary {
+			continue
+		}
+		found = true
+		if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_routes WHERE id = ?`, r.RouteID); err != nil {
+			return err
+		}
+		if r.HealthCheck != 0 {
+			drop = append(drop, r.HealthCheck)
+		}
+	}
+	if !found {
+		return ErrNotFound
+	}
+	if len(routes) == 2 && routes[0].Primary && routes[0].HealthCheck != 0 {
+		drop = append(drop, routes[0].HealthCheck)
+	}
+	for _, id := range drop {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM health_checks WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	if err := bumpProxyRevision(ctx, tx, serverID); err != nil {
+		return err
+	}
+	if err := bumpHealthRevision(ctx, tx); err != nil {
 		return err
 	}
 	return tx.Commit()

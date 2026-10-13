@@ -47,8 +47,10 @@ type appView struct {
 	// TemplateUpdate is the version a newer template revision brings.
 	TemplateUpdate string `json:"template_update,omitempty"`
 
-	Port      int                    `json:"port"`
-	Domains   []string               `json:"domains"`
+	Port    int      `json:"port"`
+	Domains []string `json:"domains"`
+	// Replicas are the other servers the app runs on.
+	Replicas  []int64                `json:"replicas"`
 	TLS       proxy.TLSMode          `json:"tls"`
 	Volumes   []agentproto.AppVolume `json:"volumes"`
 	MemoryMB  int                    `json:"memory_mb"`
@@ -64,7 +66,7 @@ func viewApp(a *store.App) appView {
 	}
 	v := appView{ID: a.ID, ServerID: a.ServerID, Name: a.Name, Source: a.Source, Image: a.Image, Port: a.Port,
 		Domains: a.Domains, TLS: a.TLS, Volumes: vols, MemoryMB: a.MemoryMB, CPUs: a.CPUs, ReadOnly: a.ReadOnly, CreatedAt: a.CreatedAt,
-		Template: a.Template, TemplateRevision: a.TemplateRevision}
+		Template: a.Template, TemplateRevision: a.TemplateRevision, Replicas: nonNil(a.Replicas)}
 	switch a.Source {
 	case store.SourceGit:
 		v.Git = &gitView{URL: a.Git.URL, Branch: a.Git.Branch, Dockerfile: a.Git.Dockerfile, Context: a.Git.Context}
@@ -380,7 +382,13 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request, p *princip
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"app": s.viewAppFull(app), "sync": s.proxySync(r.Context(), app.ServerID)})
+	placements, err := s.db.AppPlacements(r.Context(), app.ID)
+	if err != nil {
+		s.internalError(w, r, "list app placements", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"app": s.viewAppFull(app), "sync": s.proxySync(r.Context(), app.ServerID),
+		"placements": viewPlacements(placements)})
 }
 
 func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -403,6 +411,10 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *prin
 	}
 	if st.Port == 0 && len(app.Domains) > 0 {
 		writeError(w, http.StatusUnprocessableEntity, "remove the app's domains before clearing its port")
+		return
+	}
+	if len(st.Volumes) > 0 && len(app.Replicas) > 0 {
+		writeError(w, http.StatusUnprocessableEntity, "the app runs on several servers: it cannot keep data in volumes")
 		return
 	}
 	if app.Source == store.SourceDatabase {
@@ -442,6 +454,20 @@ func (s *Server) handleSetAppDomains(w http.ResponseWriter, r *http.Request, p *
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	if len(app.Replicas) > 0 {
+		msg, err := s.domainsOutsideZones(r.Context(), domains)
+		if err == nil && len(domains) == 0 {
+			msg = "the app runs on several servers: it needs a domain (remove the replicas first)"
+		}
+		if err != nil {
+			s.internalError(w, r, "check domains", err)
+			return
+		}
+		if msg != "" {
+			writeError(w, http.StatusUnprocessableEntity, msg)
+			return
+		}
+	}
 	err = s.db.SetAppDomains(r.Context(), app.ID, domains)
 	var taken *store.ErrDomainTaken
 	if errors.As(err, &taken) {
@@ -454,6 +480,9 @@ func (s *Server) handleSetAppDomains(w http.ResponseWriter, r *http.Request, p *
 	}
 	s.audit(r, &p.user.ID, "app.domains_changed", map[string]any{"app_id": app.ID, "domains": domains})
 	s.PushProxy(r.Context(), app.ServerID)
+	for _, id := range app.Replicas {
+		s.PushProxy(r.Context(), id)
+	}
 	app.Domains = domains
 	writeJSON(w, http.StatusOK, map[string]any{"app": viewApp(app), "sync": s.proxySync(r.Context(), app.ServerID)})
 }
@@ -601,10 +630,14 @@ func (s *Server) handleAppStatus(w http.ResponseWriter, r *http.Request, p *prin
 	if service == "" && app.Source == store.SourceMail {
 		service = mailserver.Service
 	}
+	serverID, ok := appServer(w, r, app)
+	if !ok {
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), appCallTimeout)
 	defer cancel()
 	var st agentproto.AppStatus
-	if err := s.agents.Call(ctx, app.ServerID, agentproto.TypeAppStatus, agentproto.AppRequest{AppID: app.ID, Service: service}, &st); err != nil {
+	if err := s.agents.Call(ctx, serverID, agentproto.TypeAppStatus, agentproto.AppRequest{AppID: app.ID, Service: service}, &st); err != nil {
 		writeAgentError(w, err)
 		return
 	}
@@ -631,10 +664,14 @@ func (s *Server) handleAppLogs(w http.ResponseWriter, r *http.Request, p *princi
 	if !ok {
 		return
 	}
+	serverID, ok := appServer(w, r, app)
+	if !ok {
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), appCallTimeout)
 	defer cancel()
 	var resp agentproto.AppLogsResponse
-	if err := s.agents.Call(ctx, app.ServerID, agentproto.TypeAppLogs, agentproto.AppRequest{AppID: app.ID, Tail: tail, Service: service}, &resp); err != nil {
+	if err := s.agents.Call(ctx, serverID, agentproto.TypeAppLogs, agentproto.AppRequest{AppID: app.ID, Tail: tail, Service: service}, &resp); err != nil {
 		writeAgentError(w, err)
 		return
 	}
@@ -661,7 +698,11 @@ func (s *Server) handleAppLogsStream(w http.ResponseWriter, r *http.Request, p *
 	if !ok {
 		return
 	}
-	if !s.agents.Connected(app.ServerID) {
+	serverID, ok := appServer(w, r, app)
+	if !ok {
+		return
+	}
+	if !s.agents.Connected(serverID) {
 		writeError(w, http.StatusConflict, "the server is offline")
 		return
 	}
@@ -677,7 +718,7 @@ func (s *Server) handleAppLogsStream(w http.ResponseWriter, r *http.Request, p *
 	ctx := r.Context()
 	stop := ev.keepAlive(ctx)
 	defer stop()
-	err = s.agents.Stream(ctx, app.ServerID, agentproto.TypeAppLogsFollow,
+	err = s.agents.Stream(ctx, serverID, agentproto.TypeAppLogsFollow,
 		agentproto.AppRequest{AppID: app.ID, Tail: tail, Service: service}, nil, func(raw json.RawMessage) error {
 			var c agentproto.LogChunk
 			if err := json.Unmarshal(raw, &c); err != nil {
@@ -813,25 +854,54 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request, p *prin
 		s.internalError(w, r, "list deployed images", err)
 		return
 	}
-	if err := s.db.DeleteApp(r.Context(), app.ID); err != nil {
+	servers, err := s.db.DeleteApp(r.Context(), app.ID)
+	if err != nil {
 		s.internalError(w, r, "delete app", err)
 		return
 	}
 	s.audit(r, &p.user.ID, "app.deleted", map[string]any{"app_id": app.ID, "name": app.Name, "volumes": volumes})
+	if len(servers) > 1 {
+		s.healthChanged(r.Context()) // the checks of its replicas are gone
+		s.syncAutoDNS(r.Context())
+	}
 	// Stop routing first, then remove the containers.
-	s.PushProxy(r.Context(), app.ServerID)
+	for _, id := range servers {
+		s.PushProxy(r.Context(), id)
+	}
 	resp := map[string]any{"sync": s.proxySync(r.Context(), app.ServerID)}
-	if s.agents.Connected(app.ServerID) {
-		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-		defer cancel()
-		req := agentproto.AppRequest{AppID: app.ID, DeleteVolumes: volumes, PruneImages: imagesToPrune(images, 0)}
-		if err := s.agents.Call(ctx, app.ServerID, agentproto.TypeAppDelete, req, nil); err != nil {
-			resp["cleanup_error"] = err.Error()
+	var cleanup []string
+	for _, id := range servers {
+		if err := s.removeAppFrom(r.Context(), id, app.ID, volumes, imagesToPrune(images, 0)); err != nil {
+			cleanup = append(cleanup, s.serverLabel(r.Context(), id, len(servers))+err.Error())
 		}
-	} else {
-		resp["cleanup_error"] = "server offline: containers are removed when it reconnects; data volumes are kept"
+	}
+	if len(cleanup) > 0 {
+		resp["cleanup_error"] = strings.Join(cleanup, "; ")
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// removeAppFrom removes an app's containers (and, if asked, its volumes)
+// from one server.
+func (s *Server) removeAppFrom(ctx context.Context, serverID, appID int64, volumes bool, prune []agentproto.ImageRef) error {
+	if !s.agents.Connected(serverID) {
+		return errors.New("server offline: containers are removed when it reconnects; data volumes are kept")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	req := agentproto.AppRequest{AppID: appID, DeleteVolumes: volumes, PruneImages: prune}
+	return s.agents.Call(ctx, serverID, agentproto.TypeAppDelete, req, nil)
+}
+
+// serverLabel prefixes a message about one of several servers with its name.
+func (s *Server) serverLabel(ctx context.Context, serverID int64, servers int) string {
+	if servers < 2 {
+		return ""
+	}
+	if srv, err := s.db.ServerByID(ctx, serverID); err == nil {
+		return srv.Name + ": "
+	}
+	return fmt.Sprintf("server #%d: ", serverID)
 }
 
 // SyncApps tells the agent which apps exist so it can remove containers of
