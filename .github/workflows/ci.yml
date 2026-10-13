@@ -42,6 +42,13 @@ jobs:
         with:
           go-version-file: go.mod
       - run: deploy/dev/ci-restic.sh
+      # The catalog, database and mail tests pull several GB of images: the
+      # runner's preinstalled toolchains we do not use make room for them.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          docker system prune -af
+          df -h /
       - name: Apps, compose, databases and backups against Docker
         env:
           BASALT_DOCKER_TESTS: "1"

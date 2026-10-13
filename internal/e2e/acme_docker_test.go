@@ -33,7 +33,9 @@ func TestWildcardCertificateWithDocker(t *testing.T) {
 	}
 	dnsPort := strconv.Itoa(freePort(t))
 
-	// Pebble validates against our DNS server on the host.
+	// Pebble validates against our DNS server on the host. Pulled first:
+	// otherwise the pull's progress (stderr) is mixed into the container ID.
+	dockerOut(t, sock, "pull", "-q", pebbleImage)
 	id := strings.TrimSpace(dockerOut(t, sock, "run", "-d", "--rm", "-p", "127.0.0.1::14000",
 		"--add-host", "host.docker.internal:host-gateway",
 		"-e", "PEBBLE_VA_NOSLEEP=1", "-e", "PEBBLE_WFE_NONCEREJECT=0",
