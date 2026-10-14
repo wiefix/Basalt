@@ -313,6 +313,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return a.MailCheck(ctx, req)
+	case agentproto.TypeCertStatus:
+		var req agentproto.CertStatus
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return certStatus(a.proxy.opts.Dir, req)
 	case agentproto.TypeMailCert:
 		var req agentproto.MailCert
 		if err := json.Unmarshal(payload, &req); err != nil {

@@ -2,15 +2,24 @@ package e2e
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -250,5 +259,65 @@ func TestServerOfflineNotifications(t *testing.T) {
 	defer stop()
 	if m = next("server.online"); m["event"] != "server.online" || m["title"] != "edge-1 is back online" {
 		t.Fatalf("online message %v", m)
+	}
+}
+
+// TestCertificateNotifications: a certificate the proxy did not renew is
+// reported once; the server's certificates are listed.
+func TestCertificateNotifications(t *testing.T) {
+	got := make(chan map[string]any, 16)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		json.NewDecoder(r.Body).Decode(&m)
+		got <- m
+	}))
+	t.Cleanup(receiver.Close)
+
+	p := startPanelWith(t, server.Options{CertCheckEvery: 200 * time.Millisecond})
+	h := startHost(t, p)
+	p.call(http.StatusCreated, "POST", "/api/v1/notifications", map[string]any{"name": "ops", "kind": "webhook",
+		"url": receiver.URL, "allow_private": true, "events": []string{"cert.expiring"}})
+	for _, r := range []map[string]any{
+		{"kind": "reverse_proxy", "domains": []string{"shop.example.com", "new.example.com"}, "upstream": "127.0.0.1:9", "tls": "auto"},
+		{"kind": "reverse_proxy", "domains": []string{"dev.localhost"}, "upstream": "127.0.0.1:9", "tls": "auto"},
+	} {
+		p.call(http.StatusCreated, "POST", "/api/v1/servers/"+h.id+"/routes", r)
+	}
+	// What the proxy would hold: shop's certificate was not renewed.
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	tpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "R11"}, DNSNames: []string{"shop.example.com"},
+		NotBefore: time.Now().Add(-80 * 24 * time.Hour), NotAfter: time.Now().Add(5*24*time.Hour + time.Hour)}
+	der, _ := x509.CreateCertificate(rand.Reader, tpl, tpl, &key.PublicKey, key)
+	dir := filepath.Join(h.proxyDir, "storage", "certificates", "acme-v02.api.letsencrypt.org-directory", "shop.example.com")
+	os.MkdirAll(dir, 0o700)
+	os.WriteFile(filepath.Join(dir, "shop.example.com.crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)
+
+	certs := p.call(200, "GET", "/api/v1/servers/"+h.id+"/certificates", nil)["certificates"].([]any)
+	if len(certs) != 2 {
+		t.Fatalf("certificates = %v", certs) // dev.localhost has the internal CA
+	}
+	fresh, shop := certs[0].(map[string]any), certs[1].(map[string]any) // by name
+	if shop["name"] != "shop.example.com" || shop["days_left"].(float64) != 5 || shop["expiring"] != true || shop["issuer"] != "R11" ||
+		fresh["name"] != "new.example.com" || fresh["not_after"] != nil {
+		t.Fatalf("certificates = %v", certs)
+	}
+	p.call(http.StatusNotFound, "GET", "/api/v1/servers/999/certificates", nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go p.srv.WatchCertificates(ctx)
+	select {
+	case m := <-got:
+		if m["event"] != "cert.expiring" || m["title"] != "The certificate for shop.example.com expires in 5 days" ||
+			!strings.Contains(m["text"].(string), "valid until") {
+			t.Fatalf("message %v", m)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no notification")
+	}
+	select {
+	case m := <-got:
+		t.Fatalf("repeated: %v", m)
+	case <-time.After(time.Second):
 	}
 }

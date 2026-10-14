@@ -194,6 +194,7 @@ export function ServerPage({ user }: { user: User }) {
             </dl>
           </div>
 
+          {s.status === "online" && <CertificatesCard serverId={id} />}
           <RoutesCard serverId={id} user={user} />
         </>
       )}
@@ -468,5 +469,57 @@ function AddRouteModal({ serverId, onClose }: { serverId: number; onClose: () =>
         </label>
       </form>
     </Modal>
+  );
+}
+
+// CertificatesCard lists the public certificates the server's proxy holds
+// for its domains.
+function CertificatesCard({ serverId }: { serverId: number }) {
+  const certs = useQuery({ queryKey: ["certificates", serverId], queryFn: () => api.serverCertificates(serverId), retry: false });
+  const list = certs.data?.certificates ?? [];
+  if (certs.isPending || (!certs.error && list.length === 0)) return null;
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Certificates</h2>
+      </div>
+      {certs.error ? (
+        <div className="card-body">
+          <ErrorBox error={certs.error} />
+        </div>
+      ) : (
+        <div className="table-wrap">
+          <table className="table">
+            <tbody>
+              {list.map((c) => (
+                <tr key={c.name}>
+                  <td className="mono" style={{ overflowWrap: "anywhere" }}>
+                    {c.name}
+                  </td>
+                  <td className="muted small hide-sm">{c.issuer}</td>
+                  <td className="small">
+                    {c.not_after ? (
+                      <>
+                        <span
+                          className={`badge ${c.expiring ? "err" : "ok"}`}
+                          title={c.expiring ? "Not renewed: certificates are renewed 30 days before they expire" : undefined}
+                        >
+                          {(c.days_left ?? 0) < 0 ? "expired" : `${c.days_left} days left`}
+                        </span>{" "}
+                        <span className="faint">until {formatDate(c.not_after)}</span>
+                      </>
+                    ) : (
+                      <span className="badge plain" title="Issued once the domain points to this server">
+                        not issued yet
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }

@@ -696,6 +696,10 @@ export const api = {
   deleteServer: (id: number) => del<void>(`/api/v1/servers/${id}`),
   serverMetrics: (id: number, minutes: number) =>
     get<{ metrics: Metrics[] }>(`/api/v1/servers/${id}/metrics?minutes=${minutes}`),
+  serverCertificates: (id: number) =>
+    get<{
+      certificates: { name: string; not_after: string | null; issuer?: string; days_left?: number; expiring: boolean }[];
+    }>(`/api/v1/servers/${id}/certificates`),
   setPublicIPs: (id: number, ips: string[]) => put<{ server: Server }>(`/api/v1/servers/${id}/public-ips`, { ips }),
   pingServer: (id: number) => post<{ rtt_ms: number; agent_time: string }>(`/api/v1/servers/${id}/ping`),
 

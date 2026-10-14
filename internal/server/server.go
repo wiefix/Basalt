@@ -66,6 +66,8 @@ type Options struct {
 	// OfflineAfter is how long a server's agent stays away before a
 	// notification (default 5 minutes).
 	OfflineAfter time.Duration
+	// CertCheckEvery is how often certificates are checked (default 6 hours).
+	CertCheckEvery time.Duration
 }
 
 type Server struct {
@@ -102,6 +104,7 @@ type Server struct {
 	notifyRetries     []time.Duration // pauses before delivery attempts
 	notifySem         chan struct{}   // deliveries running at once
 	offlineAfter      time.Duration
+	certCheckEvery    time.Duration
 
 	setupMu    sync.Mutex
 	setupToken string
@@ -143,6 +146,9 @@ func New(o Options) *Server {
 	if o.OfflineAfter <= 0 {
 		o.OfflineAfter = 5 * time.Minute
 	}
+	if o.CertCheckEvery <= 0 {
+		o.CertCheckEvery = 6 * time.Hour
+	}
 	return &Server{
 		log:            o.Log,
 		db:             o.DB,
@@ -166,6 +172,7 @@ func New(o Options) *Server {
 		notifyRetries:  o.NotifyRetries,
 		notifySem:      make(chan struct{}, notifyWorkers),
 		offlineAfter:   o.OfflineAfter,
+		certCheckEvery: o.CertCheckEvery,
 		setupToken:     o.SetupToken,
 		ipLimiter:      auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
 		emailLimiter:   auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
@@ -204,6 +211,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/servers/{id}", s.requireRole(store.RoleViewer, s.handleGetServer))
 	mux.Handle("DELETE /api/v1/servers/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteServer))
 	mux.Handle("GET /api/v1/servers/{id}/metrics", s.requireRole(store.RoleViewer, s.handleServerMetrics))
+	mux.Handle("GET /api/v1/servers/{id}/certificates", s.requireRole(store.RoleViewer, s.handleServerCerts))
 	mux.Handle("POST /api/v1/servers/{id}/ping", s.requireRole(store.RoleMember, s.handlePingServer))
 	mux.Handle("PUT /api/v1/servers/{id}/public-ips", s.requireRole(store.RoleAdmin, s.handleSetPublicIPs))
 	mux.Handle("POST /api/v1/servers/{id}/enroll-token", s.requireRole(store.RoleAdmin, s.handleResetEnrollToken))
@@ -368,6 +376,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go s.catalogLoop(ctx)
 	go s.healthLoop(ctx)
 	go s.WatchServers(ctx)
+	go s.WatchCertificates(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

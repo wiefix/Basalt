@@ -28,6 +28,7 @@ const (
 	EventServerDown   = "server.offline"
 	EventServerUp     = "server.online"
 	EventMailProblem  = "mail.problem"
+	EventCertExpiring = "cert.expiring"
 )
 
 var notificationEvents = []struct {
@@ -41,6 +42,7 @@ var notificationEvents = []struct {
 	{EventServerDown, "A server's agent has been offline for 5 minutes"},
 	{EventServerUp, "A server reported offline is back"},
 	{EventMailProblem, "The mail deliverability check finds a new problem"},
+	{EventCertExpiring, "A certificate is not renewed and expires within 14 days"},
 }
 
 func validEvent(e string) bool {
