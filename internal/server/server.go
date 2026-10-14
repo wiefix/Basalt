@@ -68,6 +68,9 @@ type Options struct {
 	OfflineAfter time.Duration
 	// CertCheckEvery is how often certificates are checked (default 6 hours).
 	CertCheckEvery time.Duration
+	// AuditCheckEvery is how often the audit log's chain is verified
+	// (default daily).
+	AuditCheckEvery time.Duration
 }
 
 type Server struct {
@@ -105,6 +108,8 @@ type Server struct {
 	notifySem         chan struct{}   // deliveries running at once
 	offlineAfter      time.Duration
 	certCheckEvery    time.Duration
+	auditCheckEvery   time.Duration
+	auditWatch        auditWatch
 
 	setupMu    sync.Mutex
 	setupToken string
@@ -149,39 +154,48 @@ func New(o Options) *Server {
 	if o.CertCheckEvery <= 0 {
 		o.CertCheckEvery = 6 * time.Hour
 	}
+	if o.AuditCheckEvery <= 0 {
+		o.AuditCheckEvery = 24 * time.Hour
+	}
+	if o.Box != nil && o.DB != nil {
+		// The master key is not in the database: the chain cannot be
+		// forged by whoever can only write to it.
+		o.DB.SetAuditKey(o.Box.DeriveKey("audit-log"))
+	}
 	return &Server{
-		log:            o.Log,
-		db:             o.DB,
-		box:            o.Box,
-		hasher:         o.Hasher,
-		secureCookies:  o.SecureCookies,
-		trusted:        o.TrustedProxies,
-		setupFile:      o.SetupTokenFile,
-		agents:         o.Agents,
-		agentURL:       o.AgentURL,
-		now:            o.Now,
-		imagesKept:     o.ImagesKept,
-		mailPorts:      o.MailHostPorts,
-		mailCheckEvery: o.MailCheckEvery,
-		catalog:        o.Catalog,
-		tplUpdates:     map[int64]*templateUpdate{},
-		dataDir:        o.DataDir,
-		restic:         o.Restic,
-		telegramAPI:    o.TelegramAPI,
-		notifyPrivate:  notifyPrivate,
-		notifyRetries:  o.NotifyRetries,
-		notifySem:      make(chan struct{}, notifyWorkers),
-		offlineAfter:   o.OfflineAfter,
-		certCheckEvery: o.CertCheckEvery,
-		setupToken:     o.SetupToken,
-		ipLimiter:      auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
-		emailLimiter:   auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
-		mfaLimiter:     auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
-		hookLimiter:    auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
-		live:           &liveLogs{m: map[int64]*liveLog{}},
-		backupLive:     &liveLogs{m: map[int64]*liveLog{}},
-		pending:        map[int64]string{},
-		streams:        map[int64]int{},
+		log:             o.Log,
+		db:              o.DB,
+		box:             o.Box,
+		hasher:          o.Hasher,
+		secureCookies:   o.SecureCookies,
+		trusted:         o.TrustedProxies,
+		setupFile:       o.SetupTokenFile,
+		agents:          o.Agents,
+		agentURL:        o.AgentURL,
+		now:             o.Now,
+		imagesKept:      o.ImagesKept,
+		mailPorts:       o.MailHostPorts,
+		mailCheckEvery:  o.MailCheckEvery,
+		catalog:         o.Catalog,
+		tplUpdates:      map[int64]*templateUpdate{},
+		dataDir:         o.DataDir,
+		restic:          o.Restic,
+		telegramAPI:     o.TelegramAPI,
+		notifyPrivate:   notifyPrivate,
+		notifyRetries:   o.NotifyRetries,
+		notifySem:       make(chan struct{}, notifyWorkers),
+		offlineAfter:    o.OfflineAfter,
+		certCheckEvery:  o.CertCheckEvery,
+		auditCheckEvery: o.AuditCheckEvery,
+		setupToken:      o.SetupToken,
+		ipLimiter:       auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
+		emailLimiter:    auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
+		mfaLimiter:      auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
+		hookLimiter:     auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
+		live:            &liveLogs{m: map[int64]*liveLog{}},
+		backupLive:      &liveLogs{m: map[int64]*liveLog{}},
+		pending:         map[int64]string{},
+		streams:         map[int64]int{},
 	}
 }
 
@@ -263,6 +277,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handlePutRecord))
 	mux.Handle("DELETE /api/v1/dns/zones/{id}/records/{rid}", s.requireRole(store.RoleAdmin, s.handleDeleteRecord))
 
+	mux.Handle("GET /api/v1/audit", s.requireRole(store.RoleAdmin, s.handleAudit))
+	mux.Handle("GET /api/v1/audit/verify", s.requireRole(store.RoleAdmin, s.handleVerifyAudit))
 	mux.Handle("GET /api/v1/health-checks", s.requireRole(store.RoleViewer, s.handleHealthChecks))
 	mux.Handle("POST /api/v1/health-checks", s.requireRole(store.RoleAdmin, s.handleCreateHealthCheck))
 	mux.Handle("PUT /api/v1/health-checks/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateHealthCheck))
@@ -377,6 +393,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go s.healthLoop(ctx)
 	go s.WatchServers(ctx)
 	go s.WatchCertificates(ctx)
+	go s.WatchAuditLog(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

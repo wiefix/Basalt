@@ -80,7 +80,7 @@ func TestCatalogAPI(t *testing.T) {
 		"inputs": map[string]string{"DOMAIN": "blog3.localhost"}})
 	// The audit log names the template, not the secrets.
 	var audit string
-	p.db.R.QueryRow(`SELECT group_concat(details) FROM audit_log WHERE action = 'app.installed'`).Scan(&audit)
+	p.db.R.QueryRow(`SELECT group_concat(details) FROM (SELECT details FROM audit_log WHERE action = 'app.installed' ORDER BY id)`).Scan(&audit)
 	if !strings.Contains(audit, `"template":"wordpress"`) || strings.Contains(audit, pw) {
 		t.Fatalf("audit: %s", audit)
 	}

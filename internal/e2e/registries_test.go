@@ -31,7 +31,7 @@ func TestRegistries(t *testing.T) {
 		t.Fatal("registry secret stored in clear")
 	}
 	var audit string
-	p.db.R.QueryRow(`SELECT group_concat(details) FROM audit_log WHERE action LIKE 'registry.%'`).Scan(&audit)
+	p.db.R.QueryRow(`SELECT group_concat(details) FROM (SELECT details FROM audit_log WHERE action LIKE 'registry.%' ORDER BY id)`).Scan(&audit)
 	if strings.Contains(audit, secret) {
 		t.Fatalf("secret in audit log: %s", audit)
 	}

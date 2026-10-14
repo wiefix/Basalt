@@ -92,3 +92,13 @@ func TestRecoveryFile(t *testing.T) {
 		t.Fatal("empty file accepted")
 	}
 }
+
+func TestDeriveKey(t *testing.T) {
+	a, _ := NewBox(bytes.Repeat([]byte{1}, KeySize))
+	b, _ := NewBox(bytes.Repeat([]byte{2}, KeySize))
+	k := a.DeriveKey("audit-log")
+	if len(k) != 32 || bytes.Equal(k, a.DeriveKey("other")) || bytes.Equal(k, b.DeriveKey("audit-log")) ||
+		!bytes.Equal(k, a.DeriveKey("audit-log")) || bytes.Contains(k, a.key[:8]) {
+		t.Fatal("derived keys must depend on the label and the master key only")
+	}
+}

@@ -7,7 +7,9 @@
 package secrets
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -88,4 +90,12 @@ func (b *Box) Open(ciphertext, ad []byte) ([]byte, error) {
 		return nil, ErrDecrypt
 	}
 	return pt, nil
+}
+
+// DeriveKey returns a key for another purpose (label), derived from the
+// master key: it changes with the master key and reveals nothing about it.
+func (b *Box) DeriveKey(label string) []byte {
+	mac := hmac.New(sha256.New, b.key[:])
+	mac.Write([]byte("basalt-derive:" + label))
+	return mac.Sum(nil)
 }

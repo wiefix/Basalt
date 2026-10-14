@@ -541,6 +541,23 @@ export type ChannelInput = {
   to?: string[];
 };
 
+export interface AuditEntry {
+  id: number;
+  at: string;
+  actor: { id: number; name?: string; email?: string } | null; // null: the panel itself
+  action: string;
+  ip?: string;
+  details: Record<string, unknown>;
+}
+
+export interface AuditCheck {
+  entries: number;
+  legacy: number; // written before the chain existed: not protected
+  intact: boolean;
+  broken_at?: number;
+  at: string;
+}
+
 export interface MailRelay {
   host: string;
   port: number;
@@ -761,6 +778,14 @@ export const api = {
   appTemplate: (id: number) => get<AppTemplateInfo>(`/api/v1/apps/${id}/template`),
   updateTemplate: (id: number, b: { inputs: Record<string, string>; backup: boolean }) =>
     post<{ update: AppTemplateInfo["update"] }>(`/api/v1/apps/${id}/template-update`, b),
+  audit: (q: { before?: number; actor?: string; action?: string }) => {
+    const p = new URLSearchParams();
+    if (q.before) p.set("before", String(q.before));
+    if (q.actor) p.set("actor", q.actor);
+    if (q.action) p.set("action", q.action);
+    return get<{ entries: AuditEntry[]; actions: string[]; more: boolean }>(`/api/v1/audit?${p}`);
+  },
+  verifyAudit: () => get<AuditCheck>("/api/v1/audit/verify"),
   healthChecks: () => get<{ checks: HealthCheck[] }>("/api/v1/health-checks"),
   createHealthCheck: (b: HealthCheckInput) => post<{ check: { id: number } }>("/api/v1/health-checks", b),
   updateHealthCheck: (id: number, b: HealthCheckInput) => put<void>(`/api/v1/health-checks/${id}`, b),

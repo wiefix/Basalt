@@ -161,7 +161,7 @@ func TestAppReplicas(t *testing.T) {
 		t.Fatalf("%d checks left after delete", n)
 	}
 	var audit string
-	p.db.R.QueryRow(`SELECT group_concat(action) FROM audit_log WHERE action LIKE 'app.replica%'`).Scan(&audit)
+	p.db.R.QueryRow(`SELECT group_concat(action) FROM (SELECT action FROM audit_log WHERE action LIKE 'app.replica%' ORDER BY id)`).Scan(&audit)
 	if audit != "app.replica_added,app.replica_removed,app.replica_added" {
 		t.Fatalf("audit: %s", audit)
 	}

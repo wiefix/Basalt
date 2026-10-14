@@ -160,7 +160,7 @@ func TestTemplateUpdateAPI(t *testing.T) {
 		"image": "traefik/whoami:v1.10", "port": 80})["app"].(map[string]any)
 	p.call(http.StatusNotFound, "GET", "/api/v1/apps/"+jsonID(plain["id"])+"/template", nil)
 	var audit string
-	p.db.R.QueryRow(`SELECT group_concat(details) FROM audit_log WHERE action = 'app.template_update'`).Scan(&audit)
+	p.db.R.QueryRow(`SELECT group_concat(details) FROM (SELECT details FROM audit_log WHERE action = 'app.template_update' ORDER BY id)`).Scan(&audit)
 	if !strings.Contains(audit, `"to":2`) || strings.Contains(audit, env2["NEW_KEY"].(string)) {
 		t.Fatalf("audit: %s", audit)
 	}

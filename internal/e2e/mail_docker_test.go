@@ -547,7 +547,7 @@ echo $s ? fgets($s) : "error: $m";`
 	viewer.call(http.StatusForbidden, "PUT", "/api/v1/mail/domains/"+again, map[string]any{"catch_all": ""})
 	// No password reaches the audit log.
 	var audit string
-	p.db.R.QueryRow(`SELECT group_concat(details) FROM audit_log WHERE action LIKE 'mail.%'`).Scan(&audit)
+	p.db.R.QueryRow(`SELECT group_concat(details) FROM (SELECT details FROM audit_log WHERE action LIKE 'mail.%' ORDER BY id)`).Scan(&audit)
 	if strings.Contains(audit, "mail pass") || strings.Contains(audit, "relay secret") || !strings.Contains(audit, "alice@example.test") {
 		t.Fatalf("audit: %s", audit)
 	}

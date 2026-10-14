@@ -20,6 +20,7 @@ import { CatalogPage } from "./pages/Catalog";
 import { MonitoringPage } from "./pages/Monitoring";
 import { NotificationsPage } from "./pages/Notifications";
 import { AccountPage } from "./pages/Account";
+import { AuditPage } from "./pages/Audit";
 
 // The signed-in user, or null when signed out. A 401 is a normal answer
 // here, not an error: as an error, every refetch (e.g. on window focus) would
@@ -125,6 +126,11 @@ function Shell({ user }: { user: User }) {
             <Icon name="users" /> Users
           </NavLink>
         )}
+        {can(user, "admin") && (
+          <NavLink className="nav-link" to="/audit">
+            <Icon name="shield" /> Audit log
+          </NavLink>
+        )}
         <div className="sidebar-footer">
           <NavLink className="nav-link" to="/account">
             <Icon name="user" />
@@ -160,6 +166,7 @@ function Shell({ user }: { user: User }) {
           <Route path="/registries" element={<RegistriesPage user={user} />} />
           <Route path="/backups" element={<BackupsPage user={user} />} />
           <Route path="/users" element={<UsersPage user={user} />} />
+          <Route path="/audit" element={<AuditPage user={user} />} />
           <Route path="/account" element={<AccountPage user={user} />} />
           <Route path="*" element={<div className="empty"><h3>Page not found</h3></div>} />
         </Routes>

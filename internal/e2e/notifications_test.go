@@ -182,7 +182,7 @@ func TestNotifications(t *testing.T) {
 	p.call(http.StatusNoContent, "DELETE", "/api/v1/notifications/"+hid, nil)
 	p.call(http.StatusNotFound, "POST", "/api/v1/notifications/"+hid+"/test", nil)
 	var audit string
-	p.db.R.QueryRow(`SELECT group_concat(action) FROM audit_log WHERE action LIKE 'notification.%'`).Scan(&audit)
+	p.db.R.QueryRow(`SELECT group_concat(action) FROM (SELECT action FROM audit_log WHERE action LIKE 'notification.%' ORDER BY id)`).Scan(&audit)
 	if !strings.HasPrefix(audit, "notification.created,notification.created,notification.updated,") ||
 		!strings.HasSuffix(audit, "notification.deleted") {
 		t.Fatalf("audit: %s", audit)

@@ -128,7 +128,7 @@ func TestHealthChecks(t *testing.T) {
 	viewer.call(200, "GET", "/api/v1/health-checks", nil)
 	viewer.call(http.StatusForbidden, "POST", "/api/v1/health-checks", map[string]any{"name": "v", "kind": "tcp", "host": "127.0.0.1", "port": 1})
 	var audit string
-	p.db.R.QueryRow(`SELECT group_concat(action) FROM audit_log WHERE action LIKE 'health.%'`).Scan(&audit)
+	p.db.R.QueryRow(`SELECT group_concat(action) FROM (SELECT action FROM audit_log WHERE action LIKE 'health.%' ORDER BY id)`).Scan(&audit)
 	if audit != "health.created,health.created,health.updated,health.deleted" {
 		t.Fatalf("audit: %s", audit)
 	}

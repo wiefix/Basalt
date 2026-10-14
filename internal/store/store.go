@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 )
@@ -22,6 +23,8 @@ type DB struct {
 	W *sql.DB
 	// R is the read-only pool.
 	R *sql.DB
+	// auditKey keys the audit log's hash chain (see SetAuditKey).
+	auditKey atomic.Pointer[[]byte]
 }
 
 // Open opens (creating if needed) the database file at path and applies
