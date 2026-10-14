@@ -58,6 +58,11 @@ type Options struct {
 	MailCheckEvery time.Duration
 	// Catalog replaces the built-in app catalog (tests).
 	Catalog func() ([]*catalog.Template, error)
+	// TelegramAPI replaces https://api.telegram.org, and NotifyRetries the
+	// pauses before delivery attempts (tests). With TelegramAPI set, Slack,
+	// Discord and Telegram deliveries may reach private addresses.
+	TelegramAPI   string
+	NotifyRetries []time.Duration
 }
 
 type Server struct {
@@ -89,6 +94,10 @@ type Server struct {
 	tplUpdates        map[int64]*templateUpdate // running or failed template updates
 	dataDir           string
 	restic            string
+	telegramAPI       string
+	notifyPrivate     bool            // tests: chat services on private addresses
+	notifyRetries     []time.Duration // pauses before delivery attempts
+	notifySem         chan struct{}   // deliveries running at once
 
 	setupMu    sync.Mutex
 	setupToken string
@@ -120,6 +129,13 @@ func New(o Options) *Server {
 	if o.ImagesKept <= 0 {
 		o.ImagesKept = defaultImagesKept
 	}
+	notifyPrivate := o.TelegramAPI != ""
+	if o.TelegramAPI == "" {
+		o.TelegramAPI = telegramAPI
+	}
+	if len(o.NotifyRetries) == 0 {
+		o.NotifyRetries = notifyRetries
+	}
 	return &Server{
 		log:            o.Log,
 		db:             o.DB,
@@ -138,6 +154,10 @@ func New(o Options) *Server {
 		tplUpdates:     map[int64]*templateUpdate{},
 		dataDir:        o.DataDir,
 		restic:         o.Restic,
+		telegramAPI:    o.TelegramAPI,
+		notifyPrivate:  notifyPrivate,
+		notifyRetries:  o.NotifyRetries,
+		notifySem:      make(chan struct{}, notifyWorkers),
 		setupToken:     o.SetupToken,
 		ipLimiter:      auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
 		emailLimiter:   auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
@@ -264,6 +284,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/apps/{id}", s.requireRole(store.RoleViewer, s.handleGetApp))
 	mux.Handle("PUT /api/v1/apps/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateApp))
 	mux.Handle("DELETE /api/v1/apps/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteApp))
+	mux.Handle("GET /api/v1/notifications", s.requireRole(store.RoleAdmin, s.handleNotifications))
+	mux.Handle("POST /api/v1/notifications", s.requireRole(store.RoleAdmin, s.handleCreateChannel))
+	mux.Handle("PUT /api/v1/notifications/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateChannel))
+	mux.Handle("DELETE /api/v1/notifications/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteChannel))
+	mux.Handle("POST /api/v1/notifications/{id}/test", s.requireRole(store.RoleAdmin, s.handleTestChannel))
 	mux.Handle("PUT /api/v1/apps/{id}/domains", s.requireRole(store.RoleAdmin, s.handleSetAppDomains))
 	mux.Handle("POST /api/v1/apps/{id}/replicas", s.requireRole(store.RoleAdmin, s.handleAddReplica))
 	mux.Handle("DELETE /api/v1/apps/{id}/replicas/{sid}", s.requireRole(store.RoleAdmin, s.handleRemoveReplica))

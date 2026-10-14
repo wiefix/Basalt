@@ -145,6 +145,7 @@ const paths: Record<string, ReactNode> = {
   ),
   up: <path d="M12 19V5M5 12l7-7 7 7" />,
   pulse: <path d="M3 12h4l3-8 4 16 3-8h4" />,
+  bell: <path d="M6 16V11a6 6 0 0 1 12 0v5l2 2H4zM10 20a2 2 0 0 0 4 0" />,
   grid: (
     <>
       <rect x="4" y="4" width="7" height="7" rx="1.5" />

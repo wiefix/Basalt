@@ -20,6 +20,7 @@ import (
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/dbengine"
 	"github.com/wiefix/basalt/internal/mailserver"
+	"github.com/wiefix/basalt/internal/notify"
 	"github.com/wiefix/basalt/internal/store"
 )
 
@@ -692,6 +693,9 @@ func (s *Server) runBackup(b *store.Backup, req agentproto.BackupRequest, live *
 	action := "backup.failed"
 	if resp.OK {
 		action = "backup.succeeded"
+	} else {
+		s.notify(notify.Message{Event: EventBackupFailed, Title: "Backup of " + s.resourceName(b) + " failed",
+			Text: truncate(resp.Error, 1000)})
 	}
 	if err := s.db.Audit(context.Background(), nil, action, "", map[string]any{
 		"backup_id": b.ID, "resource": req.Resource, "error": truncate(resp.Error, 500),

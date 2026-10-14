@@ -18,6 +18,7 @@ import { DNSPage, ZonePage } from "./pages/DNS";
 import { MailPage } from "./pages/Mail";
 import { CatalogPage } from "./pages/Catalog";
 import { MonitoringPage } from "./pages/Monitoring";
+import { NotificationsPage } from "./pages/Notifications";
 import { AccountPage } from "./pages/Account";
 
 // The signed-in user, or null when signed out. A 401 is a normal answer
@@ -105,6 +106,11 @@ function Shell({ user }: { user: User }) {
           <Icon name="route" /> DNS
         </NavLink>
         {can(user, "admin") && (
+          <NavLink className="nav-link" to="/notifications">
+            <Icon name="bell" /> Notifications
+          </NavLink>
+        )}
+        {can(user, "admin") && (
           <NavLink className="nav-link" to="/backups">
             <Icon name="archive" /> Backups
           </NavLink>
@@ -148,6 +154,7 @@ function Shell({ user }: { user: User }) {
           <Route path="/mail" element={<MailPage user={user} />} />
           <Route path="/catalog" element={<CatalogPage user={user} />} />
           <Route path="/monitoring" element={<MonitoringPage user={user} />} />
+          <Route path="/notifications" element={<NotificationsPage user={user} />} />
           <Route path="/dns" element={<DNSPage user={user} />} />
           <Route path="/dns/:id" element={<ZonePage user={user} />} />
           <Route path="/registries" element={<RegistriesPage user={user} />} />

@@ -13,6 +13,7 @@ import (
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/docker"
 	"github.com/wiefix/basalt/internal/mailserver"
+	"github.com/wiefix/basalt/internal/notify"
 	"github.com/wiefix/basalt/internal/store"
 )
 
@@ -307,6 +308,14 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 		s.log.Error("write audit log", "err", err)
 	}
 	s.log.Info("deployment finished", "app_id", spec.AppID, "deployment_id", depID, "ok", resp.OK)
+	if !resp.OK {
+		name := fmt.Sprintf("app #%d", spec.AppID)
+		if app, err := s.db.AppByID(context.Background(), spec.AppID); err == nil {
+			name = app.Name
+		}
+		s.notify(notify.Message{Event: EventDeployFailed, Title: fmt.Sprintf("Deployment #%d of %s failed", depID, name),
+			Text: truncate(resp.Error, 1000)})
+	}
 	if resp.OK && spec.Mail {
 		s.configureMail(context.Background())
 	}

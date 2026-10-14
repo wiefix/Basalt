@@ -128,27 +128,35 @@ func validCatalogURL(raw string, allowPrivate bool) (*url.URL, error) {
 // fetchClient downloads from a catalog; unless allowPrivate, it connects
 // only to public addresses (whatever the name resolves to).
 func fetchClient(allowPrivate bool) *http.Client {
+	return outboundClient(allowPrivate, catalogFetchTimeout, func(u *url.URL) error {
+		_, err := validCatalogURL(u.String(), allowPrivate)
+		return err
+	}, "allow private addresses for a catalog on your network")
+}
+
+// outboundClient is for requests to URLs users give (catalogs, webhooks):
+// unless allowPrivate, it connects only to public addresses, checked after
+// the name is resolved (no DNS rebinding); redirects are followed at most
+// 5 times, each target checked by checkURL; no system proxy.
+func outboundClient(allowPrivate bool, timeout time.Duration, checkURL func(*url.URL) error, hint string) *http.Client {
 	d := &net.Dialer{Timeout: 10 * time.Second}
 	if !allowPrivate {
 		d.Control = func(network, address string, _ syscall.RawConn) error {
 			ap, err := netip.ParseAddrPort(address)
 			if err != nil || !dns.PublicAddr(ap.Addr()) {
-				return fmt.Errorf("%s is not a public address (allow private addresses for a catalog on your network)", address)
+				return fmt.Errorf("%s is not a public address (%s)", address, hint)
 			}
 			return nil
 		}
 	}
 	return &http.Client{
-		Timeout:   catalogFetchTimeout,
+		Timeout:   timeout,
 		Transport: &http.Transport{DialContext: d.DialContext, Proxy: nil, TLSHandshakeTimeout: 10 * time.Second},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 5 {
 				return errors.New("too many redirects")
 			}
-			if _, err := validCatalogURL(req.URL.String(), allowPrivate); err != nil {
-				return err
-			}
-			return nil
+			return checkURL(req.URL)
 		},
 	}
 }

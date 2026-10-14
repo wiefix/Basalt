@@ -127,7 +127,8 @@ func (db *DB) healthWrite(ctx context.Context, f func(tx *sql.Tx) error) error {
 }
 
 func nameTaken(err error) error {
-	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: health_checks.name") {
+	if err != nil && (strings.Contains(err.Error(), "UNIQUE constraint failed: health_checks.name") ||
+		strings.Contains(err.Error(), "UNIQUE constraint failed: notification_channels.name")) {
 		return ErrNameTaken
 	}
 	return err

@@ -497,6 +497,50 @@ export interface HealthCheckInput {
   timeout: number;
 }
 
+export type ChannelKind = "webhook" | "slack" | "discord" | "telegram" | "email";
+
+export interface NotificationChannel {
+  id: number;
+  name: string;
+  kind: ChannelKind;
+  events: string[];
+  url?: string;
+  secret?: string;
+  allow_private?: boolean;
+  chat_id?: string;
+  smtp_host?: string;
+  smtp_port?: number;
+  smtp_tls?: "implicit" | "starttls" | "none";
+  smtp_user?: string;
+  smtp_insecure?: boolean;
+  from?: string;
+  to?: string[];
+  host?: string; // where a secret URL points
+  last_sent_at: string | null;
+  last_error?: string;
+  last_error_at?: string;
+}
+
+// ChannelInput: secret fields left empty keep the current value.
+export type ChannelInput = {
+  name: string;
+  kind: ChannelKind;
+  events: string[];
+  url?: string;
+  secret?: string;
+  allow_private?: boolean;
+  token?: string;
+  chat_id?: string;
+  smtp_host?: string;
+  smtp_port?: number;
+  smtp_tls?: string;
+  smtp_user?: string;
+  smtp_password?: string;
+  smtp_insecure?: boolean;
+  from?: string;
+  to?: string[];
+};
+
 export interface MailRelay {
   host: string;
   port: number;
@@ -719,6 +763,12 @@ export const api = {
   deleteHealthCheck: (id: number) => del<void>(`/api/v1/health-checks/${id}`),
   healthEvents: (id: number) =>
     get<{ events: { status: string; detail: string; at: string }[] }>(`/api/v1/health-checks/${id}/events`),
+  notifications: () =>
+    get<{ channels: NotificationChannel[]; events: { id: string; label: string }[] }>("/api/v1/notifications"),
+  createChannel: (b: ChannelInput) => post<{ channel: NotificationChannel }>("/api/v1/notifications", b),
+  updateChannel: (id: number, b: ChannelInput) => put<{ channel: NotificationChannel }>(`/api/v1/notifications/${id}`, b),
+  deleteChannel: (id: number) => del<void>(`/api/v1/notifications/${id}`),
+  testChannel: (id: number) => post<{ ok: boolean; error?: string }>(`/api/v1/notifications/${id}/test`),
   mail: () => get<MailOverview>("/api/v1/mail"),
   createMail: (b: { server_id: number; hostname: string; memory_mb: number }) =>
     post<{ server: App; deploy_error?: string }>("/api/v1/mail", b),
