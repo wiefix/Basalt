@@ -310,7 +310,7 @@ func (s *Server) runPanelBackup(b *store.PanelBackup, st *store.BackupStorage, p
 	action := "backup.succeeded"
 	if err != nil {
 		action = "backup.failed"
-		s.notify(notify.Message{Event: EventBackupFailed, Title: "Backup of the panel failed", Text: truncate(msg, 1000)})
+		s.notify(notify.Message{Event: EventBackupFailed, Title: "Backup of the panel failed", Text: truncate(msg, 1000), Link: "/backups"})
 	}
 	if err := s.db.Audit(context.Background(), nil, action, "", map[string]any{"resource": "panel", "backup_id": b.ID,
 		"error": truncate(msg, 500)}); err != nil {

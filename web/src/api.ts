@@ -764,7 +764,8 @@ export const api = {
   healthEvents: (id: number) =>
     get<{ events: { status: string; detail: string; at: string }[] }>(`/api/v1/health-checks/${id}/events`),
   notifications: () =>
-    get<{ channels: NotificationChannel[]; events: { id: string; label: string }[] }>("/api/v1/notifications"),
+    get<{ channels: NotificationChannel[]; events: { id: string; label: string }[]; panel_url: string }>("/api/v1/notifications"),
+  setPanelURL: (url: string) => put<{ panel_url: string }>("/api/v1/notifications/panel-url", { url }),
   createChannel: (b: ChannelInput) => post<{ channel: NotificationChannel }>("/api/v1/notifications", b),
   updateChannel: (id: number, b: ChannelInput) => put<{ channel: NotificationChannel }>(`/api/v1/notifications/${id}`, b),
   deleteChannel: (id: number) => del<void>(`/api/v1/notifications/${id}`),

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/notify"
 	"github.com/wiefix/basalt/internal/store"
 )
@@ -24,6 +25,9 @@ const (
 	EventHealthUp     = "health.up"
 	EventDeployFailed = "deploy.failed"
 	EventBackupFailed = "backup.failed"
+	EventServerDown   = "server.offline"
+	EventServerUp     = "server.online"
+	EventMailProblem  = "mail.problem"
 )
 
 var notificationEvents = []struct {
@@ -34,6 +38,9 @@ var notificationEvents = []struct {
 	{EventHealthUp, "A health check is back up"},
 	{EventDeployFailed, "A deployment fails"},
 	{EventBackupFailed, "A backup fails (sites, apps, the panel)"},
+	{EventServerDown, "A server's agent has been offline for 5 minutes"},
+	{EventServerUp, "A server reported offline is back"},
+	{EventMailProblem, "The mail deliverability check finds a new problem"},
 }
 
 func validEvent(e string) bool {
@@ -276,7 +283,41 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request, p *
 	for i, c := range list {
 		out[i] = s.viewChannel(c)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"channels": out, "events": notificationEvents})
+	writeJSON(w, http.StatusOK, map[string]any{"channels": out, "events": notificationEvents, "panel_url": s.panelURL(r.Context())})
+}
+
+// settingPanelURL is the panel's public address, for links in messages.
+const settingPanelURL = "panel_url"
+
+func (s *Server) panelURL(ctx context.Context) string {
+	v, _ := s.db.Setting(ctx, settingPanelURL)
+	return v
+}
+
+// handleSetPanelURL sets the address links in messages start with ("" for
+// no links).
+func (s *Server) handleSetPanelURL(w http.ResponseWriter, r *http.Request, p *principal) {
+	var req struct {
+		URL string `json:"url"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	v := strings.TrimSuffix(strings.TrimSpace(req.URL), "/")
+	if v != "" {
+		u, err := url.Parse(v)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil ||
+			u.Path != "" || u.RawQuery != "" || u.Fragment != "" || len(v) > 300 {
+			writeError(w, http.StatusUnprocessableEntity, "the panel address looks like https://panel.example.com")
+			return
+		}
+	}
+	if err := s.db.SetSetting(r.Context(), settingPanelURL, v); err != nil {
+		s.internalError(w, r, "save panel address", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "notification.panel_url", map[string]any{"url": v})
+	writeJSON(w, http.StatusOK, map[string]any{"panel_url": v})
 }
 
 func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -460,6 +501,12 @@ func (s *Server) notify(m notify.Message) {
 	}
 	go func() {
 		ctx := context.Background()
+		// m.Link is a page of the panel: a link only once its address is known.
+		if base := s.panelURL(ctx); base != "" && strings.HasPrefix(m.Link, "/") {
+			m.Link = base + m.Link
+		} else {
+			m.Link = ""
+		}
 		list, err := s.db.NotificationChannels(ctx)
 		if err != nil {
 			s.log.Error("list notification channels", "err", err)
@@ -491,20 +538,142 @@ func (s *Server) deliverWithRetries(c *store.NotificationChannel, m notify.Messa
 	s.recordDelivery(c.ID, err)
 }
 
-// resourceName names what a backup is of, for messages.
-func (s *Server) resourceName(b *store.Backup) string {
+// resourceName names what a backup is of, for messages, with the page of
+// its backups.
+func (s *Server) resourceName(b *store.Backup) (string, string) {
 	ctx := context.Background()
 	switch {
 	case b.SiteID != 0:
+		page := fmt.Sprintf("/sites/%d/backups", b.SiteID)
 		if site, err := s.db.SiteByID(ctx, b.SiteID); err == nil {
-			return "site " + site.Name
+			return "site " + site.Name, page
 		}
-		return fmt.Sprintf("site #%d", b.SiteID)
+		return fmt.Sprintf("site #%d", b.SiteID), page
 	case b.AppID != 0:
 		if app, err := s.db.AppByID(ctx, b.AppID); err == nil {
-			return app.Name
+			return app.Name, appPage(app) + "/backups"
 		}
-		return fmt.Sprintf("app #%d", b.AppID)
+		return fmt.Sprintf("app #%d", b.AppID), fmt.Sprintf("/apps/%d/backups", b.AppID)
 	}
-	return fmt.Sprintf("backup #%d", b.ID)
+	return fmt.Sprintf("backup #%d", b.ID), "/backups"
+}
+
+// appPage is the panel page of an app (databases and the mail server
+// have their own).
+func appPage(a *store.App) string {
+	switch a.Source {
+	case store.SourceDatabase:
+		return fmt.Sprintf("/databases/%d", a.ID)
+	case store.SourceMail:
+		return "/mail"
+	}
+	return fmt.Sprintf("/apps/%d", a.ID)
+}
+
+// serverWatch notices servers whose agent stays away: after
+// s.offlineAfter offline it notifies once, and again when it is back.
+type serverWatch struct {
+	since    map[int64]time.Time // offline since (as seen by this panel)
+	notified map[int64]bool
+}
+
+// WatchServers runs until ctx ends (Serve starts it; tests call it).
+func (s *Server) WatchServers(ctx context.Context) {
+	w := &serverWatch{since: map[int64]time.Time{}, notified: map[int64]bool{}}
+	t := time.NewTicker(min(30*time.Second, s.offlineAfter/2))
+	defer t.Stop()
+	for {
+		s.watchServers(ctx, w)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func (s *Server) watchServers(ctx context.Context, w *serverWatch) {
+	servers, err := s.db.ListServers(ctx)
+	if err != nil {
+		return
+	}
+	now := s.now()
+	seen := map[int64]bool{}
+	for _, srv := range servers {
+		if !srv.Enrolled {
+			continue
+		}
+		seen[srv.ID] = true
+		link := fmt.Sprintf("/servers/%d", srv.ID)
+		if s.agents.Connected(srv.ID) {
+			if w.notified[srv.ID] {
+				s.notify(notify.Message{Event: EventServerUp, Title: srv.Name + " is back online",
+					Text: "Its agent reconnected after " + now.Sub(w.since[srv.ID]).Round(time.Minute).String() + ".", At: now, Link: link})
+			}
+			delete(w.since, srv.ID)
+			delete(w.notified, srv.ID)
+			continue
+		}
+		since, ok := w.since[srv.ID]
+		if !ok {
+			w.since[srv.ID] = now
+			continue
+		}
+		if !w.notified[srv.ID] && now.Sub(since) >= s.offlineAfter {
+			w.notified[srv.ID] = true
+			text := "Its agent is not connected to the panel. Sites and apps on it may still be running."
+			if srv.LastSeen != nil {
+				text = "Last seen " + srv.LastSeen.UTC().Format("2006-01-02 15:04 UTC") + ". " + text
+			}
+			s.notify(notify.Message{Event: EventServerDown, Title: srv.Name + " is offline", Text: text, At: now, Link: link})
+		}
+	}
+	for id := range w.since {
+		if !seen[id] {
+			delete(w.since, id)
+			delete(w.notified, id)
+		}
+	}
+}
+
+// notifyMailProblems tells about deliverability failures that the
+// previous check did not have.
+func (s *Server) notifyMailProblems(prev, cur *mailChecks) {
+	lines := newMailProblems(prev, cur)
+	if len(lines) == 0 {
+		return
+	}
+	title := "Mail deliverability: a new problem"
+	if len(lines) > 1 {
+		title = fmt.Sprintf("Mail deliverability: %d new problems", len(lines))
+	}
+	s.notify(notify.Message{Event: EventMailProblem, Title: title, Text: truncate(strings.Join(lines, "\n"), 3000), Link: "/mail"})
+}
+
+// newMailProblems describes the failed checks of cur that prev did not
+// fail (a check that could not run at all reports nothing).
+func newMailProblems(prev, cur *mailChecks) []string {
+	if cur == nil || cur.Error != "" {
+		return nil
+	}
+	key := func(r agentproto.MailCheckResult) string { return r.Domain + "|" + r.Check + "|" + r.Target }
+	old := map[string]bool{}
+	if prev != nil {
+		for _, r := range prev.Results {
+			if r.Status == "fail" {
+				old[key(r)] = true
+			}
+		}
+	}
+	var lines []string
+	for _, r := range cur.Results {
+		if r.Status == "fail" && !old[key(r)] {
+			where := r.Domain
+			if where == "" {
+				where = "server"
+			}
+			lines = append(lines, fmt.Sprintf("%s %s: %s", where, r.Check, r.Detail))
+		}
+	}
+	return lines
 }

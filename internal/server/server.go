@@ -63,6 +63,9 @@ type Options struct {
 	// Discord and Telegram deliveries may reach private addresses.
 	TelegramAPI   string
 	NotifyRetries []time.Duration
+	// OfflineAfter is how long a server's agent stays away before a
+	// notification (default 5 minutes).
+	OfflineAfter time.Duration
 }
 
 type Server struct {
@@ -98,6 +101,7 @@ type Server struct {
 	notifyPrivate     bool            // tests: chat services on private addresses
 	notifyRetries     []time.Duration // pauses before delivery attempts
 	notifySem         chan struct{}   // deliveries running at once
+	offlineAfter      time.Duration
 
 	setupMu    sync.Mutex
 	setupToken string
@@ -136,6 +140,9 @@ func New(o Options) *Server {
 	if len(o.NotifyRetries) == 0 {
 		o.NotifyRetries = notifyRetries
 	}
+	if o.OfflineAfter <= 0 {
+		o.OfflineAfter = 5 * time.Minute
+	}
 	return &Server{
 		log:            o.Log,
 		db:             o.DB,
@@ -158,6 +165,7 @@ func New(o Options) *Server {
 		notifyPrivate:  notifyPrivate,
 		notifyRetries:  o.NotifyRetries,
 		notifySem:      make(chan struct{}, notifyWorkers),
+		offlineAfter:   o.OfflineAfter,
 		setupToken:     o.SetupToken,
 		ipLimiter:      auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
 		emailLimiter:   auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
@@ -289,6 +297,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/notifications/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateChannel))
 	mux.Handle("DELETE /api/v1/notifications/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteChannel))
 	mux.Handle("POST /api/v1/notifications/{id}/test", s.requireRole(store.RoleAdmin, s.handleTestChannel))
+	mux.Handle("PUT /api/v1/notifications/panel-url", s.requireRole(store.RoleAdmin, s.handleSetPanelURL))
 	mux.Handle("PUT /api/v1/apps/{id}/domains", s.requireRole(store.RoleAdmin, s.handleSetAppDomains))
 	mux.Handle("POST /api/v1/apps/{id}/replicas", s.requireRole(store.RoleAdmin, s.handleAddReplica))
 	mux.Handle("DELETE /api/v1/apps/{id}/replicas/{sid}", s.requireRole(store.RoleAdmin, s.handleRemoveReplica))
@@ -358,6 +367,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go s.refreshMailLoop(ctx)
 	go s.catalogLoop(ctx)
 	go s.healthLoop(ctx)
+	go s.WatchServers(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

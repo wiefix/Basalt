@@ -296,6 +296,7 @@ func (s *Server) runMailChecks(ctx context.Context, app *store.App) (*mailChecks
 		return nil, false
 	}
 	defer s.mailCheckMu.Unlock()
+	prev := s.lastMailChecks(ctx)
 	out := &mailChecks{At: s.now(), Results: []agentproto.MailCheckResult{}}
 	req := agentproto.MailCheck{Hostname: app.Hostname, IPs: []string{}}
 	srv, err := s.db.ServerByID(ctx, app.ServerID)
@@ -322,6 +323,7 @@ func (s *Server) runMailChecks(ctx context.Context, app *store.App) (*mailChecks
 	if err := s.db.SetSetting(context.WithoutCancel(ctx), settingMailChecks, string(b)); err != nil {
 		s.log.Warn("store mail checks", "err", err)
 	}
+	s.notifyMailProblems(prev, out)
 	return out, true
 }
 

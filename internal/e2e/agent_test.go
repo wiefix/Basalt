@@ -37,6 +37,7 @@ type panel struct {
 	api      *httptest.Server
 	hc       *http.Client
 	dataDir  string
+	srv      *server.Server
 }
 
 func startPanel(t *testing.T) *panel { return startPanelWith(t, server.Options{}) }
@@ -86,7 +87,7 @@ func startPanelWith(t *testing.T, o server.Options) *panel {
 	t.Cleanup(api.Close)
 
 	jar, _ := cookiejar.New(nil)
-	p := &panel{t: t, db: db, hub: hub, agentURL: agentURL, api: api, hc: &http.Client{Jar: jar}, dataDir: o.DataDir}
+	p := &panel{t: t, db: db, hub: hub, agentURL: agentURL, api: api, hc: &http.Client{Jar: jar}, dataDir: o.DataDir, srv: srv}
 	p.call(http.StatusCreated, "POST", "/api/v1/setup", map[string]string{
 		"setup_token": "setup", "email": "o@example.com", "name": "O", "password": "owner password 123",
 	})

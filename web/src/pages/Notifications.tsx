@@ -36,7 +36,7 @@ export function NotificationsPage({ user }: { user: User }) {
   if (!can(user, "admin")) return <div className="empty">You do not have access to this page.</div>;
   if (data.isPending) return <Loading />;
   if (data.error) return <ErrorBox error={data.error} />;
-  const { channels, events } = data.data;
+  const { channels, events, panel_url } = data.data;
   const eventLabel = (id: string) => events.find((e) => e.id === id)?.label ?? id;
 
   const test = async (c: NotificationChannel) => {
@@ -136,6 +136,7 @@ export function NotificationsPage({ user }: { user: User }) {
           </table>
         </div>
       )}
+      <PanelURLCard url={panel_url} />
       <p className="faint small">
         A failed delivery is tried twice more (after 10 seconds and a minute). A health check notifies when it goes down
         and when it comes back.
@@ -354,5 +355,67 @@ function ChannelModal({
         )}
       </form>
     </Modal>
+  );
+}
+
+// PanelURLCard sets the address links in messages point to.
+function PanelURLCard({ url }: { url: string }) {
+  const qc = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(url || window.location.origin);
+  const save = useMutation({
+    mutationFn: () => api.setPanelURL(value.trim()),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      setEditing(false);
+    },
+  });
+  return (
+    <div className="card card-body stack" style={{ marginTop: 16 }}>
+      <div className="row wrap" style={{ justifyContent: "space-between" }}>
+        <div>
+          <h2>Links in messages</h2>
+          <p className="muted small" style={{ margin: "4px 0 0" }}>
+            {url ? (
+              <>
+                Messages link to the page concerned at <span className="mono">{url}</span>.
+              </>
+            ) : (
+              "Set the panel's address to put a link to the page concerned in each message."
+            )}
+          </p>
+        </div>
+        {!editing && (
+          <button className="btn sm" onClick={() => setEditing(true)}>
+            <Icon name="edit" size={14} /> {url ? "Change" : "Set"}
+          </button>
+        )}
+      </div>
+      {editing && (
+        <form
+          className="row wrap"
+          onSubmit={(e: FormEvent) => {
+            e.preventDefault();
+            save.mutate();
+          }}
+        >
+          <input
+            className="input mono"
+            style={{ flex: 1, minWidth: 220 }}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="https://panel.example.com"
+            autoFocus
+          />
+          <button className="btn sm primary" disabled={save.isPending}>
+            Save
+          </button>
+          <button type="button" className="btn sm" onClick={() => setEditing(false)}>
+            Cancel
+          </button>
+        </form>
+      )}
+      <ErrorBox error={save.error} />
+    </div>
   );
 }

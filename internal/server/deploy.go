@@ -309,12 +309,12 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 	}
 	s.log.Info("deployment finished", "app_id", spec.AppID, "deployment_id", depID, "ok", resp.OK)
 	if !resp.OK {
-		name := fmt.Sprintf("app #%d", spec.AppID)
+		name, link := fmt.Sprintf("app #%d", spec.AppID), fmt.Sprintf("/apps/%d", spec.AppID)
 		if app, err := s.db.AppByID(context.Background(), spec.AppID); err == nil {
-			name = app.Name
+			name, link = app.Name, appPage(app)
 		}
 		s.notify(notify.Message{Event: EventDeployFailed, Title: fmt.Sprintf("Deployment #%d of %s failed", depID, name),
-			Text: truncate(resp.Error, 1000)})
+			Text: truncate(resp.Error, 1000), Link: link})
 	}
 	if resp.OK && spec.Mail {
 		s.configureMail(context.Background())

@@ -694,8 +694,9 @@ func (s *Server) runBackup(b *store.Backup, req agentproto.BackupRequest, live *
 	if resp.OK {
 		action = "backup.succeeded"
 	} else {
-		s.notify(notify.Message{Event: EventBackupFailed, Title: "Backup of " + s.resourceName(b) + " failed",
-			Text: truncate(resp.Error, 1000)})
+		name, link := s.resourceName(b)
+		s.notify(notify.Message{Event: EventBackupFailed, Title: "Backup of " + name + " failed",
+			Text: truncate(resp.Error, 1000), Link: link})
 	}
 	if err := s.db.Audit(context.Background(), nil, action, "", map[string]any{
 		"backup_id": b.ID, "resource": req.Resource, "error": truncate(resp.Error, 500),

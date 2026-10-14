@@ -1,11 +1,13 @@
 package e2e
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wiefix/basalt/internal/agent"
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/server"
 )
@@ -174,5 +177,78 @@ func TestNotifications(t *testing.T) {
 	if !strings.HasPrefix(audit, "notification.created,notification.created,notification.updated,") ||
 		!strings.HasSuffix(audit, "notification.deleted") {
 		t.Fatalf("audit: %s", audit)
+	}
+}
+
+// TestServerOfflineNotifications: a server whose agent stays away is
+// reported once, and again when it is back; messages link to the panel.
+func TestServerOfflineNotifications(t *testing.T) {
+	got := make(chan map[string]any, 16)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		json.NewDecoder(r.Body).Decode(&m)
+		got <- m
+	}))
+	t.Cleanup(receiver.Close)
+	next := func(what string) map[string]any {
+		t.Helper()
+		select {
+		case m := <-got:
+			return m
+		case <-time.After(15 * time.Second):
+			t.Fatalf("no delivery: %s", what)
+			return nil
+		}
+	}
+
+	p := startPanelWith(t, server.Options{OfflineAfter: time.Second})
+	watch, stopWatch := context.WithCancel(context.Background())
+	t.Cleanup(stopWatch)
+	go p.srv.WatchServers(watch)
+	p.call(http.StatusUnprocessableEntity, "PUT", "/api/v1/notifications/panel-url", map[string]string{"url": "panel.example.com"})
+	p.call(http.StatusUnprocessableEntity, "PUT", "/api/v1/notifications/panel-url", map[string]string{"url": "https://panel.example.com/x"})
+	p.call(200, "PUT", "/api/v1/notifications/panel-url", map[string]string{"url": "https://panel.example.com/"})
+	if p.call(200, "GET", "/api/v1/notifications", nil)["panel_url"] != "https://panel.example.com" {
+		t.Fatal("panel url not stored")
+	}
+	p.call(http.StatusCreated, "POST", "/api/v1/notifications", map[string]any{"name": "ops", "kind": "webhook",
+		"url": receiver.URL, "allow_private": true, "events": []string{"server.offline", "server.online"}})
+
+	created := p.call(http.StatusCreated, "POST", "/api/v1/servers", map[string]string{"name": "edge-1"})
+	id := jsonID(created["server"].(map[string]any)["id"])
+	agentDir := t.TempDir()
+	if _, err := agent.Enroll(context.Background(), agent.EnrollOptions{DataDir: agentDir, PanelURL: p.agentURL,
+		Token: created["enrollment"].(map[string]any)["token"].(string), CASHA256: p.hub.CAFingerprint()}); err != nil {
+		t.Fatal(err)
+	}
+	run := func() context.CancelFunc {
+		ctx, cancel := context.WithCancel(context.Background())
+		a, err := agent.New(agent.Config{DataDir: agentDir, ProxyDir: t.TempDir(), SitesRoot: t.TempDir(), HTTPPort: 80, HTTPSPort: 443},
+			slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan struct{})
+		go func() { a.Run(ctx); close(done) }()
+		eventually(t, "online", func() bool { return p.server(id)["status"] == "online" })
+		return func() { cancel(); <-done }
+	}
+	stop := run()
+	stop()
+	m := next("server.offline")
+	if m["event"] != "server.offline" || m["title"] != "edge-1 is offline" || m["link"] != "https://panel.example.com/servers/"+id ||
+		!strings.Contains(m["text"].(string), "Last seen") {
+		t.Fatalf("offline message %v", m)
+	}
+	// Reported once, however long it stays away.
+	select {
+	case m := <-got:
+		t.Fatalf("repeated: %v", m)
+	case <-time.After(2 * time.Second):
+	}
+	stop = run()
+	defer stop()
+	if m = next("server.online"); m["event"] != "server.online" || m["title"] != "edge-1 is back online" {
+		t.Fatalf("online message %v", m)
 	}
 }

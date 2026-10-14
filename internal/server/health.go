@@ -120,9 +120,9 @@ func (s *Server) HealthReport(serverID int64, r agentproto.HealthReport) {
 		s.log.Info("health check changed", "check_id", c.id, "status", c.status, "detail", c.detail)
 		switch {
 		case c.status == store.HealthDown:
-			s.notify(notify.Message{Event: EventHealthDown, Title: c.name + " is down", Text: c.detail, At: now})
+			s.notify(notify.Message{Event: EventHealthDown, Title: c.name + " is down", Text: c.detail, At: now, Link: "/monitoring"})
 		case c.status == store.HealthUp && c.from == store.HealthDown:
-			s.notify(notify.Message{Event: EventHealthUp, Title: c.name + " is back up", Text: c.detail, At: now})
+			s.notify(notify.Message{Event: EventHealthUp, Title: c.name + " is back up", Text: c.detail, At: now, Link: "/monitoring"})
 		}
 	}
 	// DNS records follow the check: the DNS servers get the zones without
