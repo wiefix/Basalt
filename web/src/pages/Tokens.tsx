@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "react-router";
 import { api, roleRank, type APIToken, type Role, type User } from "../api";
 import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
 
@@ -100,9 +101,14 @@ export function TokensCard({ user }: { user: User }) {
     <div className="card">
       <div className="card-head">
         <h2>API tokens</h2>
-        <button className="btn sm" onClick={() => setCreating(true)}>
-          <Icon name="plus" size={14} /> New token
-        </button>
+        <div className="row">
+          <Link className="btn sm ghost" to="/api-reference">
+            API reference
+          </Link>
+          <button className="btn sm" onClick={() => setCreating(true)}>
+            <Icon name="plus" size={14} /> New token
+          </button>
+        </div>
       </div>
       {tokens.isPending ? (
         <Loading />
@@ -113,7 +119,7 @@ export function TokensCard({ user }: { user: User }) {
       ) : tokens.data.tokens.length === 0 ? (
         <div className="card-body muted">
           For scripts and CI: a token calls the same API as this panel, as you, with the access you choose. Send it as{" "}
-          <code>Authorization: Bearer …</code>.
+          <code>Authorization: Bearer …</code>. See the <Link to="/api-reference">API reference</Link>.
         </div>
       ) : (
         <TokenTable tokens={tokens.data.tokens} onRevoke={revoke} />

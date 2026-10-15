@@ -21,6 +21,7 @@ import { MonitoringPage } from "./pages/Monitoring";
 import { NotificationsPage } from "./pages/Notifications";
 import { AccountPage } from "./pages/Account";
 import { AuditPage } from "./pages/Audit";
+import { APIDocsPage } from "./pages/APIDocs";
 
 // The signed-in user, or null when signed out. A 401 is a normal answer
 // here, not an error: as an error, every refetch (e.g. on window focus) would
@@ -167,6 +168,7 @@ function Shell({ user }: { user: User }) {
           <Route path="/backups" element={<BackupsPage user={user} />} />
           <Route path="/users" element={<UsersPage user={user} />} />
           <Route path="/audit" element={<AuditPage user={user} />} />
+          <Route path="/api-reference" element={<APIDocsPage />} />
           <Route path="/account" element={<AccountPage user={user} />} />
           <Route path="*" element={<div className="empty"><h3>Page not found</h3></div>} />
         </Routes>

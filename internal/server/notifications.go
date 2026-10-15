@@ -300,10 +300,12 @@ func (s *Server) panelURL(ctx context.Context) string {
 
 // handleSetPanelURL sets the address links in messages start with ("" for
 // no links).
+type panelURLRequest struct {
+	URL string `json:"url"`
+}
+
 func (s *Server) handleSetPanelURL(w http.ResponseWriter, r *http.Request, p *principal) {
-	var req struct {
-		URL string `json:"url"`
-	}
+	var req panelURLRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}

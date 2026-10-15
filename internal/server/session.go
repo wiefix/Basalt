@@ -175,8 +175,26 @@ func (s *Server) maybeTouch(ctx context.Context, w http.ResponseWriter, token st
 
 type principalHandler func(http.ResponseWriter, *http.Request, *principal)
 
+// access is who may call a route (for the API description).
+type access struct {
+	role        store.Role // "" when no role is required
+	sessionOnly bool       // not with an API token
+	mfaPending  bool       // only between the password and the second factor
+}
+
+// guarded is a handler behind an access check; the router records its
+// access.
+type guarded struct {
+	http.Handler
+	access access
+}
+
 // requireRole allows fully authenticated users with at least role min.
 func (s *Server) requireRole(min store.Role, h principalHandler) http.Handler {
+	return guarded{s.roleCheck(min, h), access{role: min}}
+}
+
+func (s *Server) roleCheck(min store.Role, h principalHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := principalFrom(r.Context())
 		if p == nil || (p.session != nil && p.session.MFAPending) {
@@ -194,34 +212,34 @@ func (s *Server) requireRole(min store.Role, h principalHandler) http.Handler {
 // requireSession is requireRole for what an API token may not do: manage
 // the account's credentials (password, 2FA, tokens) and users.
 func (s *Server) requireSession(min store.Role, h principalHandler) http.Handler {
-	return s.requireRole(min, func(w http.ResponseWriter, r *http.Request, p *principal) {
+	return guarded{s.roleCheck(min, func(w http.ResponseWriter, r *http.Request, p *principal) {
 		if p.token != nil {
 			writeError(w, http.StatusForbidden, "not allowed with an API token; sign in to the panel")
 			return
 		}
 		h(w, r, p)
-	})
+	}), access{role: min, sessionOnly: true}}
 }
 
 // requireMFAPending allows only sessions waiting for the second factor.
 func (s *Server) requireMFAPending(h principalHandler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return guarded{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := principalFrom(r.Context())
-		if p == nil || !p.session.MFAPending {
+		if p == nil || p.session == nil || !p.session.MFAPending {
 			writeError(w, http.StatusUnauthorized, "no pending two-factor login")
 			return
 		}
 		h(w, r, p)
-	})
+	}), access{mfaPending: true}}
 }
 
 func (s *Server) requireAnySession(h principalHandler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return guarded{http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := principalFrom(r.Context())
 		if p == nil || p.session == nil {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
 		h(w, r, p)
-	})
+	}), access{sessionOnly: true}}
 }

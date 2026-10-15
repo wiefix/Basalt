@@ -370,7 +370,7 @@ func (s *Server) pathAppTarget(w http.ResponseWriter, r *http.Request) (*backupT
 
 // backupRoutes registers the backup API of sites or apps under prefix
 // ("/api/v1/sites/{id}").
-func (s *Server) backupRoutes(mux *http.ServeMux, prefix string, t targetResolver) {
+func (s *Server) backupRoutes(mux *router, prefix string, t targetResolver) {
 	mux.Handle("GET "+prefix+"/backups", s.requireRole(store.RoleViewer, s.handleBackups(t)))
 	mux.Handle("POST "+prefix+"/backups", s.requireRole(store.RoleMember, s.handleRunBackup(t)))
 	mux.Handle("GET "+prefix+"/backups/{bid}", s.requireRole(store.RoleMember, s.handleGetBackup(t)))

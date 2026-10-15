@@ -564,6 +564,22 @@ export interface APIToken {
   created_at: string;
 }
 
+export interface OpenAPIOperation {
+  summary: string;
+  description: string;
+  operationId: string;
+  tags: string[];
+  "x-basalt-role"?: Role;
+  parameters?: { name: string; in: "path" | "query"; description?: string }[];
+  requestBody?: { content: Record<string, { schema: unknown }> };
+}
+
+export interface OpenAPISpec {
+  info: { title: string; version: string };
+  paths: Record<string, Record<string, OpenAPIOperation>>;
+  components: { schemas: Record<string, unknown> };
+}
+
 export interface AuditEntry {
   id: number;
   at: string;
@@ -821,6 +837,7 @@ export const api = {
     if (q.action) p.set("action", q.action);
     return get<{ entries: AuditEntry[]; actions: string[]; more: boolean }>(`/api/v1/audit?${p}`);
   },
+  openapi: () => get<OpenAPISpec>("/api/v1/openapi.json"),
   verifyAudit: () => get<AuditCheck>("/api/v1/audit/verify"),
   healthChecks: () => get<{ checks: HealthCheck[] }>("/api/v1/health-checks"),
   createHealthCheck: (b: HealthCheckInput) => post<{ check: { id: number } }>("/api/v1/health-checks", b),

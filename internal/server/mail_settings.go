@@ -141,7 +141,7 @@ type mailRelayRequest struct {
 
 type mailSettingsRequest struct {
 	// Relay: absent keeps it, null removes it.
-	Relay     json.RawMessage `json:"relay"`
+	Relay     json.RawMessage `json:"relay" openapi:"mailRelayRequest"`
 	SendLimit *int            `json:"send_limit"`
 }
 
