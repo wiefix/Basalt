@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import qrcode from "qrcode-generator";
 import { api, type User } from "../api";
 import { CodeBox, ErrorBox, Field, errorMessage, useToast } from "../components/ui";
+import { SessionsCard, TokensCard } from "./Tokens";
 
 export function AccountPage({ user }: { user: User }) {
   return (
@@ -18,6 +19,10 @@ export function AccountPage({ user }: { user: User }) {
       <div className="grid-2">
         <PasswordCard />
         <TwoFactorCard user={user} />
+      </div>
+      <div className="stack" style={{ marginTop: 16 }}>
+        <SessionsCard />
+        <TokensCard user={user} />
       </div>
     </>
   );

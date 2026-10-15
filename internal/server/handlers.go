@@ -53,6 +53,13 @@ func (s *Server) internalError(w http.ResponseWriter, r *http.Request, what stri
 // audit records an action. Failures are logged, not returned: the action
 // itself already happened.
 func (s *Server) audit(r *http.Request, actorID *int64, action string, details map[string]any) {
+	if p := principalFrom(r.Context()); p != nil && p.token != nil {
+		d := map[string]any{"api_token": p.token.Name}
+		for k, v := range details {
+			d[k] = v
+		}
+		details = d
+	}
 	if err := s.db.Audit(r.Context(), actorID, action, clientIP(r), details); err != nil {
 		s.log.Error("write audit log", "err", err, "action", action)
 	}

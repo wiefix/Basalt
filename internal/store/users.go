@@ -230,3 +230,89 @@ func (db *DB) ListUsers(ctx context.Context) ([]*User, error) {
 	}
 	return out, rows.Err()
 }
+
+// ErrLastOwner: the change would leave no active owner.
+var ErrLastOwner = errors.New("the panel needs at least one active owner")
+
+// UserChange is what UpdateUser sets (nil fields stay).
+type UserChange struct {
+	Name     *string
+	Role     *Role
+	Disabled *bool
+}
+
+// UpdateUser changes a user; it refuses to leave the panel without an
+// active owner. Disabling a user ends their sessions.
+func (db *DB) UpdateUser(ctx context.Context, id int64, c UserChange) (*User, error) {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	set, args := []string{"updated_at = unixepoch()"}, []any{}
+	if c.Name != nil {
+		set, args = append(set, "name = ?"), append(args, *c.Name)
+	}
+	if c.Role != nil {
+		set, args = append(set, "role = ?"), append(args, *c.Role)
+	}
+	if c.Disabled != nil {
+		if *c.Disabled {
+			set = append(set, "disabled_at = COALESCE(disabled_at, unixepoch())")
+		} else {
+			set = append(set, "disabled_at = NULL")
+		}
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE users SET `+strings.Join(set, ", ")+` WHERE id = ?`, append(args, id)...)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	if err := checkOwners(ctx, tx); err != nil {
+		return nil, err
+	}
+	if c.Disabled != nil && *c.Disabled {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, id); err != nil {
+			return nil, err
+		}
+	}
+	u, err := scanUser(tx.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE id = ?`, id))
+	if err != nil {
+		return nil, err
+	}
+	return u, tx.Commit()
+}
+
+// DeleteUser removes a user with their sessions, recovery codes and API
+// tokens; past actions keep their ID in the audit log.
+func (db *DB) DeleteUser(ctx context.Context, id int64) error {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if err := checkOwners(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func checkOwners(ctx context.Context, tx *sql.Tx) error {
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM users WHERE role = 'owner' AND disabled_at IS NULL`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrLastOwner
+	}
+	return nil
+}

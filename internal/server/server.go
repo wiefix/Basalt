@@ -212,13 +212,24 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/auth/mfa", s.requireMFAPending(s.handleMFA))
 	mux.Handle("POST /api/v1/auth/logout", s.requireAnySession(s.handleLogout))
 	mux.Handle("GET /api/v1/auth/me", s.requireRole(store.RoleViewer, s.handleMe))
-	mux.Handle("POST /api/v1/auth/password", s.requireRole(store.RoleViewer, s.handleChangePassword))
-	mux.Handle("POST /api/v1/auth/totp/setup", s.requireRole(store.RoleViewer, s.handleTOTPSetup))
-	mux.Handle("POST /api/v1/auth/totp/enable", s.requireRole(store.RoleViewer, s.handleTOTPEnable))
-	mux.Handle("POST /api/v1/auth/totp/disable", s.requireRole(store.RoleViewer, s.handleTOTPDisable))
+	mux.Handle("POST /api/v1/auth/password", s.requireSession(store.RoleViewer, s.handleChangePassword))
+	mux.Handle("POST /api/v1/auth/totp/setup", s.requireSession(store.RoleViewer, s.handleTOTPSetup))
+	mux.Handle("POST /api/v1/auth/totp/enable", s.requireSession(store.RoleViewer, s.handleTOTPEnable))
+	mux.Handle("POST /api/v1/auth/totp/disable", s.requireSession(store.RoleViewer, s.handleTOTPDisable))
 
 	mux.Handle("GET /api/v1/users", s.requireRole(store.RoleAdmin, s.handleListUsers))
-	mux.Handle("POST /api/v1/users", s.requireRole(store.RoleAdmin, s.handleCreateUser))
+	mux.Handle("PUT /api/v1/users/{id}", s.requireSession(store.RoleAdmin, s.handleUpdateUser))
+	mux.Handle("DELETE /api/v1/users/{id}", s.requireSession(store.RoleAdmin, s.handleDeleteUser))
+	mux.Handle("PUT /api/v1/users/{id}/password", s.requireSession(store.RoleAdmin, s.handleResetPassword))
+	mux.Handle("GET /api/v1/account/sessions", s.requireSession(store.RoleViewer, s.handleMySessions))
+	mux.Handle("DELETE /api/v1/account/sessions", s.requireSession(store.RoleViewer, s.handleEndOtherSessions))
+	mux.Handle("DELETE /api/v1/account/sessions/{id}", s.requireSession(store.RoleViewer, s.handleEndSession))
+	mux.Handle("GET /api/v1/account/tokens", s.requireSession(store.RoleViewer, s.handleMyTokens))
+	mux.Handle("POST /api/v1/account/tokens", s.requireSession(store.RoleViewer, s.handleCreateToken))
+	mux.Handle("DELETE /api/v1/account/tokens/{id}", s.requireSession(store.RoleViewer, s.handleDeleteMyToken))
+	mux.Handle("GET /api/v1/tokens", s.requireSession(store.RoleAdmin, s.handleAllTokens))
+	mux.Handle("DELETE /api/v1/tokens/{id}", s.requireSession(store.RoleAdmin, s.handleRevokeToken))
+	mux.Handle("POST /api/v1/users", s.requireSession(store.RoleAdmin, s.handleCreateUser))
 
 	mux.Handle("GET /api/v1/servers", s.requireRole(store.RoleViewer, s.handleListServers))
 	mux.Handle("POST /api/v1/servers", s.requireRole(store.RoleAdmin, s.handleCreateServer))
@@ -252,7 +263,7 @@ func (s *Server) Handler() http.Handler {
 	s.backupRoutes(mux, "/api/v1/sites/{id}", s.pathSiteTarget)
 	s.backupRoutes(mux, "/api/v1/apps/{id}", s.pathAppTarget)
 	mux.Handle("GET /api/v1/panel-backup", s.requireRole(store.RoleAdmin, s.handlePanelBackup))
-	mux.Handle("PUT /api/v1/panel-backup/recovery", s.requireRole(store.RoleOwner, s.handleSetRecovery))
+	mux.Handle("PUT /api/v1/panel-backup/recovery", s.requireSession(store.RoleOwner, s.handleSetRecovery))
 	mux.Handle("PUT /api/v1/panel-backup/policy", s.requireRole(store.RoleAdmin, s.handleSetPanelBackupPolicy))
 	mux.Handle("DELETE /api/v1/panel-backup/policy", s.requireRole(store.RoleAdmin, s.handleDeletePanelBackupPolicy))
 	mux.Handle("POST /api/v1/panel-backup/run", s.requireRole(store.RoleAdmin, s.handleRunPanelBackup))
@@ -421,6 +432,9 @@ func (s *Server) cleanupLoop(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
+		if _, err := s.db.DeleteExpiredAPITokens(ctx, s.now().Add(-expiredTokensKept)); err != nil && ctx.Err() == nil {
+			s.log.Error("delete expired API tokens", "err", err)
+		}
 		if n, err := s.db.DeleteExpiredSessions(ctx, s.now()); err != nil && ctx.Err() == nil {
 			s.log.Error("delete expired sessions", "err", err)
 		} else if n > 0 {

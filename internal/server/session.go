@@ -18,9 +18,13 @@ const (
 	sessionTouchInterval = time.Minute
 )
 
+// principal is who makes a request: a user signed in with a session, or
+// an API token (session nil), whose user's role is then capped by the
+// token's.
 type principal struct {
 	user    *store.User
 	session *store.Session
+	token   *store.APIToken
 }
 
 type principalKey struct{}
@@ -98,6 +102,25 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID int
 // a request; the require* wrappers decide what is allowed.
 func (s *Server) authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if raw, ok := bearerToken(r); ok {
+			p, err := s.tokenPrincipal(r, raw)
+			if errors.Is(err, store.ErrNotFound) {
+				// Tokens are unguessable; this only keeps a client stuck on
+				// a revoked token from flooding the panel.
+				if !s.ipLimiter.Allow("ip:" + clientIP(r)) {
+					writeRateLimited(w, time.Minute)
+					return
+				}
+				writeError(w, http.StatusUnauthorized, "invalid or expired API token")
+				return
+			}
+			if err != nil {
+				s.internalError(w, r, "load API token", err)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
+			return
+		}
 		c, err := r.Cookie(s.cookieName())
 		if err != nil || c.Value == "" {
 			next.ServeHTTP(w, r)
@@ -156,12 +179,24 @@ type principalHandler func(http.ResponseWriter, *http.Request, *principal)
 func (s *Server) requireRole(min store.Role, h principalHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := principalFrom(r.Context())
-		if p == nil || p.session.MFAPending {
+		if p == nil || (p.session != nil && p.session.MFAPending) {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}
 		if !p.user.Role.AtLeast(min) {
 			writeError(w, http.StatusForbidden, "insufficient permissions")
+			return
+		}
+		h(w, r, p)
+	})
+}
+
+// requireSession is requireRole for what an API token may not do: manage
+// the account's credentials (password, 2FA, tokens) and users.
+func (s *Server) requireSession(min store.Role, h principalHandler) http.Handler {
+	return s.requireRole(min, func(w http.ResponseWriter, r *http.Request, p *principal) {
+		if p.token != nil {
+			writeError(w, http.StatusForbidden, "not allowed with an API token; sign in to the panel")
 			return
 		}
 		h(w, r, p)
@@ -183,7 +218,7 @@ func (s *Server) requireMFAPending(h principalHandler) http.Handler {
 func (s *Server) requireAnySession(h principalHandler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := principalFrom(r.Context())
-		if p == nil {
+		if p == nil || p.session == nil {
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		}

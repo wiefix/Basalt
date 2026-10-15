@@ -541,6 +541,29 @@ export type ChannelInput = {
   to?: string[];
 };
 
+export interface SessionInfo {
+  id: string;
+  ip: string;
+  user_agent: string;
+  current: boolean;
+  created_at: string;
+  last_seen_at: string;
+  expires_at: string;
+}
+
+export interface APIToken {
+  id: number;
+  name: string;
+  prefix: string;
+  role: Role;
+  user?: { id: number; email: string }; // in the list of all tokens
+  expires_at: string | null;
+  expired: boolean;
+  last_used_at: string | null;
+  last_used_ip?: string;
+  created_at: string;
+}
+
 export interface AuditEntry {
   id: number;
   at: string;
@@ -701,6 +724,19 @@ export const api = {
     post<void>("/api/v1/auth/totp/disable", { password, code }),
 
   users: () => get<{ users: User[] }>("/api/v1/users"),
+  updateUser: (id: number, b: { name?: string; role?: Role; disabled?: boolean }) =>
+    put<{ user: User }>(`/api/v1/users/${id}`, b),
+  deleteUser: (id: number) => del<void>(`/api/v1/users/${id}`),
+  resetPassword: (id: number, b: { password: string; reset_totp: boolean }) => put<void>(`/api/v1/users/${id}/password`, b),
+  mySessions: () => get<{ sessions: SessionInfo[] }>("/api/v1/account/sessions"),
+  endSession: (id: string) => del<void>(`/api/v1/account/sessions/${id}`),
+  endOtherSessions: () => del<void>("/api/v1/account/sessions"),
+  myTokens: () => get<{ tokens: APIToken[] }>("/api/v1/account/tokens"),
+  createToken: (b: { name: string; role: Role; expires_days: number; password: string }) =>
+    post<{ token: APIToken; secret: string }>("/api/v1/account/tokens", b),
+  deleteMyToken: (id: number) => del<void>(`/api/v1/account/tokens/${id}`),
+  allTokens: () => get<{ tokens: APIToken[] }>("/api/v1/tokens"),
+  revokeToken: (id: number) => del<void>(`/api/v1/tokens/${id}`),
   createUser: (b: { email: string; name: string; password: string; role: Role }) =>
     post<{ user: User }>("/api/v1/users", b),
 

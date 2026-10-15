@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"time"
 )
@@ -70,4 +71,35 @@ func (db *DB) DeleteExpiredSessions(ctx context.Context, now time.Time) (int64, 
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// SessionID identifies a session in lists: the start of its token's hash
+// (neither the token nor the full hash is shown).
+func SessionID(hash []byte) string { return hex.EncodeToString(hash[:8]) }
+
+// UserSessions lists a user's signed-in sessions, newest activity first.
+func (db *DB) UserSessions(ctx context.Context, userID int64, now time.Time) ([]*Session, error) {
+	rows, err := db.R.QueryContext(ctx,
+		`SELECT token_hash, user_id, mfa_pending, ip, user_agent, created_at, last_seen_at, expires_at
+		 FROM sessions WHERE user_id = ? AND expires_at > ? AND mfa_pending = 0 ORDER BY last_seen_at DESC`, userID, now.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Session
+	for rows.Next() {
+		var s Session
+		var created, seen, expires int64
+		if err := rows.Scan(&s.TokenHash, &s.UserID, &s.MFAPending, &s.IP, &s.UserAgent, &created, &seen, &expires); err != nil {
+			return nil, err
+		}
+		s.CreatedAt, s.LastSeenAt, s.ExpiresAt = time.Unix(created, 0), time.Unix(seen, 0), time.Unix(expires, 0)
+		out = append(out, &s)
+	}
+	return out, rows.Err()
+}
+
+// DeleteUserSessionByID ends one of a user's sessions by its SessionID.
+func (db *DB) DeleteUserSessionByID(ctx context.Context, userID int64, id string) error {
+	return db.execOne(ctx, `DELETE FROM sessions WHERE user_id = ? AND lower(hex(substr(token_hash, 1, 8))) = ?`, userID, id)
 }
