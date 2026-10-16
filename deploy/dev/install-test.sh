@@ -189,8 +189,9 @@ docker exec -e RESTIC_PASSWORD="$PW" basalt-panel restic -r /var/backups/basalt/
 docker exec -e BASALT_RECOVERY_PASSPHRASE="orange ladder of quiet mornings" basalt-panel basalt server recover --from /root/restore --force
 docker exec basalt-panel systemctl start basalt-server
 for i in $(seq 60); do docker exec basalt-panel curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.5; done
-for i in $(seq 60); do
-  $API http://127.0.0.1:8080/api/v1/servers | grep -q '"name":"node1","status":"online"' && break; sleep 1
+# Agents retry with a backoff of up to a minute: wait for both.
+for i in $(seq 120); do
+  [ "$($API http://127.0.0.1:8080/api/v1/servers | grep -o '"status":"online"' | wc -l)" -ge 2 ] && break; sleep 1
 done
 $API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; l=json.load(sys.stdin)["servers"]; [print("  after recovery:", s["name"], s["status"]) for s in l]; sys.exit(0 if all(s["status"]=="online" for s in l) else "an agent did not reconnect")'
 echo "### done"
