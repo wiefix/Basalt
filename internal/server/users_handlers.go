@@ -17,9 +17,15 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request, p *prin
 		s.internalError(w, r, "list users", err)
 		return
 	}
+	passkeys, err := s.db.CountPasskeys(r.Context())
+	if err != nil {
+		s.internalError(w, r, "count passkeys", err)
+		return
+	}
 	out := make([]userView, len(users))
 	for i, u := range users {
 		out[i] = viewUser(u)
+		out[i].Passkeys = passkeys[u.ID]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"users": out})
 }
@@ -181,7 +187,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request, p *pri
 
 type resetPasswordRequest struct {
 	Password  string `json:"password"`
-	ResetTOTP bool   `json:"reset_totp"` // also turn off two-factor (a lost phone)
+	ResetTOTP bool   `json:"reset_totp"` // also turn off two-factor and remove passkeys (a lost phone)
 }
 
 // handleResetPassword sets another user's password (no email reset yet) and
@@ -213,8 +219,13 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request, p *
 		return
 	}
 	if req.ResetTOTP {
+		// A lost phone: its authenticator app and its passkeys.
 		if err := s.db.DisableTOTP(r.Context(), u.ID); err != nil {
 			s.internalError(w, r, "turn off two-factor", err)
+			return
+		}
+		if err := s.db.DeleteUserPasskeys(r.Context(), u.ID); err != nil {
+			s.internalError(w, r, "remove passkeys", err)
 			return
 		}
 	}

@@ -72,8 +72,10 @@ function Shell({ user }: { user: User }) {
 
   const logout = async () => {
     await api.logout().catch(() => {});
-    qc.clear();
+    // Not qc.clear(): it would detach the app from the "me" query, and the
+    // login form would not appear.
     qc.setQueryData(["me"], null);
+    qc.removeQueries({ predicate: (q) => q.queryKey[0] !== "me" && q.queryKey[0] !== "setup" });
     navigate("/");
   };
 

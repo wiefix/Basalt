@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import { ErrorBox, Field, Logo } from "../components/ui";
+import { passkeysSupported, signInWithPasskey } from "../components/passkey";
 
 export function SetupPage() {
   const qc = useQueryClient();
@@ -73,6 +74,19 @@ export function LoginPage() {
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
 
+  const passkey = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await signInWithPasskey();
+      qc.setQueryData(["me"], { user: res.user });
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -131,6 +145,11 @@ export function LoginPage() {
             <button className="btn primary" disabled={busy}>
               {busy ? "Signing in…" : "Sign in"}
             </button>
+            {passkeysSupported() && (
+              <button type="button" className="btn" onClick={passkey} disabled={busy}>
+                Sign in with a passkey
+              </button>
+            )}
           </>
         ) : (
           <>

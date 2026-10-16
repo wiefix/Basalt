@@ -128,6 +128,7 @@ type Server struct {
 	pending     map[int64]string // per app: commit pushed while a deployment ran
 	stopsMu     sync.Mutex
 	stops       map[int64]*deployStop // running deployments, by ID
+	challenges  challenges            // WebAuthn challenges in progress
 	streamMu    sync.Mutex
 	streams     map[int64]int // open event streams per user
 }
@@ -219,6 +220,8 @@ func (s *Server) Handler() http.Handler {
 	rt.HandleFunc("POST /api/v1/setup", s.handleSetup)
 
 	rt.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
+	rt.HandleFunc("POST /api/v1/auth/passkey/options", s.handlePasskeyLoginOptions)
+	rt.HandleFunc("POST /api/v1/auth/passkey", s.handlePasskeyLogin)
 	rt.Handle("POST /api/v1/auth/mfa", s.requireMFAPending(s.handleMFA))
 	rt.Handle("POST /api/v1/auth/logout", s.requireAnySession(s.handleLogout))
 	rt.Handle("GET /api/v1/auth/me", s.requireRole(store.RoleViewer, s.handleMe))
@@ -234,6 +237,11 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("GET /api/v1/account/sessions", s.requireSession(store.RoleViewer, s.handleMySessions))
 	rt.Handle("DELETE /api/v1/account/sessions", s.requireSession(store.RoleViewer, s.handleEndOtherSessions))
 	rt.Handle("DELETE /api/v1/account/sessions/{id}", s.requireSession(store.RoleViewer, s.handleEndSession))
+	rt.Handle("GET /api/v1/account/passkeys", s.requireSession(store.RoleViewer, s.handleMyPasskeys))
+	rt.Handle("POST /api/v1/account/passkeys/options", s.requireSession(store.RoleViewer, s.handlePasskeyOptions))
+	rt.Handle("POST /api/v1/account/passkeys", s.requireSession(store.RoleViewer, s.handleAddPasskey))
+	rt.Handle("PUT /api/v1/account/passkeys/{id}", s.requireSession(store.RoleViewer, s.handleRenamePasskey))
+	rt.Handle("DELETE /api/v1/account/passkeys/{id}", s.requireSession(store.RoleViewer, s.handleDeletePasskey))
 	rt.Handle("GET /api/v1/account/tokens", s.requireSession(store.RoleViewer, s.handleMyTokens))
 	rt.Handle("POST /api/v1/account/tokens", s.requireSession(store.RoleViewer, s.handleCreateToken))
 	rt.Handle("DELETE /api/v1/account/tokens/{id}", s.requireSession(store.RoleViewer, s.handleDeleteMyToken))

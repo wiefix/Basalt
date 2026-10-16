@@ -79,7 +79,14 @@ export function UsersPage({ user }: { user: User }) {
                       </span>
                     )}
                   </td>
-                  <td>{u.totp_enabled ? <span className="badge ok">on</span> : <span className="badge">off</span>}</td>
+                  <td>
+                    {u.totp_enabled ? <span className="badge ok">on</span> : <span className="badge">off</span>}
+                    {!!u.passkeys && (
+                      <span className="faint small" style={{ marginLeft: 6 }}>
+                        {u.passkeys} passkey{u.passkeys > 1 ? "s" : ""}
+                      </span>
+                    )}
+                  </td>
                   <td className="muted hide-sm">{formatDate(u.created_at)}</td>
                   <td className="num">
                     {roleRank[user.role] >= roleRank[u.role] && (
@@ -251,10 +258,10 @@ function EditUserModal({ me, target, onClose }: { me: User; target: User; onClos
                 autoComplete="new-password"
               />
             </Field>
-            {password && target.totp_enabled && (
+            {password && (target.totp_enabled || !!target.passkeys) && (
               <label className="check small">
                 <input type="checkbox" checked={resetTOTP} onChange={(e) => setResetTOTP(e.target.checked)} /> Also turn off
-                two-factor authentication (lost phone and recovery codes)
+                two-factor authentication and remove their passkeys (lost phone)
               </label>
             )}
           </>

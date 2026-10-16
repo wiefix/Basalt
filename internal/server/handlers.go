@@ -72,6 +72,7 @@ type userView struct {
 	Role        store.Role `json:"role"`
 	TOTPEnabled bool       `json:"totp_enabled"`
 	Disabled    bool       `json:"disabled"`
+	Passkeys    int        `json:"passkeys,omitempty"` // in the list of users
 	CreatedAt   time.Time  `json:"created_at"`
 }
 

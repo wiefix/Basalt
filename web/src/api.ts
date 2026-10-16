@@ -10,7 +10,17 @@ export interface User {
   role: Role;
   totp_enabled: boolean;
   disabled: boolean;
+  passkeys?: number; // in the list of users
   created_at: string;
+}
+
+export interface Passkey {
+  id: number;
+  name: string;
+  host: string; // the panel address it works on
+  synced: boolean; // backed up by its password manager
+  created_at: string;
+  last_used_at: string | null;
 }
 
 export interface Server {
@@ -770,6 +780,14 @@ export const api = {
   mySessions: () => get<{ sessions: SessionInfo[] }>("/api/v1/account/sessions"),
   endSession: (id: string) => del<void>(`/api/v1/account/sessions/${id}`),
   endOtherSessions: () => del<void>("/api/v1/account/sessions"),
+  myPasskeys: () => get<{ passkeys: Passkey[] }>("/api/v1/account/passkeys"),
+  passkeyOptions: (password: string) => post<{ options: any }>("/api/v1/account/passkeys/options", { password }),
+  addPasskey: (b: { name: string; client_data_json: string; attestation_object: string }) =>
+    post<{ passkey: Passkey }>("/api/v1/account/passkeys", b),
+  renamePasskey: (id: number, name: string) => put<void>(`/api/v1/account/passkeys/${id}`, { name }),
+  deletePasskey: (id: number) => del<void>(`/api/v1/account/passkeys/${id}`),
+  passkeyLoginOptions: () => post<{ challenge_id: string; options: any }>("/api/v1/auth/passkey/options"),
+  passkeyLogin: (b: Record<string, string>) => post<{ user: User }>("/api/v1/auth/passkey", b),
   myTokens: () => get<{ tokens: APIToken[] }>("/api/v1/account/tokens"),
   createToken: (b: { name: string; role: Role; expires_days: number; password: string }) =>
     post<{ token: APIToken; secret: string }>("/api/v1/account/tokens", b),

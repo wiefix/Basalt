@@ -4,6 +4,7 @@ import qrcode from "qrcode-generator";
 import { api, type User } from "../api";
 import { CodeBox, ErrorBox, Field, errorMessage, useToast } from "../components/ui";
 import { SessionsCard, TokensCard } from "./Tokens";
+import { PasskeysCard } from "./Passkeys";
 
 export function AccountPage({ user }: { user: User }) {
   return (
@@ -21,6 +22,7 @@ export function AccountPage({ user }: { user: User }) {
         <TwoFactorCard user={user} />
       </div>
       <div className="stack" style={{ marginTop: 16 }}>
+        <PasskeysCard />
         <SessionsCard />
         <TokensCard user={user} />
       </div>
