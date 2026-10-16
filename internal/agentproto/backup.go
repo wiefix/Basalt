@@ -22,6 +22,9 @@ const (
 	TypeBackupSnapshots = "backup_snapshots"
 	// TypeBackupRestore restores snapshots; streams LogChunk frames.
 	TypeBackupRestore = "backup_restore"
+	// TypeBackupVerify checks a repository's integrity (restic check);
+	// streams LogChunk frames.
+	TypeBackupVerify = "backup_verify"
 )
 
 // Storage kinds.
@@ -60,6 +63,7 @@ var (
 	sftpHostRE  = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9.-]{0,251}[a-zA-Z0-9])?$`)
 	resourceRE  = regexp.MustCompile(`^(site|app)-[1-9][0-9]{0,18}$`)
 	snapshotRE  = regexp.MustCompile(`^[0-9a-f]{8,64}$`)
+	subsetRE    = regexp.MustCompile(`^([1-9][0-9]{0,3})/([1-9][0-9]{0,3})$`)
 	dbNameRE    = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 	sqlNameRE   = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 	errBadValue = errors.New("invalid value")
@@ -320,4 +324,34 @@ type RestoreResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
 	Log   string `json:"log"`
+}
+
+// VerifyRequest checks the integrity of a repository: its structure and,
+// with ReadData ("n/t": the n-th of t parts), that part of its data can be
+// read back and decrypted.
+type VerifyRequest struct {
+	Repo     BackupRepo `json:"repo"`
+	ReadData string     `json:"read_data,omitempty"`
+}
+
+func (r *VerifyRequest) Validate() error {
+	if err := r.Repo.Validate(); err != nil {
+		return err
+	}
+	if r.ReadData == "" {
+		return nil
+	}
+	m := subsetRE.FindStringSubmatch(r.ReadData)
+	if m == nil || len(m[1]) > len(m[2]) || (len(m[1]) == len(m[2]) && m[1] > m[2]) {
+		return errors.New("read_data must be n/t with 1 <= n <= t")
+	}
+	return nil
+}
+
+type VerifyResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+	Log   string `json:"log"`
+	// Empty: the repository holds no backups yet (nothing was checked).
+	Empty bool `json:"empty,omitempty"`
 }

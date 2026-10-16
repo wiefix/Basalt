@@ -1,7 +1,7 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, can, type BackupStorage, type StorageInput, type User } from "../api";
-import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useConfirm, useToast } from "../components/ui";
+import { api, can, type BackupCheck, type BackupStorage, type CheckRepository, type StorageInput, type User } from "../api";
+import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
 import { LogView } from "../components/LogView";
 import { PolicyCard } from "./BackupsTab";
 
@@ -112,6 +112,7 @@ export function BackupsPage({ user }: { user: User }) {
           </table>
         </div>
       )}
+      {list.data && list.data.storages.length > 0 && <ChecksCard storages={list.data.storages} />}
       <div className="card card-body stack" style={{ marginTop: 16 }}>
         <h2>How it works</h2>
         <p className="muted" style={{ margin: 0 }}>
@@ -140,6 +141,144 @@ export function BackupsPage({ user }: { user: User }) {
         </Modal>
       )}
     </>
+  );
+}
+
+const checkBadge: Record<BackupCheck["status"], [string, string]> = {
+  running: ["badge warn", "checking"],
+  succeeded: ["badge ok", "no errors"],
+  failed: ["badge err", "failed"],
+};
+
+// ChecksCard lists the repositories holding backups with their integrity
+// checks (restic check).
+function ChecksCard({ storages }: { storages: BackupStorage[] }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [shown, setShown] = useState<number | null>(null);
+  const repos = useQuery({
+    queryKey: ["backup-checks"],
+    queryFn: api.backupChecks,
+    refetchInterval: (q) => (q.state.data?.repositories.some((r) => r.last?.status === "running") ? 3000 : 30_000),
+  });
+  const start = async (r: CheckRepository) => {
+    try {
+      const c = await api.startBackupCheck(r.storage_id, r.server_id);
+      qc.invalidateQueries({ queryKey: ["backup-checks"] });
+      setShown(c.check.id);
+    } catch (e) {
+      toast(errorMessage(e), true);
+    }
+  };
+  const storageName = (id: number) => storages.find((s) => s.id === id)?.name ?? `#${id}`;
+  const list = repos.data?.repositories ?? [];
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <div className="card-head">
+        <h2>Integrity checks</h2>
+      </div>
+      {repos.isPending ? (
+        <Loading />
+      ) : repos.error ? (
+        <div className="card-body">
+          <ErrorBox error={repos.error} />
+        </div>
+      ) : list.length === 0 ? (
+        <div className="card-body muted">Nothing to check yet: repositories are checked once backups were made to them.</div>
+      ) : (
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Storage</th>
+                <th>Backups of</th>
+                <th>Last check</th>
+                <th className="hide-sm">Next</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {list.map((r) => (
+                <tr key={`${r.storage_id}-${r.server_id}`}>
+                  <td>
+                    <strong>{storageName(r.storage_id)}</strong>
+                  </td>
+                  <td>{r.server_id ? r.server : <span className="muted">the panel</span>}</td>
+                  <td className="small">
+                    {r.last ? (
+                      <button className="btn sm ghost" style={{ padding: 0, height: "auto" }} onClick={() => setShown(r.last!.id)}>
+                        <span className={checkBadge[r.last.status][0]} title={r.last.error}>
+                          {checkBadge[r.last.status][1]}
+                        </span>{" "}
+                        <span className="faint">{timeAgo(r.last.created_at)}</span>
+                      </button>
+                    ) : (
+                      <span className="faint">never</span>
+                    )}
+                    {r.last?.status === "failed" && r.last.error && (
+                      <div className="small" style={{ color: "var(--err)", overflowWrap: "anywhere" }}>
+                        {r.last.error}
+                      </div>
+                    )}
+                  </td>
+                  <td className="muted small hide-sm">{r.next_at ? formatDate(r.next_at) : ""}</td>
+                  <td className="num">
+                    <button className="btn sm" disabled={r.last?.status === "running"} onClick={() => start(r)}>
+                      <Icon name="check" size={14} /> Check now
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <div className="card-body">
+        <p className="faint small" style={{ margin: 0 }}>
+          Every week each repository's structure is checked and a fiftieth of its data is read back and decrypted, a different part
+          each time, so all of it is read within a year. A failed check is tried again the next day and notified like a failed
+          backup (see Notifications). Checks wait for backups of the same repository, and backups wait for them.
+        </p>
+      </div>
+      {shown !== null && <IntegrityModal id={shown} onClose={() => setShown(null)} />}
+    </div>
+  );
+}
+
+function IntegrityModal({ id, onClose }: { id: number; onClose: () => void }) {
+  const qc = useQueryClient();
+  const d = useQuery({
+    queryKey: ["backup-check", id],
+    queryFn: () => api.backupCheck(id),
+    refetchInterval: (q) => (q.state.data?.check.status === "running" ? 1500 : false),
+  });
+  const c = d.data?.check;
+  const done = !!c && c.status !== "running";
+  useEffect(() => {
+    if (done) qc.invalidateQueries({ queryKey: ["backup-checks"] });
+  }, [done, qc]);
+  return (
+    <Modal
+      wide
+      title={
+        <span className="row">
+          Integrity check #{id} {c && <span className={checkBadge[c.status][0]}>{checkBadge[c.status][1]}</span>}
+        </span>
+      }
+      onClose={onClose}
+    >
+      {d.isPending ? (
+        <Loading />
+      ) : d.error ? (
+        <ErrorBox error={d.error} />
+      ) : (
+        <div className="stack">
+          {c?.error && <div className="alert err small">{c.error}</div>}
+          <LogView text={c?.log || (c?.status === "running" ? "Running…" : "(no output)")} />
+          {c?.read_data && <div className="faint small">Data part read: {c.read_data}</div>}
+        </div>
+      )}
+    </Modal>
   );
 }
 

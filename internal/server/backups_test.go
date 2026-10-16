@@ -53,3 +53,33 @@ func TestBackupSchedule(t *testing.T) {
 		t.Fatal("manual policy due")
 	}
 }
+
+func TestCheckSchedule(t *testing.T) {
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	// A different part each week, all of them within a year.
+	seen := map[string]bool{}
+	for w := range checkParts {
+		seen[checkSubset(now.Add(time.Duration(w)*7*24*time.Hour))] = true
+	}
+	if len(seen) != checkParts || checkSubset(now) != checkSubset(now.Add(time.Hour)) {
+		t.Fatalf("subsets: %v", seen)
+	}
+	for _, c := range []struct {
+		last *store.BackupCheck
+		due  bool
+		next time.Time
+	}{
+		{nil, true, now},
+		{&store.BackupCheck{Status: "running", CreatedAt: now.Add(-30 * 24 * time.Hour)}, false, time.Time{}},
+		{&store.BackupCheck{Status: "succeeded", CreatedAt: now.Add(-6 * 24 * time.Hour)}, false, now.Add(24 * time.Hour)},
+		{&store.BackupCheck{Status: "succeeded", CreatedAt: now.Add(-7 * 24 * time.Hour)}, true, now},
+		// A failed check is tried again the next day.
+		{&store.BackupCheck{Status: "failed", CreatedAt: now.Add(-23 * time.Hour)}, false, now.Add(time.Hour)},
+		{&store.BackupCheck{Status: "failed", CreatedAt: now.Add(-25 * time.Hour)}, true, now.Add(-time.Hour)},
+	} {
+		tg := store.CheckTarget{Last: c.last}
+		if checkDue(tg, now) != c.due || !nextCheck(tg, now).Equal(c.next) {
+			t.Errorf("%+v: due %v next %v", c.last, checkDue(tg, now), nextCheck(tg, now))
+		}
+	}
+}

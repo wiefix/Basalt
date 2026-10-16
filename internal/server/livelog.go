@@ -34,6 +34,13 @@ func (l *liveLog) append(s string) {
 	l.notify()
 }
 
+// text is everything written so far.
+func (l *liveLog) text() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return string(l.buf)
+}
+
 func (l *liveLog) finish() {
 	l.mu.Lock()
 	defer l.mu.Unlock()

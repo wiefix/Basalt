@@ -347,6 +347,29 @@ export interface PanelBackupRun {
   log?: string;
 }
 
+// An integrity check (restic check) of a repository.
+export interface BackupCheck {
+  id: number;
+  storage_id: number;
+  server_id?: number; // absent: the panel's repository
+  trigger: "manual" | "schedule";
+  status: "running" | "succeeded" | "failed";
+  read_data?: string; // the part of the data read back, "n/52"
+  error?: string;
+  created_at: string;
+  finished_at?: string;
+  log?: string;
+}
+
+// A repository holding backups: a server's in a storage, or the panel's (server_id 0).
+export interface CheckRepository {
+  storage_id: number;
+  server_id: number;
+  server: string;
+  last: BackupCheck | null;
+  next_at?: string;
+}
+
 export interface Snapshot {
   id: string;
   time: string;
@@ -932,6 +955,10 @@ export const api = {
   createBackupStorage: (b: StorageInput) => post<{ storage: BackupStorage }>("/api/v1/backup-storages", b),
   updateBackupStorage: (id: number, b: StorageInput) => put<{ storage: BackupStorage }>(`/api/v1/backup-storages/${id}`, b),
   deleteBackupStorage: (id: number) => del<{ ok: boolean }>(`/api/v1/backup-storages/${id}`),
+  backupChecks: () => get<{ repositories: CheckRepository[] }>("/api/v1/backup-checks"),
+  startBackupCheck: (storageId: number, serverId: number) =>
+    post<{ check: BackupCheck }>("/api/v1/backup-checks", { storage_id: storageId, server_id: serverId }),
+  backupCheck: (id: number) => get<{ check: BackupCheck }>(`/api/v1/backup-checks/${id}`),
   backupStoragePassword: (id: number) => get<{ password: string }>(`/api/v1/backup-storages/${id}/password`),
   checkBackupStorage: (id: number, serverId: number) =>
     post<{ ok: boolean; error?: string }>(`/api/v1/backup-storages/${id}/check`, { server_id: serverId }),

@@ -288,6 +288,16 @@ try {
 		t.Fatalf("backup: %v\n%v", done, done["log"])
 	}
 	t.Logf("backup log:\n%s", done["log"])
+	// The integrity check with the distribution's restic.
+	ck := p.call(http.StatusAccepted, "POST", "/api/v1/backup-checks", map[string]any{"storage_id": st["id"], "server_id": mustAtoi(sid)})["check"].(map[string]any)
+	var checked map[string]any
+	eventually(t, "integrity check", func() bool {
+		checked = p.call(200, "GET", "/api/v1/backup-checks/"+jsonID(ck["id"]), nil)["check"].(map[string]any)
+		return checked["status"] != "running"
+	})
+	if checked["status"] != "succeeded" || !strings.Contains(checked["log"].(string), "no errors were found") {
+		t.Fatalf("check: %v\n%v", checked, checked["log"])
+	}
 	mysql := func(sql string) string {
 		out, err := exec.Command("mariadb", "-N", "-e", sql).CombinedOutput()
 		if err != nil {

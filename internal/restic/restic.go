@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -39,6 +40,9 @@ type Runner struct {
 	Line func(string)
 }
 
+// retryLock is how long a command waits for a locked repository.
+const retryLock = "5m"
+
 // ExitNoRepository is restic's exit code for a repository that does not exist.
 const ExitNoRepository = 10
 
@@ -57,7 +61,9 @@ func (e *Error) Is(target error) bool { return target == ErrNoRepository && e.Co
 
 func (r *Runner) command(ctx context.Context, repo Repo, args ...string) *exec.Cmd {
 	full := make([]string, 0, len(args)+2*len(repo.Options)+2)
-	full = append(full, "--repo", repo.Location)
+	// Another restic using the repository (a check holds it exclusively)
+	// or a lock left by a killed run: wait rather than fail at once.
+	full = append(full, "--repo", repo.Location, "--retry-lock", retryLock)
 	for _, o := range repo.Options {
 		full = append(full, "-o", o)
 	}
@@ -263,7 +269,8 @@ type Snapshot struct {
 
 // Snapshots lists the snapshots of host that have all tags.
 func (r *Runner) Snapshots(ctx context.Context, repo Repo, host string, tags []string) ([]Snapshot, error) {
-	args := []string{"snapshots", "--json", "--host", host}
+	// Listing needs no lock: it works while a check holds the repository.
+	args := []string{"snapshots", "--no-lock", "--json", "--host", host}
 	if len(tags) > 0 {
 		args = append(args, "--tag", strings.Join(tags, ","))
 	}
@@ -310,6 +317,43 @@ func (r *Runner) Prune(ctx context.Context, repo Repo) error {
 	return err
 }
 
+// Check verifies the repository: its structure and, with readData (a
+// restic --read-data-subset value such as "3/52"), that part of the data
+// can be read and decrypted. Its findings go to Line.
+func (r *Runner) Check(ctx context.Context, repo Repo, readData string) error {
+	args := []string{"check"}
+	if readData != "" {
+		args = append(args, "--read-data-subset", readData)
+	}
+	cmd := r.command(ctx, repo, args...)
+	// Standard output and error are copied concurrently: one Line at a time.
+	line := r.Line
+	if line != nil {
+		var mu sync.Mutex
+		line = func(s string) {
+			mu.Lock()
+			defer mu.Unlock()
+			r.Line(s)
+		}
+	}
+	out := &tailWriter{line: line, skip: checkNoise}
+	tail := &tailWriter{line: line}
+	cmd.Stdout, cmd.Stderr = out, tail
+	err := cmd.Run()
+	out.flush()
+	tail.flush()
+	if err != nil {
+		return r.wrap(err, tail.last(), nil)
+	}
+	return nil
+}
+
+// checkNoise reports output of restic check nobody needs: progress bars
+// ("[0:01] 50.00%  1 / 2 packs") and where its temporary cache is.
+func checkNoise(s string) bool {
+	return strings.HasPrefix(s, "[") || strings.HasPrefix(s, "using temporary cache")
+}
+
 // RestoreTree makes target hold exactly the folder src of a snapshot:
 // files are restored and files not in the snapshot are deleted.
 func (r *Runner) RestoreTree(ctx context.Context, repo Repo, snapshot, src, target string) error {
@@ -335,6 +379,7 @@ func (r *Runner) Dump(ctx context.Context, repo Repo, snapshot, file string, w i
 // for error messages.
 type tailWriter struct {
 	line    func(string)
+	skip    func(string) bool // lines left out
 	partial []byte
 	lines   []string
 }
@@ -380,6 +425,9 @@ func (t *tailWriter) emit(s string) {
 		}
 	}
 	s = strings.TrimPrefix(s, "Fatal: ")
+	if t.skip != nil && t.skip(s) {
+		return
+	}
 	if t.line != nil {
 		t.line(s)
 	}

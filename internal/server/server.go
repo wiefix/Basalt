@@ -121,13 +121,15 @@ type Server struct {
 
 	live *liveLogs // output of running deployments
 	// backupLive holds the output of running backups and restores.
-	backupLive *liveLogs
-	pendMu     sync.Mutex
-	pending    map[int64]string // per app: commit pushed while a deployment ran
-	stopsMu    sync.Mutex
-	stops      map[int64]*deployStop // running deployments, by ID
-	streamMu   sync.Mutex
-	streams    map[int64]int // open event streams per user
+	backupLive  *liveLogs
+	checkLive   *liveLogs  // output of running integrity checks
+	panelRepoMu sync.Mutex // one restic job on the panel's repository at a time
+	pendMu      sync.Mutex
+	pending     map[int64]string // per app: commit pushed while a deployment ran
+	stopsMu     sync.Mutex
+	stops       map[int64]*deployStop // running deployments, by ID
+	streamMu    sync.Mutex
+	streams     map[int64]int // open event streams per user
 }
 
 func New(o Options) *Server {
@@ -196,6 +198,7 @@ func New(o Options) *Server {
 		hookLimiter:     auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
 		live:            &liveLogs{m: map[int64]*liveLog{}},
 		backupLive:      &liveLogs{m: map[int64]*liveLog{}},
+		checkLive:       &liveLogs{m: map[int64]*liveLog{}},
 		pending:         map[int64]string{},
 		stops:           map[int64]*deployStop{},
 		streams:         map[int64]int{},
@@ -275,6 +278,9 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("DELETE /api/v1/panel-backup/policy", s.requireRole(store.RoleAdmin, s.handleDeletePanelBackupPolicy))
 	rt.Handle("POST /api/v1/panel-backup/run", s.requireRole(store.RoleAdmin, s.handleRunPanelBackup))
 	rt.Handle("GET /api/v1/panel-backup/runs/{bid}", s.requireRole(store.RoleAdmin, s.handleGetPanelBackup))
+	rt.Handle("GET /api/v1/backup-checks", s.requireRole(store.RoleAdmin, s.handleBackupChecks))
+	rt.Handle("POST /api/v1/backup-checks", s.requireRole(store.RoleAdmin, s.handleStartCheck))
+	rt.Handle("GET /api/v1/backup-checks/{cid}", s.requireRole(store.RoleAdmin, s.handleGetCheck))
 	rt.Handle("GET /api/v1/backup-storages", s.requireRole(store.RoleAdmin, s.handleListStorages))
 	rt.Handle("POST /api/v1/backup-storages", s.requireRole(store.RoleAdmin, s.handleCreateStorage))
 	rt.Handle("PUT /api/v1/backup-storages/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateStorage))

@@ -392,6 +392,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return a.backups.Snapshots(ctx, req)
+	case agentproto.TypeBackupVerify:
+		var req agentproto.VerifyRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.backups.Verify(ctx, req, agentproto.StreamSender(ctx)), nil
 	case agentproto.TypeBackupRestore:
 		var req agentproto.RestoreRequest
 		if err := json.Unmarshal(payload, &req); err != nil {

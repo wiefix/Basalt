@@ -124,3 +124,52 @@ func TestVersionAtLeast(t *testing.T) {
 		}
 	}
 }
+
+func TestCheck(t *testing.T) {
+	ctx := context.Background()
+	r := runner(t)
+	var lines []string
+	r.Line = func(s string) { lines = append(lines, s) }
+	repo := Repo{Location: filepath.Join(t.TempDir(), "repo"), Password: "correct horse battery"}
+	if err := r.Check(ctx, repo, ""); !errors.Is(err, ErrNoRepository) {
+		t.Fatalf("check of a missing repository: %v", err)
+	}
+	if _, err := r.Init(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "a"), []byte(strings.Repeat("data ", 1000)), 0o644)
+	if _, err := r.Backup(ctx, repo, BackupOptions{Host: "h", Paths: []string{src}}); err != nil {
+		t.Fatal(err)
+	}
+	lines = nil
+	if err := r.Check(ctx, repo, "1/1"); err != nil {
+		t.Fatalf("check: %v (%q)", err, lines)
+	}
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "no errors were found") || strings.Contains(joined, "[0:") {
+		t.Fatalf("check output: %q", lines)
+	}
+	// A damaged pack file is found when the data is read.
+	packs, _ := filepath.Glob(filepath.Join(repo.Location, "data", "*", "*"))
+	if len(packs) == 0 {
+		t.Fatal("no pack files")
+	}
+	for _, p := range packs {
+		os.Chmod(p, 0o644)
+		f, err := os.OpenFile(p, os.O_WRONLY, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.WriteAt([]byte("XXXX"), 40)
+		f.Close()
+	}
+	lines = nil
+	err := r.Check(ctx, repo, "1/1")
+	if err == nil || !strings.Contains(err.Error(), "repository contains errors") {
+		t.Fatalf("damaged repository: %v", err)
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "pack ") {
+		t.Fatalf("findings not in the output: %q", lines)
+	}
+}

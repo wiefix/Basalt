@@ -144,6 +144,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	if err := db.FailUnfinishedPanelBackups(ctx); err != nil {
 		return err
 	}
+	if err := db.FailUnfinishedBackupChecks(ctx); err != nil {
+		return err
+	}
 	if n, err := db.FailUnfinishedBackups(ctx); err != nil {
 		return err
 	} else if n > 0 {

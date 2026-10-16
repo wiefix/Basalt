@@ -39,7 +39,7 @@ var notificationEvents = []struct {
 	{EventHealthDown, "A health check goes down"},
 	{EventHealthUp, "A health check is back up"},
 	{EventDeployFailed, "A deployment fails"},
-	{EventBackupFailed, "A backup fails (sites, apps, the panel)"},
+	{EventBackupFailed, "A backup or a backup integrity check fails"},
 	{EventServerDown, "A server's agent has been offline for 5 minutes"},
 	{EventServerUp, "A server reported offline is back"},
 	{EventMailProblem, "The mail deliverability check finds a new problem"},

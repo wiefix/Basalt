@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,7 +35,7 @@ type backupManager struct {
 
 	slots chan struct{}
 	lmu   sync.Mutex
-	locks map[string]*sync.Mutex // by resource
+	locks map[string]*sync.Mutex // by resource, and by repository ("repo:…")
 }
 
 func newBackupManager(cfg Config, sites *sitesManager, apps *appsManager, log *slog.Logger) *backupManager {
@@ -52,6 +53,30 @@ func (b *backupManager) lock(resource string) func() {
 	b.lmu.Unlock()
 	l.Lock()
 	return l.Unlock
+}
+
+// lockRepo takes the repository for one job at a time: restic's forget,
+// prune and check lock it exclusively, and a backup running meanwhile would
+// fail. It logs when it has to wait.
+func (b *backupManager) lockRepo(spec agentproto.BackupRepo, lg *deployLog) func() {
+	key := "repo:" + repoKey(spec)
+	b.lmu.Lock()
+	l := b.locks[key]
+	if l == nil {
+		l = &sync.Mutex{}
+		b.locks[key] = l
+	}
+	b.lmu.Unlock()
+	if !l.TryLock() {
+		lg.printf("Waiting for the repository: another backup or an integrity check is using it")
+		l.Lock()
+	}
+	return l.Unlock
+}
+
+// repoKey identifies a repository by its location.
+func repoKey(r agentproto.BackupRepo) string {
+	return strings.Join([]string{r.Kind, r.Endpoint, r.Bucket, r.Host, strconv.Itoa(r.Port), r.User, r.Path}, "\x00")
 }
 
 // Version reports the restic version, "" when backups cannot run here.
@@ -162,9 +187,10 @@ func (b *backupManager) Run(ctx context.Context, req agentproto.BackupRequest, s
 	if err != nil {
 		return fail(err)
 	}
+	defer b.lock(req.Resource)()
+	defer b.lockRepo(req.Repo, &lg)()
 	b.slots <- struct{}{}
 	defer func() { <-b.slots }()
-	defer b.lock(req.Resource)()
 
 	r := b.runner(func(s string) { lg.printf("restic: %s", s) })
 	lg.printf("Opening the repository")
@@ -222,6 +248,40 @@ func (b *backupManager) Run(ctx context.Context, req agentproto.BackupRequest, s
 	}
 	lg.printf("Backup finished")
 	return agentproto.BackupResponse{OK: true, Log: lg.String(), Snapshots: snaps}
+}
+
+// Verify checks the integrity of a repository with restic check.
+func (b *backupManager) Verify(ctx context.Context, req agentproto.VerifyRequest, stream func(any) error) agentproto.VerifyResponse {
+	lg := deployLog{stream: stream}
+	fail := func(err error) agentproto.VerifyResponse {
+		lg.forceWrite(fmt.Sprintf("%s Check failed: %v\n", time.Now().UTC().Format("15:04:05"), err))
+		return agentproto.VerifyResponse{Error: err.Error(), Log: lg.String()}
+	}
+	if err := req.Validate(); err != nil {
+		return fail(err)
+	}
+	repo, err := b.repo(req.Repo)
+	if err != nil {
+		return fail(err)
+	}
+	defer b.lockRepo(req.Repo, &lg)()
+	b.slots <- struct{}{}
+	defer func() { <-b.slots }()
+	if req.ReadData != "" {
+		lg.printf("Checking the repository and reading part %s of its data", req.ReadData)
+	} else {
+		lg.printf("Checking the repository")
+	}
+	err = b.runner(func(s string) { lg.printf("restic: %s", s) }).Check(ctx, repo, req.ReadData)
+	if errors.Is(err, restic.ErrNoRepository) {
+		lg.printf("restic finds no repository at this location")
+		return agentproto.VerifyResponse{OK: true, Empty: true, Log: lg.String()}
+	}
+	if err != nil {
+		return fail(err)
+	}
+	lg.printf("Check finished: no errors")
+	return agentproto.VerifyResponse{OK: true, Log: lg.String()}
 }
 
 // dumpCommand dumps a database consistently without locking its tables.
@@ -305,9 +365,10 @@ func (b *backupManager) Restore(ctx context.Context, req agentproto.RestoreReque
 	if err != nil {
 		return fail(err)
 	}
+	defer b.lock(req.Resource)()
+	defer b.lockRepo(req.Repo, &lg)()
 	b.slots <- struct{}{}
 	defer func() { <-b.slots }()
-	defer b.lock(req.Resource)()
 	r := b.runner(func(s string) { lg.printf("restic: %s", s) })
 	for _, it := range req.Items {
 		switch it.Item.Kind {

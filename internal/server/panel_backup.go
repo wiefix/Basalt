@@ -296,7 +296,9 @@ func (s *Server) runPanelBackup(b *store.PanelBackup, st *store.BackupStorage, p
 	ctx, cancel := context.WithTimeout(context.Background(), backupTimeout)
 	defer cancel()
 	lg := &deployLogLines{}
+	s.panelRepoMu.Lock()
 	snapshot, bytes, err := s.panelBackup(ctx, st, pol, wrapped, lg)
+	s.panelRepoMu.Unlock()
 	msg := ""
 	if err != nil {
 		msg = err.Error()

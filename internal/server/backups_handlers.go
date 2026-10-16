@@ -989,6 +989,7 @@ func (s *Server) backupLoop(ctx context.Context) {
 	for {
 		s.runDueBackups(ctx)
 		s.runDuePanelBackup(ctx)
+		s.runDueChecks(ctx)
 		select {
 		case <-ctx.Done():
 			return
