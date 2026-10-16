@@ -314,3 +314,30 @@ func must[T any](v T, err error) T {
 	}
 	return v
 }
+
+// TestInterruptKeepsReply: an interrupted request still returns the other
+// side's reply (what it did on being stopped).
+func TestInterruptKeepsReply(t *testing.T) {
+	started := make(chan struct{})
+	_, b, ctx := run(t, func(ctx context.Context, typ string, p json.RawMessage) (any, error) {
+		if typ != "work" {
+			return echo(ctx, typ, p)
+		}
+		close(started)
+		<-ctx.Done()
+		time.Sleep(50 * time.Millisecond) // cleaning up
+		return map[string]string{"outcome": "rolled back"}, nil
+	}, echo)
+
+	stop := make(chan struct{})
+	go func() { <-started; close(stop) }()
+	var resp map[string]string
+	if err := b.Call(WithInterrupt(ctx, stop), "work", nil, &resp); err != nil || resp["outcome"] != "rolled back" {
+		t.Fatalf("Call = %v, %v", resp, err)
+	}
+	// Not interrupted: a normal reply.
+	resp = nil
+	if err := b.Call(WithInterrupt(ctx, make(chan struct{})), "plain", nil, &resp); err != nil || resp["type"] != "plain" {
+		t.Fatalf("plain: %v %v", resp, err)
+	}
+}

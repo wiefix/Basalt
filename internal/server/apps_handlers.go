@@ -615,6 +615,31 @@ func (s *Server) handleGetDeployment(w http.ResponseWriter, r *http.Request, p *
 	writeJSON(w, http.StatusOK, map[string]any{"deployment": viewDeployment(d, true)})
 }
 
+// handleCancelDeployment stops a running deployment: the server undoes
+// what it started, and the app keeps running its previous deployment.
+func (s *Server) handleCancelDeployment(w http.ResponseWriter, r *http.Request, p *principal) {
+	app, ok := s.pathApp(w, r)
+	if !ok {
+		return
+	}
+	id, _ := strconv.ParseInt(r.PathValue("did"), 10, 64)
+	d, err := s.db.DeploymentByID(r.Context(), app.ID, id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "deployment not found")
+		return
+	}
+	if err != nil {
+		s.internalError(w, r, "load deployment", err)
+		return
+	}
+	if d.Status != "running" || !s.stopDeployment(d.ID, p.user.Name) {
+		writeError(w, http.StatusConflict, "the deployment is not running")
+		return
+	}
+	s.audit(r, &p.user.ID, "app.deploy_canceled", map[string]any{"app_id": app.ID, "deployment_id": d.ID})
+	writeJSON(w, http.StatusAccepted, map[string]any{})
+}
+
 func (s *Server) handleAppStatus(w http.ResponseWriter, r *http.Request, p *principal) {
 	app, ok := s.pathApp(w, r)
 	if !ok {

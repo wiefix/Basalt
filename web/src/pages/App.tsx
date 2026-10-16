@@ -169,9 +169,12 @@ function Overview({ app, user, placements }: { app: App; user: User; placements:
             {st?.oom_killed && <span className="badge err">out of memory</span>}
           </div>
           {can(user, "member") && (
-            <button className="btn primary" onClick={() => deploy.mutate(undefined)} disabled={deploy.isPending || running}>
-              <Icon name="rocket" /> {running ? "Deploying…" : "Deploy"}
-            </button>
+            <div className="row">
+              {runningDep && <CancelButton appId={app.id} deploymentId={runningDep.id} />}
+              <button className="btn primary" onClick={() => deploy.mutate(undefined)} disabled={deploy.isPending || running}>
+                <Icon name="rocket" /> {running ? "Deploying…" : "Deploy"}
+              </button>
+            </div>
           )}
         </div>
         <p className="faint small" style={{ marginBottom: 0 }}>
@@ -310,12 +313,40 @@ function Overview({ app, user, placements }: { app: App; user: User; placements:
           </div>
         )}
       </div>
-      {shown !== null && <DeploymentModal appId={app.id} id={shown} onClose={() => setShown(null)} />}
+      {shown !== null && <DeploymentModal appId={app.id} id={shown} canCancel={can(user, "member")} onClose={() => setShown(null)} />}
     </div>
   );
 }
 
-function DeploymentModal({ appId, id, onClose }: { appId: number; id: number; onClose: () => void }) {
+// CancelButton stops a running deployment: the server undoes what it
+// started and the previous deployment keeps running.
+function CancelButton({ appId, deploymentId }: { appId: number; deploymentId: number }) {
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [sent, setSent] = useState(false);
+  const cancel = async () => {
+    const ok = await confirm({
+      title: `Cancel deployment #${deploymentId}?`,
+      body: <p>What it started is removed and the current version keeps running. Once traffic has switched to the new version, the deployment completes anyway.</p>,
+      confirm: "Cancel deployment",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.cancelDeployment(appId, deploymentId);
+      setSent(true);
+    } catch (e) {
+      toast(errorMessage(e), true);
+    }
+  };
+  return (
+    <button className="btn danger" onClick={cancel} disabled={sent}>
+      {sent ? "Canceling…" : "Cancel"}
+    </button>
+  );
+}
+
+function DeploymentModal({ appId, id, canCancel, onClose }: { appId: number; id: number; canCancel: boolean; onClose: () => void }) {
   const qc = useQueryClient();
   const d = useQuery({ queryKey: ["deployment", appId, id], queryFn: () => api.deployment(appId, id) });
   const dep = d.data?.deployment;
@@ -338,6 +369,7 @@ function DeploymentModal({ appId, id, onClose }: { appId: number; id: number; on
       title={
         <span className="row">
           Deployment #{id} {dep && <DeployBadge status={dep.status} />}
+          {following && canCancel && <CancelButton appId={appId} deploymentId={id} />}
         </span>
       }
     >

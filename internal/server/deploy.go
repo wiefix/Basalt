@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/docker"
@@ -179,9 +180,50 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		notes += "Warning: " + name + " is offline; it keeps running the previous deployment.\n"
 	}
 	live.append(notes)
-	go s.runDeployment(targets, dep.ID, spec, live, deploymentExtras{
+	stop := s.trackDeployment(dep.ID)
+	go s.runDeployment(targets, dep.ID, spec, live, stop, deploymentExtras{
 		commitMessage: keepMessage, compose: composeContent, notes: notes})
 	return dep, nil
+}
+
+// deployStop lets a running deployment be canceled.
+type deployStop struct {
+	ch   chan struct{}
+	once sync.Once
+	by   string // who canceled it
+}
+
+func (s *Server) trackDeployment(id int64) *deployStop {
+	stop := &deployStop{ch: make(chan struct{})}
+	s.stopsMu.Lock()
+	s.stops[id] = stop
+	s.stopsMu.Unlock()
+	return stop
+}
+
+// stopDeployment asks a running deployment to stop; false if it is not
+// running (here).
+func (s *Server) stopDeployment(id int64, by string) bool {
+	s.stopsMu.Lock()
+	stop := s.stops[id]
+	s.stopsMu.Unlock()
+	if stop == nil {
+		return false
+	}
+	stop.once.Do(func() {
+		stop.by = by
+		close(stop.ch)
+	})
+	return true
+}
+
+func (st *deployStop) stopped() bool {
+	select {
+	case <-st.ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // deploymentExtras is what the panel adds to an agent's report.
@@ -225,14 +267,34 @@ type deployTarget struct {
 	name string
 }
 
-func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentproto.AppSpec, live *liveLog, x deploymentExtras) {
+func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentproto.AppSpec, live *liveLog, stop *deployStop, x deploymentExtras) {
 	ctx, cancel := context.WithTimeout(context.Background(), deployTimeout)
 	defer cancel()
+	defer func() {
+		s.stopsMu.Lock()
+		delete(s.stops, depID)
+		s.stopsMu.Unlock()
+	}()
+	// A cancellation is passed on to the agent, which undoes what it
+	// started and still reports (once traffic has switched, it completes).
+	ctx = agentproto.WithInterrupt(ctx, stop.ch)
+	go func() {
+		select {
+		case <-stop.ch:
+			live.append("--- Cancel requested by " + stop.by + " ---\n")
+		case <-ctx.Done():
+		}
+	}()
 	// One server after the other: the first that fails stops the rest, so
 	// they keep the previous version rather than a half-tested new one.
 	var resp agentproto.AppDeployResponse
 	var log strings.Builder
 	for i, t := range targets {
+		if i > 0 && stop.stopped() {
+			resp.OK = false
+			resp.Error = fmt.Sprintf("canceled by %s: %s and the servers after it keep the previous deployment", stop.by, t.name)
+			break
+		}
 		if t.name != "" {
 			head := "=== " + t.name + " ===\n"
 			live.append(head)
@@ -261,6 +323,9 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 		}
 		if !r.OK {
 			resp.OK = false
+			if stop.stopped() {
+				r.Error = "canceled by " + stop.by
+			}
 			if t.name != "" {
 				resp.Error = t.name + ": " + r.Error
 			} else {
@@ -308,7 +373,7 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 		s.log.Error("write audit log", "err", err)
 	}
 	s.log.Info("deployment finished", "app_id", spec.AppID, "deployment_id", depID, "ok", resp.OK)
-	if !resp.OK {
+	if !resp.OK && !stop.stopped() {
 		name, link := fmt.Sprintf("app #%d", spec.AppID), fmt.Sprintf("/apps/%d", spec.AppID)
 		if app, err := s.db.AppByID(context.Background(), spec.AppID); err == nil {
 			name, link = app.Name, appPage(app)

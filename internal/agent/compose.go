@@ -140,6 +140,9 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 			active[id] = svc.Name
 		}
 	}
+	// Every service is ready: the deployment completes, a cancellation no
+	// longer stops it halfway.
+	ctx = context.WithoutCancel(ctx)
 	// Join the networks of the apps that use this one (a database). The
 	// deployment has succeeded by now; a failure here is reported, and the
 	// next deployment or link change tries again.

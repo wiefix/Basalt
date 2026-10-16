@@ -161,9 +161,19 @@ func (l *deployLog) forceWrite(s string) {
 // the proxy to it and stops the previous one. If the new container fails,
 // the previous one keeps serving. stream (may be nil) receives the log as
 // it is written.
+// errDeployCanceled reports a deployment the panel stopped.
+var errDeployCanceled = errors.New("deployment canceled")
+
 func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec, stream func(any) error) agentproto.AppDeployResponse {
 	lg := deployLog{stream: stream}
+	canceled := ctx.Done()
 	fail := func(err error) agentproto.AppDeployResponse {
+		select {
+		case <-canceled:
+			// Stopped by the panel; whatever was started is undone.
+			err = errDeployCanceled
+		default:
+		}
 		lg.forceWrite(fmt.Sprintf("%s Deployment failed: %v\n", time.Now().UTC().Format("15:04:05"), err))
 		return agentproto.AppDeployResponse{Error: err.Error(), Log: lg.String()}
 	}
@@ -228,6 +238,9 @@ func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec, strea
 		dc.ContainerRemove(context.WithoutCancel(ctx), id, true)
 		return fail(err)
 	}
+	// Past this point the deployment completes: stopping now would leave
+	// traffic on the new container with the old one still running.
+	ctx = context.WithoutCancel(ctx)
 
 	// The new container has the highest deployment ID, so it becomes the
 	// upstream; the proxy switches before the old one stops.

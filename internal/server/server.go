@@ -124,6 +124,8 @@ type Server struct {
 	backupLive *liveLogs
 	pendMu     sync.Mutex
 	pending    map[int64]string // per app: commit pushed while a deployment ran
+	stopsMu    sync.Mutex
+	stops      map[int64]*deployStop // running deployments, by ID
 	streamMu   sync.Mutex
 	streams    map[int64]int // open event streams per user
 }
@@ -195,6 +197,7 @@ func New(o Options) *Server {
 		live:            &liveLogs{m: map[int64]*liveLog{}},
 		backupLive:      &liveLogs{m: map[int64]*liveLog{}},
 		pending:         map[int64]string{},
+		stops:           map[int64]*deployStop{},
 		streams:         map[int64]int{},
 	}
 }
@@ -356,6 +359,7 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("POST /api/v1/apps/{id}/deploy", s.requireRole(store.RoleMember, s.handleDeployApp))
 	rt.Handle("GET /api/v1/apps/{id}/deployments", s.requireRole(store.RoleViewer, s.handleListDeployments))
 	rt.Handle("GET /api/v1/apps/{id}/deployments/{did}", s.requireRole(store.RoleViewer, s.handleGetDeployment))
+	rt.Handle("POST /api/v1/apps/{id}/deployments/{did}/cancel", s.requireRole(store.RoleMember, s.handleCancelDeployment))
 	rt.Handle("GET /api/v1/apps/{id}/deployments/{did}/stream", s.requireRole(store.RoleViewer, s.handleDeploymentStream))
 	rt.Handle("GET /api/v1/apps/{id}/metrics", s.requireRole(store.RoleViewer, s.handleAppMetrics))
 	rt.Handle("GET /api/v1/apps/{id}/status", s.requireRole(store.RoleViewer, s.handleAppStatus))

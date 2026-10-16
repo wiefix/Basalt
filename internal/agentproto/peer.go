@@ -352,8 +352,14 @@ func (p *Peer) Stream(ctx context.Context, msgType string, req, resp any, fn fun
 	if sink != nil {
 		frames, overflow = sink.frames, sink.overflow
 	}
+	interrupt, _ := ctx.Value(interruptKey{}).(<-chan struct{})
 	for {
 		select {
+		case <-interrupt:
+			// Ask the other side to stop, and keep waiting for its reply:
+			// it reports what it did (and undid).
+			p.cancel(id)
+			interrupt = nil
 		case f := <-frames:
 			if err := fn(f); err != nil {
 				p.cancel(id)
@@ -388,6 +394,15 @@ func (p *Peer) Stream(ctx context.Context, msgType string, req, resp any, fn fun
 			return ErrClosed
 		}
 	}
+}
+
+type interruptKey struct{}
+
+// WithInterrupt returns a context whose requests (Stream, Call) are
+// interrupted when ch closes: the other side is asked to stop, and the
+// caller still receives its reply. Cancelling ctx itself abandons the reply.
+func WithInterrupt(ctx context.Context, ch <-chan struct{}) context.Context {
+	return context.WithValue(ctx, interruptKey{}, ch)
 }
 
 // cancel tells the other side to stop serving request id (best effort).
