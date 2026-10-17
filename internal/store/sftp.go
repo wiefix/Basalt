@@ -66,6 +66,52 @@ func (db *DB) DeleteSFTPUser(ctx context.Context, siteID, id int64) error {
 	return tx.Commit()
 }
 
+// UpdateSFTPUser changes an account's password hash and/or public keys
+// (nil: unchanged). The account must keep a way to log in.
+func (db *DB) UpdateSFTPUser(ctx context.Context, siteID, id int64, passwordHash *string, keys *[]string) (*SFTPUser, error) {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT `+sftpColumns+` FROM sftp_users u WHERE u.id = ? AND u.site_id = ?`, id, siteID)
+	if err != nil {
+		return nil, err
+	}
+	list, err := scanSFTPUsers(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(list) == 0 {
+		return nil, ErrNotFound
+	}
+	u := list[0]
+	if passwordHash != nil {
+		u.PasswordHash = *passwordHash
+	}
+	if keys != nil {
+		u.PublicKeys = *keys
+	}
+	if u.PasswordHash == "" && len(u.PublicKeys) == 0 {
+		return nil, ErrNoSFTPLogin
+	}
+	if u.PublicKeys == nil {
+		u.PublicKeys = []string{}
+	}
+	keysJSON, _ := json.Marshal(u.PublicKeys)
+	if _, err := tx.ExecContext(ctx, `UPDATE sftp_users SET password_hash = ?, public_keys = ? WHERE id = ?`,
+		u.PasswordHash, string(keysJSON), id); err != nil {
+		return nil, err
+	}
+	if err := bumpSFTPRevision(ctx, tx, siteID); err != nil {
+		return nil, err
+	}
+	return u, tx.Commit()
+}
+
+// ErrNoSFTPLogin: an account would have neither a password nor a key.
+var ErrNoSFTPLogin = errors.New("an SFTP account needs a password or at least one public key")
+
 // BumpSFTPRevisionForServer marks the server's SFTP state as changed, e.g.
 // after a site (and with it its accounts) was deleted.
 func (db *DB) BumpSFTPRevisionForServer(ctx context.Context, serverID int64) error {

@@ -101,7 +101,18 @@ export interface Site {
   domains: string[];
   tls: "auto" | "internal";
   php_version: string;
+  php_settings: PHPSettings;
   created_at: string;
+}
+
+export interface PHPSettings {
+  memory_mb?: number;
+  upload_mb?: number;
+  max_children?: number;
+  max_execution_time?: number;
+  max_input_vars?: number;
+  display_errors?: boolean;
+  timezone?: string;
 }
 
 export interface FileEntry {
@@ -405,6 +416,12 @@ export interface UpdatesInfo {
     by: string;
     servers: { id: number; name: string; status: string; error?: string }[];
   } | null;
+}
+
+export interface SFTPBan {
+  ip: string;
+  until: string;
+  strikes: number;
 }
 
 export interface SnapshotEntry {
@@ -865,6 +882,8 @@ export const api = {
   setSiteDomains: (id: number, domains: string[]) =>
     put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/domains`, { domains }),
   setSitePHP: (id: number, version: string) => put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/php`, { version }),
+  setSitePHPSettings: (id: number, s: PHPSettings) => put<{ site: Site }>(`/api/v1/sites/${id}/php-settings`, s),
+  phpLog: (id: number) => get<{ log: string; size: number; truncated?: boolean; path: string }>(`/api/v1/sites/${id}/php-log`),
   deleteSite: (id: number) => del<{ sync: Sync; cleanup_error?: string }>(`/api/v1/sites/${id}`),
 
   files: (siteId: number, path: string) =>
@@ -1054,7 +1073,11 @@ export const api = {
       `/api/v1/sites/${siteId}/sftp-users`,
       b,
     ),
+  updateSFTPUser: (siteId: number, id: number, b: { password?: string; public_keys?: string[] }) =>
+    put<{ user: SFTPUser; password?: string; sync_error?: string }>(`/api/v1/sites/${siteId}/sftp-users/${id}`, b),
   deleteSFTPUser: (siteId: number, id: number) => del<{ ok: boolean }>(`/api/v1/sites/${siteId}/sftp-users/${id}`),
+  sftpBans: (serverId: number) => get<{ bans: SFTPBan[] }>(`/api/v1/servers/${serverId}/sftp-bans`),
+  sftpUnban: (serverId: number, ip: string) => del<{ bans: SFTPBan[] }>(`/api/v1/servers/${serverId}/sftp-bans/${encodeURIComponent(ip)}`),
 };
 
 // upload sends one file with progress reporting (fetch has no upload progress).

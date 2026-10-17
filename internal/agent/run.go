@@ -326,7 +326,7 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		if typ == agentproto.TypeSiteEnsure {
-			return struct{}{}, publicError(a.sites.Ensure(ctx, req.SiteID, req.PHPVersion))
+			return struct{}{}, publicError(a.sites.Ensure(ctx, req.SiteID, req.PHPVersion, req.PHP))
 		}
 		return struct{}{}, publicError(a.sites.Delete(ctx, req.SiteID))
 	case agentproto.TypeSFTPApply:
@@ -335,6 +335,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return struct{}{}, a.sftp.Apply(st)
+	case agentproto.TypeSFTPBans:
+		var req agentproto.SFTPBans
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.sftp.Bans(req)
 	case agentproto.TypeMailAPI:
 		var req agentproto.MailAPI
 		if err := json.Unmarshal(payload, &req); err != nil {

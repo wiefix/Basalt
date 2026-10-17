@@ -1,9 +1,10 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
-import { api, can, type DatabaseCredentials, type Site, type User } from "../api";
+import { api, can, type DatabaseCredentials, type SFTPUser, type Site, type User } from "../api";
 import { FileManager } from "../components/FileManager";
-import { CodeBox, CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useConfirm, useToast } from "../components/ui";
+import { CodeBox, CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useConfirm, useToast } from "../components/ui";
+import { LogView } from "../components/LogView";
 import { SyncBadge } from "./Server";
 import { BackupsTab } from "./BackupsTab";
 
@@ -54,6 +55,7 @@ export function SitePage({ user }: { user: User }) {
         {tab(`/sites/${id}/sftp`, "SFTP")}
         {tab(`/sites/${id}/databases`, "Databases")}
         {tab(`/sites/${id}/backups`, "Backups")}
+        {tab(`/sites/${id}/logs`, "Logs")}
         {can(user, "admin") && tab(`/sites/${id}/settings`, "Settings")}
       </div>
       <Routes>
@@ -62,6 +64,7 @@ export function SitePage({ user }: { user: User }) {
         <Route path="sftp" element={<SFTPTab site={s} user={user} host={server?.last_ip} />} />
         <Route path="databases" element={<DatabasesTab site={s} user={user} />} />
         <Route path="backups" element={<BackupsTab target={{ base: `/api/v1/sites/${s.id}`, name: s.name, siteId: s.id }} user={user} />} />
+        <Route path="logs" element={<LogsTab site={s} />} />
         <Route path="settings" element={<SettingsTab site={s} phpVersions={server?.isolated ? server.php_versions : []} />} />
       </Routes>
     </>
@@ -122,7 +125,8 @@ function SFTPTab({ site, user, host }: { site: Site; user: User; host?: string }
   const confirm = useConfirm();
   const users = useQuery({ queryKey: ["sftp", site.id], queryFn: () => api.sftpUsers(site.id) });
   const [adding, setAdding] = useState(false);
-  const [created, setCreated] = useState<{ username: string; password?: string } | null>(null);
+  const [created, setCreated] = useState<{ username: string; password?: string; changed?: boolean } | null>(null);
+  const [editing, setEditing] = useState<SFTPUser | null>(null);
   const conn = users.data?.connection;
   const hostName = site.domains[0] ?? host ?? "your-server";
 
@@ -143,7 +147,9 @@ function SFTPTab({ site, user, host }: { site: Site; user: User; host?: string }
         <div className="card card-body stack">
           <div className="row">
             <Icon name="check" />
-            <h2>Account {created.username} created</h2>
+            <h2>
+              Account {created.username} {created.changed ? "changed" : "created"}
+            </h2>
           </div>
           {created.password && (
             <>
@@ -202,9 +208,14 @@ function SFTPTab({ site, user, host }: { site: Site; user: User; host?: string }
                   <td className="muted">{formatDate(u.created_at)}</td>
                   <td className="num">
                     {can(user, "admin") && (
-                      <button className="btn sm icon ghost" title="Delete" onClick={() => remove(u.id, u.username)}>
-                        <Icon name="trash" size={14} />
-                      </button>
+                      <div className="row" style={{ justifyContent: "flex-end", gap: 2 }}>
+                        <button className="btn sm icon ghost" title="Change password or keys" onClick={() => setEditing(u)}>
+                          <Icon name="edit" size={14} />
+                        </button>
+                        <button className="btn sm icon ghost" title="Delete" onClick={() => remove(u.id, u.username)}>
+                          <Icon name="trash" size={14} />
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -236,6 +247,19 @@ function SFTPTab({ site, user, host }: { site: Site; user: User; host?: string }
         </div>
       )}
 
+      {editing && (
+        <EditSFTPModal
+          site={site}
+          account={editing}
+          onClose={() => setEditing(null)}
+          onSaved={(c) => {
+            setEditing(null);
+            if (c.password) setCreated({ ...c, changed: true });
+            else toast(`${c.username} changed`);
+            qc.invalidateQueries({ queryKey: ["sftp", site.id] });
+          }}
+        />
+      )}
       {adding && (
         <AddSFTPModal
           site={site}
@@ -323,10 +347,89 @@ function AddSFTPModal({
   );
 }
 
+function EditSFTPModal({
+  site,
+  account,
+  onClose,
+  onSaved,
+}: {
+  site: Site;
+  account: SFTPUser;
+  onClose: () => void;
+  onSaved: (c: { username: string; password?: string }) => void;
+}) {
+  const [pw, setPw] = useState<"keep" | "generate" | "password" | "none">("keep");
+  const [password, setPassword] = useState("");
+  const [replaceKeys, setReplaceKeys] = useState(false);
+  const [keys, setKeys] = useState("");
+  const save = useMutation({
+    mutationFn: () => {
+      const b: { password?: string; public_keys?: string[] } = {};
+      if (pw !== "keep") b.password = pw === "generate" ? "" : pw === "password" ? password : "-";
+      if (replaceKeys) b.public_keys = keys.split("\n").map((k) => k.trim()).filter(Boolean);
+      return api.updateSFTPUser(site.id, account.id, b);
+    },
+    onSuccess: (r) => onSaved({ username: r.user.username, password: r.password }),
+  });
+  return (
+    <Modal
+      title={`Change ${account.username}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" form="sftp-edit" disabled={save.isPending || (pw === "keep" && !replaceKeys)}>
+            Save
+          </button>
+        </>
+      }
+    >
+      <form
+        id="sftp-edit"
+        className="form"
+        onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          save.mutate();
+        }}
+      >
+        <ErrorBox error={save.error} />
+        <Field label="Password" help={account.has_password ? "The account has a password now." : "The account signs in with keys only now."}>
+          <select className="input" value={pw} onChange={(e) => setPw(e.target.value as typeof pw)}>
+            <option value="keep">Keep as it is</option>
+            <option value="generate">Generate a new strong password</option>
+            <option value="password">Choose a new password</option>
+            {account.has_password && <option value="none">Remove it (keys only)</option>}
+          </select>
+        </Field>
+        {pw === "password" && (
+          <Field label="New password" help="At least 12 characters.">
+            <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} minLength={12} required autoComplete="new-password" />
+          </Field>
+        )}
+        <label className="row small">
+          <input type="checkbox" checked={replaceKeys} onChange={(e) => setReplaceKeys(e.target.checked)} />
+          Replace the public keys ({account.public_keys.length} now)
+        </label>
+        {replaceKeys && (
+          <Field label="Public keys" help="One per line; leave empty to remove all keys.">
+            <textarea className="input mono" rows={3} value={keys} onChange={(e) => setKeys(e.target.value)} placeholder="ssh-ed25519 AAAA… you@laptop" />
+          </Field>
+        )}
+        <p className="faint small" style={{ margin: 0 }}>
+          Sessions already open stay open; new sign-ins use the new password and keys.
+        </p>
+      </form>
+    </Modal>
+  );
+}
+
 function SettingsTab({ site, phpVersions }: { site: Site; phpVersions: string[] }) {
   return (
     <div className="stack" style={{ maxWidth: 640 }}>
       <RuntimeCard site={site} phpVersions={phpVersions} />
+      {site.php_version && <PHPOptionsCard site={site} />}
       <DeleteCard site={site} />
     </div>
   );
@@ -374,6 +477,119 @@ function RuntimeCard({ site, phpVersions }: { site: Site; phpVersions: string[] 
         </button>
       </div>
     </form>
+  );
+}
+
+// PHPOptionsCard edits the PHP options a site may change.
+function PHPOptionsCard({ site }: { site: Site }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const cur = site.php_settings ?? {};
+  const [f, setF] = useState({
+    memory: String(cur.memory_mb ?? ""),
+    upload: String(cur.upload_mb ?? ""),
+    children: String(cur.max_children ?? ""),
+    time: String(cur.max_execution_time ?? ""),
+    vars: String(cur.max_input_vars ?? ""),
+    timezone: cur.timezone ?? "",
+    display: !!cur.display_errors,
+  });
+  const n = (v: string) => (v.trim() === "" ? undefined : Number(v));
+  const save = useMutation({
+    mutationFn: () =>
+      api.setSitePHPSettings(site.id, {
+        memory_mb: n(f.memory),
+        upload_mb: n(f.upload),
+        max_children: n(f.children),
+        max_execution_time: n(f.time),
+        max_input_vars: n(f.vars),
+        timezone: f.timezone.trim() || undefined,
+        display_errors: f.display || undefined,
+      }),
+    onSuccess: (r) => {
+      qc.setQueryData(["site", site.id], (old: { site: Site } | undefined) => (old ? { ...old, site: r.site } : old));
+      toast("PHP options applied");
+    },
+  });
+  const num = (k: keyof typeof f, label: string, placeholder: string, help: string) => (
+    <Field label={label} help={help}>
+      <input
+        className="input mono"
+        type="number"
+        value={f[k] as string}
+        placeholder={placeholder}
+        onChange={(e) => setF({ ...f, [k]: e.target.value })}
+      />
+    </Field>
+  );
+  return (
+    <form
+      className="card card-body form"
+      onSubmit={(e: FormEvent) => {
+        e.preventDefault();
+        save.mutate();
+      }}
+    >
+      <h2>PHP options</h2>
+      <ErrorBox error={save.error} />
+      <div className="grid-2">
+        {num("memory", "Memory limit, MB", "256", "memory_limit, 32–8192")}
+        {num("upload", "Largest upload, MB", "64", "upload_max_filesize and post_max_size")}
+        {num("time", "Time limit, seconds", "30", "max_execution_time, 1–3600")}
+        {num("children", "PHP processes at once", "10", "requests served in parallel, 1–200")}
+        {num("vars", "Input variables", "1000", "max_input_vars, 100–100000")}
+        <Field label="Timezone" help="date.timezone, e.g. Europe/Berlin">
+          <input className="input mono" value={f.timezone} placeholder="UTC" onChange={(e) => setF({ ...f, timezone: e.target.value })} />
+        </Field>
+      </div>
+      <label className="row small">
+        <input type="checkbox" checked={f.display} onChange={(e) => setF({ ...f, display: e.target.checked })} />
+        Show PHP errors in pages (for development; errors always go to the PHP log)
+      </label>
+      <div>
+        <button className="btn primary" disabled={save.isPending}>
+          Apply
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// LogsTab shows the end of the site's PHP error log.
+function LogsTab({ site }: { site: Site }) {
+  const log = useQuery({ queryKey: ["php-log", site.id], queryFn: () => api.phpLog(site.id), refetchInterval: 10_000 });
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>PHP errors</h2>
+        <div className="row">
+          {log.data && log.data.size > 0 && (
+            <a className="btn sm" href={api.downloadUrl(site.id, log.data.path)}>
+              <Icon name="download" size={14} /> Download ({formatBytes(log.data.size)})
+            </a>
+          )}
+          <button className="btn sm" onClick={() => log.refetch()} disabled={log.isFetching}>
+            <Icon name="refresh" size={14} /> Refresh
+          </button>
+        </div>
+      </div>
+      <div className="card-body stack">
+        {log.isPending ? (
+          <Loading />
+        ) : log.error ? (
+          <ErrorBox error={log.error} />
+        ) : !site.php_version && !log.data.log ? (
+          <div className="empty small">This is a static site: it runs no PHP.</div>
+        ) : !log.data.log ? (
+          <div className="empty small">No PHP errors logged.</div>
+        ) : (
+          <>
+            {log.data.truncated && <p className="faint small" style={{ margin: 0 }}>The last 256 KB of the log; download it for all of it.</p>}
+            <LogView text={log.data.log} tall />
+          </>
+        )}
+      </div>
+    </div>
   );
 }
 

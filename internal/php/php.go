@@ -90,9 +90,7 @@ type Pool struct {
 	User        string // site system user (also its group)
 	SocketGroup string // group allowed to connect (the proxy's group)
 	SiteDir     string // /srv/basalt/sites/<id>
-	MaxChildren int
-	MemoryMB    int
-	UploadMB    int
+	Settings
 }
 
 var safeValue = regexp.MustCompile(`^[A-Za-z0-9_./-]+$`)
@@ -111,9 +109,17 @@ func (h *Host) Render(p Pool) (string, error) {
 	if !filepath.IsAbs(p.SiteDir) || p.SiteID <= 0 {
 		return "", errors.New("invalid site")
 	}
+	if err := p.Settings.Validate(); err != nil {
+		return "", err
+	}
 	p.MaxChildren = clamp(p.MaxChildren, 1, 200, 10)
 	p.MemoryMB = clamp(p.MemoryMB, 32, 8192, 256)
 	p.UploadMB = clamp(p.UploadMB, 1, 4096, 64)
+	p.MaxExecutionTime = clamp(p.MaxExecutionTime, 1, 3600, 30)
+	p.MaxInputVars = clamp(p.MaxInputVars, 100, 100000, 1000)
+	if p.Timezone == "" {
+		p.Timezone = "UTC"
+	}
 
 	d := p.SiteDir
 	var b strings.Builder
@@ -143,6 +149,12 @@ func (h *Host) Render(p Pool) (string, error) {
 	line("php_admin_value[memory_limit]", strconv.Itoa(p.MemoryMB)+"M")
 	line("php_value[upload_max_filesize]", strconv.Itoa(p.UploadMB)+"M")
 	line("php_value[post_max_size]", strconv.Itoa(p.UploadMB)+"M")
+	line("php_value[max_execution_time]", strconv.Itoa(p.MaxExecutionTime))
+	line("php_value[max_input_vars]", strconv.Itoa(p.MaxInputVars))
+	line("php_value[date.timezone]", p.Timezone)
+	line("php_flag[display_errors]", map[bool]string{true: "on", false: "off"}[p.DisplayErrors])
+	// The FastCGI request must not outlive PHP's own limit by much.
+	line("request_terminate_timeout", strconv.Itoa(p.MaxExecutionTime+30)+"s")
 	return b.String(), nil
 }
 

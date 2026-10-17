@@ -107,7 +107,7 @@ func (m *sitesManager) hostIdentity(ctx context.Context) error {
 
 // Ensure creates the site's directories, system user and PHP pool
 // (idempotent). A new, empty public directory gets a placeholder page.
-func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string) error {
+func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string, settings php.Settings) error {
 	d, err := m.dir(id)
 	if err != nil {
 		return err
@@ -181,7 +181,7 @@ func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string) 
 	}
 	return m.php.Apply(ctx, php.Pool{
 		SiteID: id, Version: phpVersion, User: sysuser.SiteUser(id),
-		SocketGroup: m.wwwGroup, SiteDir: d,
+		SocketGroup: m.wwwGroup, SiteDir: d, Settings: settings,
 	})
 }
 

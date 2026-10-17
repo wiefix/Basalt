@@ -22,6 +22,7 @@ import (
 )
 
 type fixture struct {
+	srv     *Server
 	addr    string
 	base    string
 	hostKey ssh.PublicKey
@@ -61,7 +62,7 @@ func start(t *testing.T) *fixture {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go srv.Serve(ctx, ln)
-	return &fixture{addr: ln.Addr().String(), base: base, hostKey: hostKey.PublicKey(), userKey: userKey}
+	return &fixture{srv: srv, addr: ln.Addr().String(), base: base, hostKey: hostKey.PublicKey(), userKey: userKey}
 }
 
 func (f *fixture) dial(user string, auths ...ssh.AuthMethod) (*ssh.Client, error) {

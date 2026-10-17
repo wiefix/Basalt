@@ -3,10 +3,12 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
 
+	"github.com/wiefix/basalt/internal/php"
 	"github.com/wiefix/basalt/internal/proxy"
 )
 
@@ -19,6 +21,7 @@ type Site struct {
 	Domains    []string
 	TLS        proxy.TLSMode
 	PHPVersion string
+	PHP        php.Settings
 	CreatedAt  time.Time
 }
 
@@ -101,7 +104,7 @@ func (db *DB) SetSiteDomains(ctx context.Context, siteID int64, domains []string
 	return tx.Commit()
 }
 
-const siteQuery = `SELECT s.id, s.server_id, s.name, s.kind, s.php_version, s.created_at, r.id, r.tls, COALESCE(d.domain, '')
+const siteQuery = `SELECT s.id, s.server_id, s.name, s.kind, s.php_version, s.php_settings, s.created_at, r.id, r.tls, COALESCE(d.domain, '')
 	FROM sites s JOIN proxy_routes r ON r.site_id = s.id
 	LEFT JOIN proxy_route_domains d ON d.route_id = r.id`
 
@@ -111,8 +114,11 @@ func (db *DB) scanSites(rows *sql.Rows) ([]*Site, error) {
 	for rows.Next() {
 		var s Site
 		var created int64
-		var domain string
-		if err := rows.Scan(&s.ID, &s.ServerID, &s.Name, &s.Kind, &s.PHPVersion, &created, &s.RouteID, &s.TLS, &domain); err != nil {
+		var domain, settings string
+		if err := rows.Scan(&s.ID, &s.ServerID, &s.Name, &s.Kind, &s.PHPVersion, &settings, &created, &s.RouteID, &s.TLS, &domain); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(settings), &s.PHP); err != nil {
 			return nil, err
 		}
 		if n := len(out); n > 0 && out[n-1].ID == s.ID {
@@ -189,6 +195,12 @@ func (db *DB) DeleteSite(ctx context.Context, id int64) error {
 }
 
 // SetSitePHP switches a site between static ("") and a PHP version.
+// SetSitePHPSettings stores a site's PHP options.
+func (db *DB) SetSitePHPSettings(ctx context.Context, siteID int64, st php.Settings) error {
+	b, _ := json.Marshal(st)
+	return db.execOne(ctx, `UPDATE sites SET php_settings = ? WHERE id = ?`, string(b), siteID)
+}
+
 func (db *DB) SetSitePHP(ctx context.Context, siteID int64, version string) error {
 	tx, err := db.W.BeginTx(ctx, nil)
 	if err != nil {

@@ -52,6 +52,9 @@ func newSFTPManager(cfg Config, sites *sitesManager, log *slog.Logger) (*sftpMan
 	m.hostKey = key
 	hasher := auth.NewHasher(auth.DefaultArgon2Params, min(2, runtime.NumCPU()))
 	m.srv = sftpd.New(log, key, hasher, sites.open)
+	m.srv.OnBan(func(b sftpd.Ban) {
+		log.Warn("sftp address banned for failed logins", "ip", b.IP, "until", b.Until, "failures", b.Failures)
+	})
 	return m, nil
 }
 
@@ -131,4 +134,24 @@ func (m *sftpManager) Apply(st agentproto.SFTPApply) error {
 	m.srv.SetUsers(st.Users)
 	m.log.Info("sftp accounts applied", "revision", st.Revision, "accounts", len(st.Users))
 	return nil
+}
+
+// Bans lists the SFTP server's bans, lifting one first if asked.
+func (m *sftpManager) Bans(req agentproto.SFTPBans) (agentproto.SFTPBansResponse, error) {
+	if !m.enabled() {
+		return agentproto.SFTPBansResponse{Bans: []sftpd.Ban{}}, nil
+	}
+	var out agentproto.SFTPBansResponse
+	if req.Unban != "" {
+		ip := net.ParseIP(req.Unban)
+		if ip == nil {
+			return out, errors.New("invalid IP address")
+		}
+		out.Unbanned = m.srv.Unban(ip.String())
+		if out.Unbanned {
+			m.log.Info("sftp ban lifted", "ip", ip.String())
+		}
+	}
+	out.Bans = m.srv.Bans()
+	return out, nil
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/php"
 	"github.com/wiefix/basalt/internal/proxy"
 	"github.com/wiefix/basalt/internal/store"
 )
@@ -22,12 +23,13 @@ type siteView struct {
 	Domains    []string      `json:"domains"`
 	TLS        proxy.TLSMode `json:"tls"`
 	PHPVersion string        `json:"php_version"`
+	PHP        php.Settings  `json:"php_settings"`
 	CreatedAt  time.Time     `json:"created_at"`
 }
 
 func viewSite(s *store.Site) siteView {
 	return siteView{ID: s.ID, ServerID: s.ServerID, Name: s.Name, Kind: s.Kind,
-		Domains: s.Domains, TLS: s.TLS, PHPVersion: s.PHPVersion, CreatedAt: s.CreatedAt}
+		Domains: s.Domains, TLS: s.TLS, PHPVersion: s.PHPVersion, PHP: s.PHP, CreatedAt: s.CreatedAt}
 }
 
 func (s *Server) pathSite(w http.ResponseWriter, r *http.Request) (*store.Site, bool) {
@@ -86,7 +88,7 @@ func (s *Server) ensureSite(ctx context.Context, site *store.Site) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	return s.agents.Call(ctx, site.ServerID, agentproto.TypeSiteEnsure,
-		agentproto.SiteRequest{SiteID: site.ID, PHPVersion: site.PHPVersion}, nil)
+		agentproto.SiteRequest{SiteID: site.ID, PHPVersion: site.PHPVersion, PHP: site.PHP}, nil)
 }
 
 type createSiteRequest struct {
@@ -302,4 +304,76 @@ func (s *Server) handleSetSitePHP(w http.ResponseWriter, r *http.Request, p *pri
 	s.audit(r, &p.user.ID, "site.php_changed", map[string]any{"site_id": site.ID, "version": req.Version})
 	s.PushProxy(r.Context(), site.ServerID)
 	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site), "sync": s.proxySync(r.Context(), site.ServerID)})
+}
+
+// handleSetSitePHPSettings changes a site's PHP options (memory, upload
+// size, time limits, error display, timezone).
+func (s *Server) handleSetSitePHPSettings(w http.ResponseWriter, r *http.Request, p *principal) {
+	site, ok := s.pathSite(w, r)
+	if !ok {
+		return
+	}
+	var req php.Settings
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if site.PHPVersion != "" {
+		if !s.agents.Connected(site.ServerID) {
+			writeError(w, http.StatusConflict, "the server is offline; try again when it reconnects")
+			return
+		}
+		// Applied first: a pool PHP-FPM rejects leaves the stored settings alone.
+		next := *site
+		next.PHP = req
+		if err := s.ensureSite(r.Context(), &next); err != nil {
+			writeAgentError(w, err)
+			return
+		}
+	}
+	if err := s.db.SetSitePHPSettings(r.Context(), site.ID, req); err != nil {
+		s.internalError(w, r, "set site php settings", err)
+		return
+	}
+	site.PHP = req
+	s.audit(r, &p.user.ID, "site.php_settings_changed", map[string]any{"site_id": site.ID, "settings": req})
+	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site)})
+}
+
+const phpLogTail = 256 << 10
+
+// handlePHPLog returns the end of the site's PHP error log, whole lines.
+func (s *Server) handlePHPLog(w http.ResponseWriter, r *http.Request, p *principal) {
+	site, ok := s.pathSite(w, r)
+	if !ok {
+		return
+	}
+	const path = "/logs/php-error.log"
+	st, err := s.filesCall(r.Context(), site, agentproto.FilesRequest{Op: agentproto.FilesStat, Path: path}, fileOpTimeout)
+	var re *agentproto.RemoteError
+	if errors.As(err, &re) && (strings.Contains(re.Msg, "no such file") || strings.Contains(re.Msg, "does not exist")) {
+		writeJSON(w, http.StatusOK, map[string]any{"log": "", "size": 0, "path": path})
+		return
+	}
+	if err != nil {
+		writeAgentError(w, err)
+		return
+	}
+	size := st.Entry.Size
+	off := max(0, size-phpLogTail)
+	resp, err := s.filesCall(r.Context(), site, agentproto.FilesRequest{Op: agentproto.FilesRead, Path: path, Offset: off, Length: phpLogTail}, fileOpTimeout)
+	if err != nil {
+		writeAgentError(w, err)
+		return
+	}
+	text := string(resp.Data)
+	if off > 0 {
+		if i := strings.IndexByte(text, '\n'); i >= 0 {
+			text = text[i+1:]
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"log": strings.ToValidUTF8(text, "\uFFFD"), "size": size, "truncated": off > 0, "path": path})
 }

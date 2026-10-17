@@ -2,6 +2,8 @@ package e2e
 
 import (
 	"archive/zip"
+	"crypto/ed25519"
+	"crypto/rand"
 	"fmt"
 	"net"
 	"strconv"
@@ -316,8 +318,72 @@ func TestSFTPAccounts(t *testing.T) {
 		return code == 200 && body == "via sftp"
 	})
 
-	// Deleting the account revokes access immediately.
+	// Changing the account: a new generated password replaces the old one;
+	// keys replace the keys; a password-less account without keys is refused.
 	uid := jsonID(list[0].(map[string]any)["id"])
+	p.call(http.StatusUnprocessableEntity, "PUT", base+"/"+uid, map[string]any{})
+	p.call(http.StatusUnprocessableEntity, "PUT", base+"/"+uid, map[string]any{"password": "-"})
+	p.call(http.StatusUnprocessableEntity, "PUT", base+"/"+uid, map[string]any{"public_keys": []string{"not a key"}})
+	p.call(http.StatusNotFound, "PUT", base+"/999", map[string]any{"password": ""})
+	up := p.call(http.StatusOK, "PUT", base+"/"+uid, map[string]any{"password": ""})
+	newPassword, _ := up["password"].(string)
+	if len(newPassword) < 20 || newPassword == password {
+		t.Fatalf("update = %v", up)
+	}
+	if c, err := dial(newPassword); err != nil {
+		t.Fatalf("login with the new password: %v", err)
+	} else {
+		c.Close()
+	}
+	if _, err := dial(password); err == nil {
+		t.Fatal("the old password still works")
+	}
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	signer, _ := ssh.NewSignerFromKey(priv)
+	up = p.call(http.StatusOK, "PUT", base+"/"+uid, map[string]any{
+		"public_keys": []string{string(ssh.MarshalAuthorizedKey(signer.PublicKey()))}, "password": "-"})
+	if u := up["user"].(map[string]any); u["has_password"] != false || len(u["public_keys"].([]any)) != 1 {
+		t.Fatalf("key-only update = %v", up)
+	}
+	if _, err := dial(newPassword); err == nil {
+		t.Fatal("password login still works on a key-only account")
+	}
+	if c, err := ssh.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &ssh.ClientConfig{
+		User: "shop", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}); err != nil {
+		t.Fatalf("key login: %v", err)
+	} else {
+		c.Close()
+	}
+
+	// Too many wrong passwords ban the address; an admin lifts the ban.
+	bans := "/api/v1/servers/" + h.id + "/sftp-bans"
+	if b := p.call(200, "GET", bans, nil)["bans"].([]any); len(b) != 0 {
+		t.Fatalf("bans before = %v", b)
+	}
+	for range 10 {
+		if c, err := ssh.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &ssh.ClientConfig{
+			User: "guess", Auth: []ssh.AuthMethod{ssh.Password("guess")}, HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		}); err == nil {
+			c.Close()
+		}
+	}
+	b := p.call(200, "GET", bans, nil)["bans"].([]any)
+	if len(b) != 1 || b[0].(map[string]any)["ip"] != "127.0.0.1" {
+		t.Fatalf("bans = %v", b)
+	}
+	if _, err := ssh.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &ssh.ClientConfig{
+		User: "shop", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}); err == nil {
+		t.Fatal("a banned address logged in")
+	}
+	p.call(http.StatusUnprocessableEntity, "DELETE", bans+"/not-an-ip", nil)
+	p.call(200, "DELETE", bans+"/127.0.0.1", nil)
+	p.call(http.StatusNotFound, "DELETE", bans+"/127.0.0.1", nil)
+	up = p.call(http.StatusOK, "PUT", base+"/"+uid, map[string]any{"password": password + "-again"})
+	password += "-again"
+
+	// Deleting the account revokes access immediately.
 	if r := p.call(200, "DELETE", base+"/"+uid, nil); r["sync_error"] != nil {
 		t.Fatalf("delete: %v", r)
 	}

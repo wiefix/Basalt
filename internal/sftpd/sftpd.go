@@ -62,6 +62,8 @@ type Server struct {
 	connMu sync.Mutex
 	perIP  map[string]int
 	total  int
+
+	bans *banList
 }
 
 // New creates the server. openSite gives access to a site's files (with the
@@ -73,7 +75,21 @@ func New(log *slog.Logger, hostKey ssh.Signer, hasher *auth.Hasher, openSite fun
 		userLimiter: auth.NewLimiter(10, 6*time.Second),
 		accounts:    map[string]*account{},
 		perIP:       map[string]int{},
+		bans:        newBanList(),
 	}
+}
+
+// Bans lists the addresses refused for failed logins.
+func (s *Server) Bans() []Ban { return s.bans.list() }
+
+// Unban lets a banned address in again; false if it was not banned.
+func (s *Server) Unban(ip string) bool { return s.bans.unban(ip) }
+
+// OnBan is called whenever an address gets banned.
+func (s *Server) OnBan(f func(Ban)) {
+	s.bans.mu.Lock()
+	s.bans.onBan = f
+	s.bans.mu.Unlock()
 }
 
 // SetUsers replaces the account list. Invalid public keys are skipped.
@@ -107,6 +123,7 @@ func (s *Server) config(ip string) *ssh.ServerConfig {
 		MaxAuthTries: 3,
 		PasswordCallback: func(c ssh.ConnMetadata, pw []byte) (*ssh.Permissions, error) {
 			if !s.userLimiter.Allow(c.User()) {
+				s.bans.fail(ip)
 				return nil, errors.New("rate limited")
 			}
 			a := s.lookup(c.User())
@@ -115,11 +132,13 @@ func (s *Server) config(ip string) *ssh.ServerConfig {
 			if a == nil || a.PasswordHash == "" {
 				s.hasher.VerifyDummy(ctx, string(pw))
 				s.log.Info("sftp login failed", "user", c.User(), "ip", ip)
+				s.bans.fail(ip)
 				return nil, errors.New("denied")
 			}
 			ok, _, err := s.hasher.Verify(ctx, a.PasswordHash, string(pw))
 			if err != nil || !ok {
 				s.log.Info("sftp login failed", "user", c.User(), "ip", ip)
+				s.bans.fail(ip)
 				return nil, errors.New("denied")
 			}
 			return permissions(a), nil
@@ -163,7 +182,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			return err
 		}
 		ip, _, _ := net.SplitHostPort(c.RemoteAddr().String())
-		if !s.ipLimiter.Allow(ip) || !s.acquire(ip) {
+		if s.bans.banned(ip) || !s.ipLimiter.Allow(ip) || !s.acquire(ip) {
 			c.Close()
 			continue
 		}

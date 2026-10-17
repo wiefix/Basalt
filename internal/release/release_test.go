@@ -43,7 +43,7 @@ func TestVerifySums(t *testing.T) {
 
 func TestVersions(t *testing.T) {
 	for _, c := range []struct {
-		a, b string
+		a, b  string
 		newer bool
 	}{
 		{"v0.2.0", "v0.1.9", true},

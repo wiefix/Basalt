@@ -1,6 +1,8 @@
 package agentproto
 
 import (
+	"github.com/wiefix/basalt/internal/php"
+
 	"fmt"
 	"time"
 
@@ -34,6 +36,7 @@ const (
 	TypeSiteDelete = "site_delete"
 	TypeFiles      = "files"
 	TypeSFTPApply  = "sftp_apply"
+	TypeSFTPBans   = "sftp_bans" // lists, and with Unban lifts, SFTP bans
 	TypeDNSApply   = "dns_apply"
 	TypeDatabase   = "database"
 	TypeAppDeploy  = "app_deploy" // streams LogChunk frames when asked to
@@ -161,6 +164,8 @@ type SiteRequest struct {
 	SiteID int64 `json:"site_id"`
 	// PHPVersion enables a PHP-FPM pool for the site ("" = static only).
 	PHPVersion string `json:"php_version,omitempty"`
+	// PHP are the site's PHP options.
+	PHP php.Settings `json:"php,omitzero"`
 }
 
 // File-manager operations.
@@ -208,6 +213,17 @@ type FilesResponse struct {
 type SFTPApply struct {
 	Revision int64        `json:"revision"`
 	Users    []sftpd.User `json:"users"`
+}
+
+// SFTPBans lists the addresses the SFTP server refuses for failed logins;
+// Unban (an IP address) lets one in again first.
+type SFTPBans struct {
+	Unban string `json:"unban,omitempty"`
+}
+
+type SFTPBansResponse struct {
+	Bans     []sftpd.Ban `json:"bans"`
+	Unbanned bool        `json:"unbanned,omitempty"`
 }
 
 // ACMEChallenge asks the panel to publish (or withdraw) the TXT record

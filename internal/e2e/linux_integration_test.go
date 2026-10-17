@@ -225,6 +225,19 @@ echo json_encode([
 	p.call(200, "PUT", "/api/v1/sites/"+idA+"/php", map[string]any{"version": phpVersion})
 	eventually(t, "PHP back", func() bool { code, _ := get("alpha.localhost", "/"); return code == 200 })
 
+	// PHP options reach the pool; a PHP warning lands in the log the panel shows.
+	p.call(http.StatusUnprocessableEntity, "PUT", "/api/v1/sites/"+idA+"/php-settings", map[string]any{"timezone": "UTC\nphp_admin_value[open_basedir] = /"})
+	p.call(200, "PUT", "/api/v1/sites/"+idA+"/php-settings", map[string]any{"memory_mb": 128, "timezone": "Europe/Berlin", "max_execution_time": 45})
+	p.raw("PUT", "/api/v1/sites/"+idA+"/files/content"+q("/public/ini.php"), "",
+		[]byte(`<?php echo ini_get("memory_limit"), "|", ini_get("date.timezone"), "|", ini_get("max_execution_time"); trigger_error("basalt-test-warning", E_USER_WARNING);`))
+	eventually(t, "PHP options applied", func() bool {
+		_, body := get("alpha.localhost", "/ini.php")
+		return body == "128M|Europe/Berlin|45"
+	})
+	eventually(t, "warning in the PHP log", func() bool {
+		return strings.Contains(p.call(200, "GET", "/api/v1/sites/"+idA+"/php-log", nil)["log"].(string), "basalt-test-warning")
+	})
+
 	// MariaDB: each site gets its own database and user.
 	if p.server(sid)["status"] != "online" {
 		t.Fatal("agent offline")

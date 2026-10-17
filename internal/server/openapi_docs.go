@@ -1,6 +1,9 @@
 package server
 
-import "github.com/wiefix/basalt/internal/dns"
+import (
+	"github.com/wiefix/basalt/internal/dns"
+	"github.com/wiefix/basalt/internal/php"
+)
 
 // apiDocs describes every API route (the access a route needs comes from
 // its registration). TestOpenAPICoversRoutes keeps it complete.
@@ -62,13 +65,15 @@ var apiDocs = map[string]apiDoc{
 	"DELETE /api/v1/servers/{id}/routes/{rid}": {summary: "Remove a proxy route"},
 
 	// Sites, files, SFTP, MariaDB.
-	"GET /api/v1/sites":              {summary: "List sites"},
-	"POST /api/v1/sites":             {summary: "Create a static or PHP site", body: createSiteRequest{}},
-	"GET /api/v1/sites/{id}":         {summary: "A site"},
-	"PUT /api/v1/sites/{id}/domains": {summary: "Set a site's domains", body: siteDomainsRequest{}},
-	"PUT /api/v1/sites/{id}/php":     {summary: "Switch a site between static and a PHP version", body: sitePHPRequest{}},
-	"DELETE /api/v1/sites/{id}":      {summary: "Delete a site (its files go to the server's trash)"},
-	"GET /api/v1/sites/{id}/files":   {summary: "List a directory", query: []queryParam{q("path", "directory in the site, e.g. /public")}},
+	"GET /api/v1/sites":                   {summary: "List sites"},
+	"POST /api/v1/sites":                  {summary: "Create a static or PHP site", body: createSiteRequest{}},
+	"GET /api/v1/sites/{id}":              {summary: "A site"},
+	"PUT /api/v1/sites/{id}/domains":      {summary: "Set a site's domains", body: siteDomainsRequest{}},
+	"PUT /api/v1/sites/{id}/php":          {summary: "Switch a site between static and a PHP version", body: sitePHPRequest{}},
+	"PUT /api/v1/sites/{id}/php-settings": {summary: "Change a site's PHP options (memory, upload size, time limits, errors, timezone)", body: php.Settings{}},
+	"GET /api/v1/sites/{id}/php-log":      {summary: "The end of a site's PHP error log"},
+	"DELETE /api/v1/sites/{id}":           {summary: "Delete a site (its files go to the server's trash)"},
+	"GET /api/v1/sites/{id}/files":        {summary: "List a directory", query: []queryParam{q("path", "directory in the site, e.g. /public")}},
 	"GET /api/v1/sites/{id}/files/stat": {summary: "Details of a file or directory",
 		query: []queryParam{q("path", "path in the site")}},
 	"GET /api/v1/sites/{id}/files/text": {summary: "Read a text file (up to 1 MiB)", query: []queryParam{q("path", "path in the site")}},
@@ -80,6 +85,9 @@ var apiDocs = map[string]apiDoc{
 		body: fileOpRequest{}},
 	"GET /api/v1/sites/{id}/sftp-users":                {summary: "A site's SFTP accounts and connection details"},
 	"POST /api/v1/sites/{id}/sftp-users":               {summary: "Create an SFTP account", body: createSFTPUserRequest{}},
+	"GET /api/v1/servers/{id}/sftp-bans":               {summary: "Addresses the server's SFTP refuses after failed logins"},
+	"DELETE /api/v1/servers/{id}/sftp-bans/{ip}":       {summary: "Let a banned address use SFTP again"},
+	"PUT /api/v1/sites/{id}/sftp-users/{uid}":          {summary: "Change an SFTP account's password or public keys", body: updateSFTPUserRequest{}},
 	"DELETE /api/v1/sites/{id}/sftp-users/{uid}":       {summary: "Delete an SFTP account"},
 	"GET /api/v1/sites/{id}/databases":                 {summary: "A site's MariaDB databases"},
 	"POST /api/v1/sites/{id}/databases":                {summary: "Create a MariaDB database and user (the password is returned once)", body: createDatabaseRequest{}},

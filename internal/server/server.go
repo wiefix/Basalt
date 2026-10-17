@@ -278,6 +278,8 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("GET /api/v1/sites/{id}", s.requireRole(store.RoleViewer, s.handleGetSite))
 	rt.Handle("PUT /api/v1/sites/{id}/domains", s.requireRole(store.RoleAdmin, s.handleSetSiteDomains))
 	rt.Handle("PUT /api/v1/sites/{id}/php", s.requireRole(store.RoleAdmin, s.handleSetSitePHP))
+	rt.Handle("PUT /api/v1/sites/{id}/php-settings", s.requireRole(store.RoleAdmin, s.handleSetSitePHPSettings))
+	rt.Handle("GET /api/v1/sites/{id}/php-log", s.requireRole(store.RoleViewer, s.handlePHPLog))
 	rt.Handle("DELETE /api/v1/sites/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteSite))
 	rt.Handle("GET /api/v1/sites/{id}/files", s.requireRole(store.RoleViewer, s.handleListFiles))
 	rt.Handle("GET /api/v1/sites/{id}/files/stat", s.requireRole(store.RoleViewer, s.handleStatFile))
@@ -314,6 +316,9 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("POST /api/v1/backup-storages/{id}/check", s.requireRole(store.RoleAdmin, s.handleCheckStorage))
 	rt.Handle("GET /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleViewer, s.handleListSFTPUsers))
 	rt.Handle("POST /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleAdmin, s.handleCreateSFTPUser))
+	rt.Handle("GET /api/v1/servers/{id}/sftp-bans", s.requireRole(store.RoleAdmin, s.handleSFTPBans))
+	rt.Handle("DELETE /api/v1/servers/{id}/sftp-bans/{ip}", s.requireRole(store.RoleAdmin, s.handleSFTPUnban))
+	rt.Handle("PUT /api/v1/sites/{id}/sftp-users/{uid}", s.requireRole(store.RoleAdmin, s.handleUpdateSFTPUser))
 	rt.Handle("DELETE /api/v1/sites/{id}/sftp-users/{uid}", s.requireRole(store.RoleAdmin, s.handleDeleteSFTPUser))
 
 	rt.Handle("GET /api/v1/dns", s.requireRole(store.RoleViewer, s.handleDNSOverview))

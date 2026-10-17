@@ -206,6 +206,7 @@ export function ServerPage({ user }: { user: User }) {
           </div>
 
           {s.status === "online" && <CertificatesCard serverId={id} />}
+          {s.status === "online" && can(user, "admin") && <SFTPBansCard serverId={id} />}
           <RoutesCard serverId={id} user={user} />
         </>
       )}
@@ -480,6 +481,51 @@ function AddRouteModal({ serverId, onClose }: { serverId: number; onClose: () =>
         </label>
       </form>
     </Modal>
+  );
+}
+
+// SFTPBansCard lists the addresses the server's SFTP refuses after too many
+// wrong passwords (hidden when there are none).
+function SFTPBansCard({ serverId }: { serverId: number }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const bans = useQuery({ queryKey: ["sftp-bans", serverId], queryFn: () => api.sftpBans(serverId), retry: false, refetchInterval: 60_000 });
+  const unban = useMutation({
+    mutationFn: (ip: string) => api.sftpUnban(serverId, ip),
+    onSuccess: (d) => qc.setQueryData(["sftp-bans", serverId], d),
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  const list = bans.data?.bans ?? [];
+  if (bans.isPending || bans.error || list.length === 0) return null;
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Blocked SFTP addresses</h2>
+      </div>
+      <div className="card-body muted small" style={{ paddingBottom: 0 }}>
+        Refused after 10 wrong passwords within 15 minutes: for an hour, doubling on each repeat within a day.
+      </div>
+      <div className="table-wrap">
+        <table className="table">
+          <tbody>
+            {list.map((b) => (
+              <tr key={b.ip}>
+                <td className="mono">{b.ip}</td>
+                <td className="muted small">
+                  until {formatDate(b.until)}
+                  {b.strikes > 1 ? ` · blocked ${b.strikes} times today` : ""}
+                </td>
+                <td className="num">
+                  <button className="btn sm" disabled={unban.isPending} onClick={() => unban.mutate(b.ip)}>
+                    Unblock
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 
