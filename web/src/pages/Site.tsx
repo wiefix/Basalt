@@ -5,6 +5,7 @@ import { api, can, type DatabaseCredentials, type SFTPUser, type Site, type User
 import { FileManager } from "../components/FileManager";
 import { CodeBox, CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useConfirm, useToast } from "../components/ui";
 import { LogView } from "../components/LogView";
+import { AccessLogCard } from "../components/AccessLog";
 import { SyncBadge } from "./Server";
 import { BackupsTab } from "./BackupsTab";
 
@@ -64,7 +65,7 @@ export function SitePage({ user }: { user: User }) {
         <Route path="sftp" element={<SFTPTab site={s} user={user} host={server?.last_ip} />} />
         <Route path="databases" element={<DatabasesTab site={s} user={user} />} />
         <Route path="backups" element={<BackupsTab target={{ base: `/api/v1/sites/${s.id}`, name: s.name, siteId: s.id }} user={user} />} />
-        <Route path="logs" element={<LogsTab site={s} />} />
+        <Route path="logs" element={<LogsTab site={s} user={user} />} />
         <Route path="settings" element={<SettingsTab site={s} phpVersions={server?.isolated ? server.php_versions : []} phpLimits={!!server?.php_limits} />} />
       </Routes>
     </>
@@ -623,38 +624,41 @@ function PHPOptionsCard({ site, limits }: { site: Site; limits: boolean }) {
 }
 
 // LogsTab shows the end of the site's PHP error log.
-function LogsTab({ site }: { site: Site }) {
+function LogsTab({ site, user }: { site: Site; user: User }) {
   const log = useQuery({ queryKey: ["php-log", site.id], queryFn: () => api.phpLog(site.id), refetchInterval: 10_000 });
   return (
-    <div className="card">
-      <div className="card-head">
-        <h2>PHP errors</h2>
-        <div className="row">
-          {log.data && log.data.size > 0 && (
-            <a className="btn sm" href={api.downloadUrl(site.id, log.data.path)}>
-              <Icon name="download" size={14} /> Download ({formatBytes(log.data.size)})
-            </a>
-          )}
-          <button className="btn sm" onClick={() => log.refetch()} disabled={log.isFetching}>
-            <Icon name="refresh" size={14} /> Refresh
-          </button>
+    <div className="stack">
+      {can(user, "member") && <AccessLogCard base={`/api/v1/sites/${site.id}`} />}
+      <div className="card">
+        <div className="card-head">
+          <h2>PHP errors</h2>
+          <div className="row">
+            {log.data && log.data.size > 0 && (
+              <a className="btn sm" href={api.downloadUrl(site.id, log.data.path)}>
+                <Icon name="download" size={14} /> Download ({formatBytes(log.data.size)})
+              </a>
+            )}
+            <button className="btn sm" onClick={() => log.refetch()} disabled={log.isFetching}>
+              <Icon name="refresh" size={14} /> Refresh
+            </button>
+          </div>
         </div>
-      </div>
-      <div className="card-body stack">
-        {log.isPending ? (
-          <Loading />
-        ) : log.error ? (
-          <ErrorBox error={log.error} />
-        ) : !site.php_version && !log.data.log ? (
-          <div className="empty small">This is a static site: it runs no PHP.</div>
-        ) : !log.data.log ? (
-          <div className="empty small">No PHP errors logged.</div>
-        ) : (
-          <>
-            {log.data.truncated && <p className="faint small" style={{ margin: 0 }}>The last 256 KB of the log; download it for all of it.</p>}
-            <LogView text={log.data.log} tall />
-          </>
-        )}
+        <div className="card-body stack">
+          {log.isPending ? (
+            <Loading />
+          ) : log.error ? (
+            <ErrorBox error={log.error} />
+          ) : !site.php_version && !log.data.log ? (
+            <div className="empty small">This is a static site: it runs no PHP.</div>
+          ) : !log.data.log ? (
+            <div className="empty small">No PHP errors logged.</div>
+          ) : (
+            <>
+              {log.data.truncated && <p className="faint small" style={{ margin: 0 }}>The last 256 KB of the log; download it for all of it.</p>}
+              <LogView text={log.data.log} tall />
+            </>
+          )}
+        </div>
       </div>
     </div>
   );

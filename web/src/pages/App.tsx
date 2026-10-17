@@ -32,6 +32,7 @@ import { Stat, SyncBadge } from "./Server";
 import { Chart } from "../components/Chart";
 import { BackupsTab } from "./BackupsTab";
 import { LogView } from "../components/LogView";
+import { AccessLogCard } from "../components/AccessLog";
 import { TemplateCard } from "./AppTemplate";
 
 export function AppPage({ user }: { user: User }) {
@@ -441,63 +442,66 @@ function LogsTab({ app }: { app: App }) {
     end: (d: { error?: string } | null) => setEnded(d?.error || "the stream ended"),
   });
   return (
-    <div className="card">
-      <div className="card-head">
-        <div className="row">
-          <h2>Container output</h2>
-          {live && <StreamBadge state={state} ended={ended} />}
-        </div>
-        <div className="row">
-          {app.replicas.length > 0 && (
-            <select className="input" style={{ width: "auto", height: 28 }} value={server} onChange={(e) => setServer(Number(e.target.value))}>
-              <option value={0}>{serverName(app.server_id)}</option>
-              {app.replicas.map((id) => (
-                <option key={id} value={id}>
-                  {serverName(id)}
+    <div className="stack">
+      <div className="card">
+        <div className="card-head">
+          <div className="row">
+            <h2>Container output</h2>
+            {live && <StreamBadge state={state} ended={ended} />}
+          </div>
+          <div className="row">
+            {app.replicas.length > 0 && (
+              <select className="input" style={{ width: "auto", height: 28 }} value={server} onChange={(e) => setServer(Number(e.target.value))}>
+                <option value={0}>{serverName(app.server_id)}</option>
+                {app.replicas.map((id) => (
+                  <option key={id} value={id}>
+                    {serverName(id)}
+                  </option>
+                ))}
+              </select>
+            )}
+            {services.length > 0 && (
+              <select className="input" style={{ width: "auto", height: 28 }} value={service} onChange={(e) => setService(e.target.value)}>
+                {services.map((s) => (
+                  <option key={s.name} value={s.name}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <select className="input" style={{ width: "auto", height: 28 }} value={tail} onChange={(e) => setTail(Number(e.target.value))}>
+              {[100, 200, 1000, 5000].map((n) => (
+                <option key={n} value={n}>
+                  last {n} lines
                 </option>
               ))}
             </select>
-          )}
-          {services.length > 0 && (
-            <select className="input" style={{ width: "auto", height: 28 }} value={service} onChange={(e) => setService(e.target.value)}>
-              {services.map((s) => (
-                <option key={s.name} value={s.name}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          )}
-          <select className="input" style={{ width: "auto", height: 28 }} value={tail} onChange={(e) => setTail(Number(e.target.value))}>
-            {[100, 200, 1000, 5000].map((n) => (
-              <option key={n} value={n}>
-                last {n} lines
-              </option>
-            ))}
-          </select>
-          <label className="check small">
-            <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} /> live
-          </label>
-          {!live && (
-            <button className="btn sm icon ghost" title="Refresh" onClick={() => snapshot.refetch()}>
-              <Icon name="refresh" size={14} />
-            </button>
+            <label className="check small">
+              <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} /> live
+            </label>
+            {!live && (
+              <button className="btn sm icon ghost" title="Refresh" onClick={() => snapshot.refetch()}>
+                <Icon name="refresh" size={14} />
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="card-body">
+          {live ? (
+            <>
+              {ended && <div className="alert err small" style={{ marginBottom: 12 }}>{ended}</div>}
+              <LogView tall text={text || (state === "open" ? "(no output yet)" : "Connecting…")} />
+            </>
+          ) : snapshot.isPending ? (
+            <Loading />
+          ) : snapshot.error ? (
+            <ErrorBox error={snapshot.error} />
+          ) : (
+            <LogView tall text={snapshot.data.log || "(no output yet)"} />
           )}
         </div>
       </div>
-      <div className="card-body">
-        {live ? (
-          <>
-            {ended && <div className="alert err small" style={{ marginBottom: 12 }}>{ended}</div>}
-            <LogView tall text={text || (state === "open" ? "(no output yet)" : "Connecting…")} />
-          </>
-        ) : snapshot.isPending ? (
-          <Loading />
-        ) : snapshot.error ? (
-          <ErrorBox error={snapshot.error} />
-        ) : (
-          <LogView tall text={snapshot.data.log || "(no output yet)"} />
-        )}
-      </div>
+      {app.domains.length > 0 && <AccessLogCard base={`/api/v1/apps/${app.id}`} />}
     </div>
   );
 }

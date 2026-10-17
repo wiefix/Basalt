@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
@@ -230,4 +231,44 @@ func (s *Server) trash(w http.ResponseWriter, r *http.Request, p *principal, rem
 		resp.Entries = []agentproto.TrashEntry{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": resp.Entries, "keep_days": 30})
+}
+
+// handleSiteAccessLog and handleAppAccessLog return the latest requests
+// (newest first) from the proxy's access log of a site or app.
+func (s *Server) handleSiteAccessLog(w http.ResponseWriter, r *http.Request, p *principal) {
+	site, ok := s.pathSite(w, r)
+	if !ok {
+		return
+	}
+	s.accessLog(w, r, site.ServerID, agentproto.AccessLogRequest{SiteID: site.ID})
+}
+
+func (s *Server) handleAppAccessLog(w http.ResponseWriter, r *http.Request, p *principal) {
+	app, ok := s.pathApp(w, r)
+	if !ok {
+		return
+	}
+	s.accessLog(w, r, app.ServerID, agentproto.AccessLogRequest{AppID: app.ID})
+}
+
+func (s *Server) accessLog(w http.ResponseWriter, r *http.Request, serverID int64, req agentproto.AccessLogRequest) {
+	req.Limit = 200
+	if v, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil {
+		req.Limit = min(max(v, 1), 1000)
+	}
+	if !s.agents.Connected(serverID) {
+		writeError(w, http.StatusConflict, "the server is offline")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	var resp agentproto.AccessLogResponse
+	if err := s.agents.Call(ctx, serverID, agentproto.TypeAccessLog, req, &resp); err != nil {
+		writeAgentError(w, err)
+		return
+	}
+	if resp.Entries == nil {
+		resp.Entries = []agentproto.AccessEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": resp.Entries})
 }

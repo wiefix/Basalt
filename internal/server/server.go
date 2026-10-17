@@ -282,6 +282,8 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("PUT /api/v1/sites/{id}/php", s.requireRole(store.RoleAdmin, s.handleSetSitePHP))
 	rt.Handle("PUT /api/v1/sites/{id}/php-settings", s.requireRole(store.RoleAdmin, s.handleSetSitePHPSettings))
 	rt.Handle("GET /api/v1/sites/{id}/php-log", s.requireRole(store.RoleViewer, s.handlePHPLog))
+	rt.Handle("GET /api/v1/sites/{id}/access-log", s.requireRole(store.RoleMember, s.handleSiteAccessLog))
+	rt.Handle("GET /api/v1/apps/{id}/access-log", s.requireRole(store.RoleMember, s.handleAppAccessLog))
 	rt.Handle("POST /api/v1/sites/{id}/install", s.requireRole(store.RoleAdmin, s.handleSiteInstall))
 	rt.Handle("POST /api/v1/sites/{id}/usage", s.requireRole(store.RoleMember, s.handleMeasureSite))
 	rt.Handle("PUT /api/v1/sites/{id}/quota", s.requireRole(store.RoleAdmin, s.handleSetSiteQuota))

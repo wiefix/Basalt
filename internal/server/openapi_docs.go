@@ -72,6 +72,8 @@ var apiDocs = map[string]apiDoc{
 	"PUT /api/v1/sites/{id}/php":          {summary: "Switch a site between static and a PHP version", body: sitePHPRequest{}},
 	"PUT /api/v1/sites/{id}/php-settings": {summary: "Change a site's PHP options (memory, upload size, time limits, errors, timezone)", body: php.Settings{}},
 	"GET /api/v1/sites/{id}/php-log":      {summary: "The end of a site's PHP error log"},
+	"GET /api/v1/sites/{id}/access-log":   {summary: "The latest requests to a site (newest first)", query: []queryParam{q("limit", "how many, 1–1000, default 200")}},
+	"GET /api/v1/apps/{id}/access-log":    {summary: "The latest requests to an app through the proxy (its main server)", query: []queryParam{q("limit", "how many, 1–1000, default 200")}},
 	"POST /api/v1/sites/{id}/install":     {summary: "Install WordPress into a PHP site's empty public folder, with a new database", body: siteInstallRequest{}},
 	"POST /api/v1/sites/{id}/usage":       {summary: "Measure a site's disk space (files and databases) now"},
 	"PUT /api/v1/sites/{id}/quota":        {summary: "Set a site's soft disk quota (0: none); going over it is notified", body: siteQuotaRequest{}},

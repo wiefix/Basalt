@@ -47,6 +47,20 @@ func AdminSocket(dir string) string { return filepath.Join(dir, "admin.sock") }
 func ConfigPath(dir string) string  { return filepath.Join(dir, "config.json") }
 func storagePath(dir string) string { return filepath.Join(dir, "storage") }
 
+// AccessLogName is the logger of a managed site's or app's requests ("" for
+// other routes); AccessLogPath is its file in the proxy directory.
+func AccessLogName(r Route) string {
+	switch {
+	case r.SiteID > 0:
+		return "site-" + strconv.FormatInt(r.SiteID, 10)
+	case r.AppID > 0:
+		return "app-" + strconv.FormatInt(r.AppID, 10)
+	}
+	return ""
+}
+
+func AccessLogPath(dir, name string) string { return filepath.Join(dir, "logs", name+".log") }
+
 // Never served from static sites even if present in the site root. PHP
 // sources are hidden too: a site switched from PHP to static must not
 // expose its code (and the credentials in it) as plain text.
@@ -76,7 +90,23 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 	var internalNames, dnsNames []string
 	var routes, wildcardRoutes []any
 	filesystems := []any{}
+	loggerNames := obj{}
+	logs := obj{
+		// Everything but access logs goes where it always did (stderr).
+		"default": obj{"exclude": []any{"http.log.access"}},
+	}
 	for _, r := range d.Routes {
+		if name := AccessLogName(r); name != "" {
+			for _, dom := range r.Domains {
+				loggerNames[dom] = name
+			}
+			logs[name] = obj{
+				"writer": obj{"output": "file", "filename": AccessLogPath(o.Dir, name),
+					"roll_size_mb": 10, "roll_keep": 3, "roll_keep_days": 30},
+				"encoder": obj{"format": "json"},
+				"include": []any{"http.log.access." + name},
+			}
+		}
 		var exact, wild []string
 		for _, dom := range r.Domains {
 			if IsWildcard(dom) {
@@ -115,10 +145,13 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 		"listen":    []any{httpsListen},
 		"routes":    routes,
 		"protocols": []any{"h1", "h2", "h3"},
+		// Access logs of managed sites and apps, each in its own file.
+		"logs": obj{"logger_names": loggerNames, "skip_unmapped_hosts": true},
 	}
 
 	cfgMap := obj{
-		"admin": adminConfig(o.Dir),
+		"admin":   adminConfig(o.Dir),
+		"logging": obj{"logs": logs},
 		"storage": obj{
 			"module": "file_system",
 			"root":   storagePath(o.Dir),

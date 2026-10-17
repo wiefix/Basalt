@@ -191,6 +191,19 @@ func TestSitesAndFileManager(t *testing.T) {
 	if code, body := h.get("blog.localhost", "/about.html"); code != 200 || body != "about" {
 		t.Fatalf("extracted page: %d %q", code, body)
 	}
+	// The proxy logs the site's requests in its own access log.
+	eventually(t, "access log", func() bool {
+		for _, e := range p.call(200, "GET", "/api/v1/sites/"+sid+"/access-log?limit=50", nil)["entries"].([]any) {
+			e := e.(map[string]any)
+			if e["uri"] == "/about.html" && e["status"] == float64(200) && e["host"] == "blog.localhost" && e["method"] == "GET" {
+				return true
+			}
+		}
+		return false
+	})
+	if _, err := os.Stat(filepath.Join(h.proxyDir, "logs", "site-"+sid+".log")); err != nil {
+		t.Fatalf("access log file: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(h.sitesRoot, "escape.txt")); err == nil {
 		t.Fatal("zip entry escaped the site")
 	}

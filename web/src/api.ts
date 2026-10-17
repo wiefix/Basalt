@@ -425,6 +425,19 @@ export interface UpdatesInfo {
   } | null;
 }
 
+export interface AccessEntry {
+  at: string;
+  ip: string;
+  method: string;
+  host: string;
+  uri: string;
+  proto: string;
+  status: number;
+  bytes: number;
+  duration_ms: number;
+  user_agent?: string;
+}
+
 export interface TrashEntry {
   name: string;
   site_id: number;
@@ -1094,6 +1107,7 @@ export const api = {
   updateSFTPUser: (siteId: number, id: number, b: { password?: string; public_keys?: string[] }) =>
     put<{ user: SFTPUser; password?: string; sync_error?: string }>(`/api/v1/sites/${siteId}/sftp-users/${id}`, b),
   deleteSFTPUser: (siteId: number, id: number) => del<{ ok: boolean }>(`/api/v1/sites/${siteId}/sftp-users/${id}`),
+  accessLog: (base: string) => get<{ entries: AccessEntry[] }>(`${base}/access-log?limit=200`),
   trash: (serverId: number) => get<{ entries: TrashEntry[]; keep_days: number }>(`/api/v1/servers/${serverId}/trash`),
   removeTrash: (serverId: number, name: string) =>
     del<{ entries: TrashEntry[]; keep_days: number }>(`/api/v1/servers/${serverId}/trash/${encodeURIComponent(name)}`),

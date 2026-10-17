@@ -402,12 +402,28 @@ Restart=always
 RestartSec=2
 RuntimeDirectory=basalt
 RuntimeDirectoryPreserve=yes
+# Root, but only with the powers its work needs: managing site users and
+# their files (chown, setgid folders, reading everything for backups),
+# binding port 53, signalling PHP-FPM. No module loading, raw devices,
+# tracing, clock or network administration.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_KILL CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE CAP_AUDIT_WRITE
+NoNewPrivileges=yes
 PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=read-only
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
 LockPersonality=yes
 RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

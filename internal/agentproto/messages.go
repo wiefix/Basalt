@@ -528,3 +528,31 @@ type TrashEntry struct {
 type SiteTrashResponse struct {
 	Entries []TrashEntry `json:"entries"`
 }
+
+// TypeAccessLog returns the latest requests to a managed site or app from
+// the proxy's access log.
+const TypeAccessLog = "access_log"
+
+type AccessLogRequest struct {
+	SiteID int64 `json:"site_id,omitempty"`
+	AppID  int64 `json:"app_id,omitempty"`
+	Limit  int   `json:"limit"`
+}
+
+// AccessEntry is one request.
+type AccessEntry struct {
+	At         time.Time `json:"at"`
+	IP         string    `json:"ip"`
+	Method     string    `json:"method"`
+	Host       string    `json:"host"`
+	URI        string    `json:"uri"`
+	Proto      string    `json:"proto"`
+	Status     int       `json:"status"`
+	Bytes      int64     `json:"bytes"`
+	DurationMS float64   `json:"duration_ms"`
+	UserAgent  string    `json:"user_agent,omitempty"`
+}
+
+type AccessLogResponse struct {
+	Entries []AccessEntry `json:"entries"`
+}

@@ -55,6 +55,10 @@ docker exec basalt-node1 sh -c "$CMD --with-php --with-mariadb --with-docker --w
 docker exec basalt-node1 systemctl is-active basalt-proxy basalt-agent
 docker exec basalt-node1 sh -c 'git --version && docker buildx version | cut -d" " -f1-2' 
 docker exec basalt-node1 ps -o user=,comm= -C basalt | sort | uniq -c
+echo "### systemd exposure scores (lower is safer)"
+for u in basalt-agent basalt-proxy; do
+  echo "  $u: $(docker exec basalt-node1 systemd-analyze security $u.service 2>/dev/null | tail -1)"
+done
 
 for i in $(seq 30); do
   $API http://127.0.0.1:8080/api/v1/servers | grep -q '"name":"node1","status":"online"' && break; sleep 1
@@ -78,6 +82,8 @@ for i in $(seq 30); do
   docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " && break; sleep 1
 done
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/; echo
+echo "### the proxy logs the site's requests"
+$API "http://127.0.0.1:8080/api/v1/sites/$SITE/access-log?limit=5" | python3 -c 'import sys,json; l=json.load(sys.stdin)["entries"]; [print("  ", e["at"], e["method"], e["host"], e["uri"], e["status"]) for e in l[:2]]; sys.exit(0 if l and l[0]["host"]=="shop.test" else "no access log")'
 echo "### the site's PHP runs as its own systemd service, with CPU and memory limits"
 docker exec basalt-node1 systemctl is-active basalt-php-site-$SITE.service
 docker exec basalt-node1 sh -c "! ls /etc/php/*/fpm/pool.d/basalt-site-$SITE.conf 2>/dev/null" || { echo "the site's pool is still in the shared PHP-FPM"; exit 1; }
