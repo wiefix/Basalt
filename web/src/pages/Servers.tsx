@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router";
 import { api, can, type Enrollment, type User } from "../api";
-import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, StatusBadge, formatBytes, timeAgo } from "../components/ui";
+import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, StatusBadge, errorMessage, formatBytes, timeAgo, useConfirm, useToast } from "../components/ui";
 
 export function ServersPage({ user }: { user: User }) {
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers, refetchInterval: 10_000 });
@@ -72,8 +72,130 @@ export function ServersPage({ user }: { user: User }) {
         </div>
       )}
 
+      {can(user, "admin") && servers.data && servers.data.servers.length > 0 && <UpdatesCard />}
+
       {adding && <AddServerModal onClose={() => setAdding(false)} />}
     </>
+  );
+}
+
+// UpdatesCard shows the versions of Basalt in use and updates every server
+// to the newest release.
+function UpdatesCard() {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const info = useQuery({
+    queryKey: ["updates"],
+    queryFn: api.updates,
+    refetchInterval: (q) => (q.state.data?.running ? 2000 : 60_000),
+  });
+  const check = useMutation({
+    mutationFn: api.checkUpdates,
+    onSuccess: (d) => qc.setQueryData(["updates"], d),
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  const apply = useMutation({
+    mutationFn: api.applyUpdate,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["updates"] }),
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  if (info.isPending) return null;
+  if (info.error) return <ErrorBox error={info.error} />;
+  const d = info.data;
+  const outdated = d.servers.filter((s) => s.version !== d.latest);
+  const start = async () => {
+    const ok = await confirm({
+      title: `Update to ${d.latest}?`,
+      body: (
+        <p>
+          Every online server installed with the installer gets the new version; each checks the release signature, then
+          restarts the Basalt services (sites stay up, the proxy restarts in a moment). The panel restarts too.
+        </p>
+      ),
+      confirm: "Update",
+    });
+    if (ok) apply.mutate();
+  };
+  const run = d.run;
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <div className="card-head">
+        <h2>Updates</h2>
+        <div className="row wrap">
+          {d.enabled && (
+            <button className="btn sm" disabled={check.isPending || d.running} onClick={() => check.mutate()}>
+              <Icon name="refresh" size={14} /> {check.isPending ? "Checking…" : "Check now"}
+            </button>
+          )}
+          {d.available && (
+            <button className="btn sm primary" disabled={apply.isPending || d.running} onClick={start}>
+              {d.running ? "Updating…" : `Update to ${d.latest}`}
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="card-body stack">
+        <p className="muted small" style={{ margin: 0 }}>
+          This panel runs <span className="mono">{d.current}</span>.{" "}
+          {!d.enabled
+            ? "Update checks are turned off (--release-url)."
+            : d.latest
+              ? d.available
+                ? `Basalt ${d.latest} is available.`
+                : `It is the newest release (${d.latest}).`
+              : "No release found yet."}{" "}
+          {d.checked_at && `Checked ${timeAgo(d.checked_at)}.`}
+        </p>
+        {d.error && <div className="alert err small">Last check: {d.error}</div>}
+        {run && (
+          <div className={`alert small ${run.state === "failed" ? "err" : run.state === "done" ? "ok" : "warn"}`}>
+            Update to {run.version} by {run.by}:{" "}
+            {run.state === "downloading"
+              ? "downloading the release…"
+              : run.state === "preparing"
+                ? "servers are fetching and checking it…"
+                : run.state === "restarting"
+                  ? "restarting the services…"
+                  : run.state === "done"
+                    ? `done ${run.finished_at ? timeAgo(run.finished_at) : ""}.`
+                    : `failed: ${run.error}`}
+            {run.state === "done" && run.error ? ` ${run.error}.` : ""}
+            {run.servers
+              .filter((s) => s.error)
+              .map((s) => (
+                <div key={s.id}>
+                  {s.name}: {s.error}
+                </div>
+              ))}
+          </div>
+        )}
+        {d.latest && outdated.length > 0 && (
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Server</th>
+                  <th>Version</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {outdated.map((s) => (
+                  <tr key={s.id}>
+                    <td>{s.name}</td>
+                    <td className="mono">{s.version || "—"}</td>
+                    <td className="muted small">
+                      {!s.online ? "offline" : !s.updatable ? "not installed by the installer: re-run it to update" : ""}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

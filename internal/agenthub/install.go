@@ -2,6 +2,9 @@ package agenthub
 
 import (
 	"net/http"
+
+	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/release"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,7 +24,30 @@ func (h *Hub) ServeInstaller(script []byte, binariesDir string) {
 	h.binariesDir = binariesDir
 }
 
+// ServeReleases serves agents the release files the panel downloaded into
+// dir (<dir>/<version>/<file>) for updates. Agents check them against the
+// signed checksums themselves.
+func (h *Hub) ServeReleases(dir string) { h.releasesDir = dir }
+
+var releaseFileRE = regexp.MustCompile(`^basalt-linux-(amd64|arm64)$`)
+
 func (h *Hub) registerInstaller(mux *http.ServeMux) {
+	mux.HandleFunc("GET "+agentproto.PathRelease+"{version}/{file}", func(w http.ResponseWriter, r *http.Request) {
+		version, file := r.PathValue("version"), r.PathValue("file")
+		if h.releasesDir == "" || !release.ValidVersion(version) || !releaseFileRE.MatchString(file) {
+			http.NotFound(w, r)
+			return
+		}
+		f, err := os.Open(filepath.Join(h.releasesDir, version, file))
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer f.Close()
+		st, _ := f.Stat()
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeContent(w, r, file, st.ModTime(), f)
+	})
 	mux.HandleFunc("GET /agent/v1/ca.der", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/pkix-cert")
 		w.Write(h.ca.Cert.Raw)

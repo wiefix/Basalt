@@ -387,6 +387,26 @@ export interface Snapshot {
   bytes: number;
 }
 
+export interface UpdatesInfo {
+  enabled: boolean;
+  current: string;
+  latest: string;
+  available: boolean;
+  checked_at?: string;
+  error: string;
+  running: boolean;
+  servers: { id: number; name: string; online: boolean; version: string; arch: string; updatable: boolean }[];
+  run: {
+    version: string;
+    state: "downloading" | "preparing" | "restarting" | "done" | "failed";
+    error?: string;
+    started_at: string;
+    finished_at?: string;
+    by: string;
+    servers: { id: number; name: string; status: string; error?: string }[];
+  } | null;
+}
+
 export interface SnapshotEntry {
   name: string;
   type: "file" | "dir" | "symlink" | "other";
@@ -820,6 +840,9 @@ export const api = {
   resetEnrollToken: (id: number) =>
     post<{ enrollment: Enrollment }>(`/api/v1/servers/${id}/enroll-token`),
   deleteServer: (id: number) => del<void>(`/api/v1/servers/${id}`),
+  updates: () => get<UpdatesInfo>("/api/v1/updates"),
+  checkUpdates: () => post<UpdatesInfo>("/api/v1/updates/check"),
+  applyUpdate: () => post<{ run: UpdatesInfo["run"] }>("/api/v1/updates/apply"),
   serverMetrics: (id: number, minutes: number) =>
     get<{ metrics: Metrics[] }>(`/api/v1/servers/${id}/metrics?minutes=${minutes}`),
   serverCertificates: (id: number) =>

@@ -81,6 +81,7 @@ func startPanelWith(t *testing.T, o server.Options) *panel {
 		o.DataDir = dir
 	}
 	srv := server.New(o)
+	hub.ServeReleases(filepath.Join(o.DataDir, "releases"))
 	hub.OnACMEChallenge(srv.ACMEChallenge)
 	hub.OnHealthReport(srv.HealthReport)
 	api := httptest.NewServer(srv.Handler())

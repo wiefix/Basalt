@@ -86,6 +86,13 @@ type Config struct {
 	// before the panel has sent any state, so the UI is reachable at once.
 	PanelDomain   string
 	PanelUpstream string
+	// ReleaseKey is the key release checksums must be signed with (default:
+	// the Basalt release key).
+	ReleaseKey string
+	// UpdateExe and Restart replace, in tests, the binary an update
+	// replaces and how the services are restarted (systemctl).
+	UpdateExe string
+	Restart   func(units []string) error
 }
 
 type Agent struct {
@@ -112,6 +119,7 @@ type Agent struct {
 	MetricsInterval time.Duration
 	RenewBefore     time.Duration
 	collector       *collector
+	updater         *updater
 }
 
 func New(cfg Config, log *slog.Logger) (*Agent, error) {
@@ -157,6 +165,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		MetricsInterval: metricsInterval,
 		RenewBefore:     renewBefore,
 		collector:       newCollector(),
+		updater:         newUpdater(cfg, log.With("subsystem", "update")),
 	}, nil
 }
 
@@ -282,6 +291,7 @@ func (a *Agent) session(ctx context.Context) error {
 	hello.MariaDB = a.mariadbVersion(ctx)
 	hello.Docker, hello.DockerSecurity = a.dockerVersion(ctx)
 	hello.Restic = a.backups.Version(ctx)
+	hello.Updatable = a.updater.updatable()
 	hello.DNSPort, hello.DNSError = a.dns.Status()
 	hello.HTTPSPort = a.proxy.opts.HTTPSPort
 	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
@@ -456,6 +466,18 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return struct{}{}, a.backups.ExportClose(req)
+	case agentproto.TypeUpdatePrepare:
+		var req agentproto.UpdatePrepare
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.updater.prepare(ctx, a.httpClient(), a.identity().PanelURL, req)
+	case agentproto.TypeUpdateActivate:
+		var req agentproto.UpdateActivate
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.updater.activate(req)
 	case agentproto.TypeAppAttach:
 		var req agentproto.AppAttach
 		if err := json.Unmarshal(payload, &req); err != nil {

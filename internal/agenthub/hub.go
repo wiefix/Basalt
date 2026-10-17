@@ -56,6 +56,7 @@ type Hub struct {
 
 	installScript []byte
 	binariesDir   string
+	releasesDir   string
 }
 
 // OnConnect registers a callback run (in its own goroutine) whenever an
@@ -323,7 +324,7 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 			CPUCount: max(0, m.CPUCount), MemTotal: m.MemTotal, LastIP: ip, LastSeen: &now,
 			PHPVersions: cleanVersions(m.PHPVersions), Isolated: m.Isolated, Docker: clean(m.Docker),
 			DockerSecurity: cleanSecurity(m.DockerSecurity), DetectedIPs: cleanIPs(m.PublicIPs),
-			HTTPSPort: max(0, min(m.HTTPSPort, 65535)),
+			HTTPSPort: max(0, min(m.HTTPSPort, 65535)), Updatable: m.Updatable,
 		})
 	case agentproto.TypeMetrics:
 		var m agentproto.Metrics

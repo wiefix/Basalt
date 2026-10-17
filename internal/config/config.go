@@ -42,6 +42,11 @@ type Server struct {
 	// MailPorts publishes mail ports elsewhere on the host, e.g.
 	// "25:2525,993:2993" (development; default: the standard ports).
 	MailPorts map[int]int
+	// ReleaseURL is where new releases are looked for ("" disables update
+	// checks); ReleaseKey must have signed them.
+	ReleaseURL          string
+	ReleaseKey          string
+	ReleaseAllowPrivate bool
 }
 
 // LocalEnroll configures `basalt server local-enroll`.
@@ -80,6 +85,7 @@ type Agent struct {
 	Restic        string
 	PanelDomain   string
 	PanelUpstream string
+	ReleaseKey    string
 }
 
 // Proxy configures `basalt proxy`.
@@ -138,6 +144,13 @@ func ParseServer(args []string, output io.Writer) (Server, error) {
 	fs.StringVar(&cfg.Restic, "restic", env("RESTIC", "restic"), "restic binary used for backups of the panel")
 	mailPorts := fs.String("mail-ports", env("MAIL_PORTS", ""), "publish mail ports on other host ports, e.g. 25:2525,993:2993 (development)")
 	fs.StringVar(&cfg.BinariesDir, "binaries-dir", env("BINARIES_DIR", ""), "directory with basalt-<os>-<arch> binaries to serve to agents")
+	fs.StringVar(&cfg.ReleaseURL, "release-url", env("RELEASE_URL", "https://github.com/wiefix/Basalt/releases"), "where to look for new releases (GitHub releases page; empty disables update checks)")
+	fs.StringVar(&cfg.ReleaseKey, "release-key", env("RELEASE_KEY", ""), "public key (authorized_keys line) releases must be signed with (default: the Basalt release key)")
+	relPrivate, err := envBool("RELEASE_ALLOW_PRIVATE")
+	if err != nil {
+		return cfg, err
+	}
+	fs.BoolVar(&cfg.ReleaseAllowPrivate, "release-allow-private", relPrivate, "allow a release mirror on a private address or over plain http")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}
@@ -200,6 +213,7 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs.StringVar(&cfg.DockerSocket, "docker-socket", env("DOCKER_SOCKET", "/var/run/docker.sock"), "local Docker Engine socket (empty disables apps)")
 	fs.StringVar(&cfg.Restic, "restic", env("RESTIC", "restic"), "restic binary used for backups")
 	fs.StringVar(&cfg.GitCAFile, "git-ca-file", env("GIT_CA_FILE", ""), "extra CA certificates (PEM) trusted for https git repositories")
+	fs.StringVar(&cfg.ReleaseKey, "release-key", env("RELEASE_KEY", ""), "public key (authorized_keys line) updates must be signed with (default: the Basalt release key)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}

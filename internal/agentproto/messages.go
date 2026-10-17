@@ -105,6 +105,9 @@ type Hello struct {
 	PublicIPs []string `json:"public_ips,omitempty"`
 	// HTTPSPort is the port the proxy serves HTTPS on (0: unknown, 443).
 	HTTPSPort int `json:"https_port,omitempty"`
+	// Updatable: the agent can update Basalt here (installed with systemd
+	// units by the installer).
+	Updatable bool `json:"updatable,omitempty"`
 }
 
 type Metrics struct {

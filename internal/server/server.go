@@ -71,6 +71,14 @@ type Options struct {
 	// AuditCheckEvery is how often the audit log's chain is verified
 	// (default daily).
 	AuditCheckEvery time.Duration
+	// ReleaseURL is where new releases are looked for (a GitHub releases
+	// page; "" disables update checks), ReleaseKey what signs them (""
+	// is the Basalt release key). ReleaseAllowPrivate and Version are for
+	// tests: a release server on a private address, the panel's version.
+	ReleaseURL          string
+	ReleaseKey          string
+	ReleaseAllowPrivate bool
+	Version             string
 }
 
 type Server struct {
@@ -110,6 +118,8 @@ type Server struct {
 	certCheckEvery    time.Duration
 	auditCheckEvery   time.Duration
 	auditWatch        auditWatch
+	rel               releaseOptions
+	updates           updater
 
 	setupMu    sync.Mutex
 	setupToken string
@@ -192,6 +202,7 @@ func New(o Options) *Server {
 		offlineAfter:    o.OfflineAfter,
 		certCheckEvery:  o.CertCheckEvery,
 		auditCheckEvery: o.AuditCheckEvery,
+		rel:             releaseOptions{URL: o.ReleaseURL, Key: o.ReleaseKey, AllowPrivate: o.ReleaseAllowPrivate, Version: o.Version},
 		setupToken:      o.SetupToken,
 		ipLimiter:       auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
 		emailLimiter:    auth.NewLimiter(5, 30*time.Second).WithClock(o.Now),
@@ -280,6 +291,9 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("DELETE /api/v1/sites/{id}/databases/{did}", s.requireRole(store.RoleAdmin, s.handleDeleteDatabase))
 	s.backupRoutes(rt, "/api/v1/sites/{id}", s.pathSiteTarget)
 	s.backupRoutes(rt, "/api/v1/apps/{id}", s.pathAppTarget)
+	rt.Handle("GET /api/v1/updates", s.requireRole(store.RoleAdmin, s.handleUpdates))
+	rt.Handle("POST /api/v1/updates/check", s.requireRole(store.RoleAdmin, s.handleCheckUpdates))
+	rt.Handle("POST /api/v1/updates/apply", s.requireRole(store.RoleAdmin, s.handleApplyUpdate))
 	rt.Handle("GET /api/v1/sites/{id}/snapshots/{sid}/files", s.requireRole(store.RoleMember, s.handleSnapshotFiles))
 	rt.Handle("GET /api/v1/sites/{id}/snapshots/{sid}/download", s.requireRole(store.RoleMember, s.handleSnapshotDownload))
 	rt.Handle("POST /api/v1/sites/{id}/snapshots/{sid}/restore-copy", s.requireRole(store.RoleMember, s.handleRestoreCopy))
@@ -427,6 +441,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go s.refreshMailLoop(ctx)
 	go s.catalogLoop(ctx)
 	go s.healthLoop(ctx)
+	go s.updateLoop(ctx)
 	go s.WatchServers(ctx)
 	go s.WatchCertificates(ctx)
 	go s.WatchAuditLog(ctx)

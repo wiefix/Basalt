@@ -34,13 +34,17 @@ jobs:
       - name: Checksums and signature
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          TAG: ${{ github.ref_name }}
         run: |
           if [ -z "$RELEASE_SIGNING_KEY" ]; then
             echo "The RELEASE_SIGNING_KEY secret is missing: refusing to publish an unsigned release" >&2
             exit 1
           fi
           cd bin
-          sha256sum basalt-linux-amd64 basalt-linux-arm64 >SHA256SUMS
+          # The signed list covers the version file: panels read the
+          # release's version from it.
+          printf '%s\n' "$TAG" >version.txt
+          sha256sum basalt-linux-amd64 basalt-linux-arm64 version.txt >SHA256SUMS
           umask 077
           printf '%s\n' "$RELEASE_SIGNING_KEY" >"$RUNNER_TEMP/release-key"
           ssh-keygen -q -Y sign -f "$RUNNER_TEMP/release-key" -n basalt-release SHA256SUMS
@@ -57,4 +61,4 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           gh release create "$TAG" --title "$TAG" --generate-notes \
-            bin/basalt-linux-amd64 bin/basalt-linux-arm64 bin/SHA256SUMS bin/SHA256SUMS.sig bin/install.sh
+            bin/basalt-linux-amd64 bin/basalt-linux-arm64 bin/SHA256SUMS bin/SHA256SUMS.sig bin/version.txt bin/install.sh

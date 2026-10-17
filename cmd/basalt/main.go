@@ -183,21 +183,25 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	hub := agenthub.New(baseLog.With("component", "agenthub"), db, ca, nil)
 	hub.ServeInstaller(deploy.InstallScript, cfg.BinariesDir)
+	hub.ServeReleases(filepath.Join(cfg.DataDir, "releases"))
 
 	api := server.New(server.Options{
-		Log:            log,
-		DB:             db,
-		Box:            box,
-		Hasher:         auth.NewHasher(auth.DefaultArgon2Params, min(4, runtime.NumCPU())),
-		SetupToken:     setupToken,
-		SecureCookies:  !cfg.InsecureCookies,
-		Agents:         hub,
-		AgentURL:       cfg.AgentURL,
-		TrustedProxies: trusted,
-		SetupTokenFile: setupFile,
-		DataDir:        cfg.DataDir,
-		Restic:         cfg.Restic,
-		MailHostPorts:  cfg.MailPorts,
+		Log:                 log,
+		DB:                  db,
+		Box:                 box,
+		Hasher:              auth.NewHasher(auth.DefaultArgon2Params, min(4, runtime.NumCPU())),
+		SetupToken:          setupToken,
+		SecureCookies:       !cfg.InsecureCookies,
+		Agents:              hub,
+		AgentURL:            cfg.AgentURL,
+		TrustedProxies:      trusted,
+		SetupTokenFile:      setupFile,
+		DataDir:             cfg.DataDir,
+		Restic:              cfg.Restic,
+		MailHostPorts:       cfg.MailPorts,
+		ReleaseURL:          cfg.ReleaseURL,
+		ReleaseKey:          cfg.ReleaseKey,
+		ReleaseAllowPrivate: cfg.ReleaseAllowPrivate,
 	})
 	hub.OnConnect(api.SyncSites)
 	hub.OnACMEChallenge(api.ACMEChallenge)
@@ -257,6 +261,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		GitCAFile:     cfg.GitCAFile,
 		Restic:        cfg.Restic,
 		PanelDomain:   cfg.PanelDomain,
+		ReleaseKey:    cfg.ReleaseKey,
 		PanelUpstream: cfg.PanelUpstream,
 	}, log)
 	if err != nil {
