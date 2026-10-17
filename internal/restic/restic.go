@@ -361,9 +361,72 @@ func (r *Runner) RestoreTree(ctx context.Context, repo Repo, snapshot, src, targ
 	return err
 }
 
+// SnapshotByID returns one snapshot, nil if there is none with that id.
+func (r *Runner) SnapshotByID(ctx context.Context, repo Repo, id string) (*Snapshot, error) {
+	// An unknown id is no error for restic: it lists nothing.
+	out, err := r.run(ctx, repo, nil, "snapshots", "--no-lock", "--json", id)
+	if err != nil {
+		return nil, err
+	}
+	var list []Snapshot
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, fmt.Errorf("parse snapshots: %w", err)
+	}
+	if len(list) != 1 {
+		return nil, nil
+	}
+	return &list[0], nil
+}
+
+// Node is a file, directory or other entry in a snapshot.
+type Node struct {
+	Name  string    `json:"name"`
+	Type  string    `json:"type"` // file, dir, symlink, ...
+	Path  string    `json:"path"`
+	Size  uint64    `json:"size"`
+	Mode  uint32    `json:"mode"` // Go fs.FileMode bits
+	MTime time.Time `json:"mtime"`
+}
+
+// List returns the entry at an absolute path of a snapshot and, for a
+// directory, what it holds directly. It reports a missing path as nil.
+func (r *Runner) List(ctx context.Context, repo Repo, snapshot, p string) (*Node, []Node, error) {
+	out, err := r.run(ctx, repo, nil, "ls", "--no-lock", "--json", snapshot, p)
+	if err != nil {
+		return nil, nil, err
+	}
+	var self *Node
+	var children []Node
+	for line := range bytes.SplitSeq(out, []byte("\n")) {
+		var n struct {
+			Node
+			Type string `json:"struct_type"`
+		}
+		if len(line) == 0 || json.Unmarshal(line, &n) != nil || n.Type != "node" {
+			continue
+		}
+		if n.Path == p {
+			self = &n.Node
+		} else {
+			children = append(children, n.Node)
+		}
+	}
+	return self, children, nil
+}
+
+// DumpTree writes the directory dir of a snapshot to w as an archive
+// ("tar" or "zip") with paths relative to dir.
+func (r *Runner) DumpTree(ctx context.Context, repo Repo, snapshot, dir, format string, w io.Writer) error {
+	return r.dump(ctx, w, repo, "dump", "--quiet", "--archive", format, snapshot+":"+dir, "/")
+}
+
 // Dump writes one file of a snapshot to w.
 func (r *Runner) Dump(ctx context.Context, repo Repo, snapshot, file string, w io.Writer) error {
-	cmd := r.command(ctx, repo, "dump", "--quiet", snapshot, file)
+	return r.dump(ctx, w, repo, "dump", "--quiet", snapshot, file)
+}
+
+func (r *Runner) dump(ctx context.Context, w io.Writer, repo Repo, args ...string) error {
+	cmd := r.command(ctx, repo, args...)
 	cmd.Stdout = w
 	tail := &tailWriter{line: r.Line}
 	cmd.Stderr = tail

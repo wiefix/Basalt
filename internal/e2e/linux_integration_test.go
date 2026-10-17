@@ -328,6 +328,25 @@ try {
 	if fi, _ := os.Stat("/var/backups/basalt-it"); fi == nil || fi.Mode().Perm() != 0o700 {
 		t.Fatal("backup directory is not private")
 	}
+	// A copy of a folder of the backup, restored next to the site's files,
+	// belongs to the site's user; a file downloads as it was.
+	var filesSnap string
+	for _, sn := range done["snapshots"].([]any) {
+		if sn := sn.(map[string]any); sn["item"].(map[string]any)["kind"] == "site_files" {
+			filesSnap = sn["id"].(string)
+		}
+	}
+	snapBase := "/api/v1/sites/" + idA + "/snapshots/" + filesSnap
+	cp := p.call(http.StatusCreated, "POST", snapBase+"/restore-copy", map[string]any{"path": "public"})
+	copied := filepath.Join(sitesRoot, idA, cp["folder"].(string), "public", "db.php")
+	for _, f := range []string{copied, filepath.Dir(copied)} {
+		if fi, err := os.Stat(f); err != nil || strconv.Itoa(int(fi.Sys().(*syscall.Stat_t).Uid)) != mustUID(t, "basalt-s"+idA) {
+			t.Fatalf("restored copy %s is not owned by the site user", f)
+		}
+	}
+	if code, _, b := p.raw("GET", snapBase+"/download"+q("public/db.php"), "", nil); code != http.StatusOK || !strings.Contains(string(b), "PDO") {
+		t.Fatalf("download from the backup: %d %q", code, b)
+	}
 
 	// Sites with databases cannot be deleted by accident.
 	p.call(http.StatusConflict, "DELETE", "/api/v1/sites/"+idA, nil)

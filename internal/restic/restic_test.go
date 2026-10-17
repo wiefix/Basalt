@@ -1,12 +1,14 @@
 package restic
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -171,5 +173,66 @@ func TestCheck(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(lines, "\n"), "pack ") {
 		t.Fatalf("findings not in the output: %q", lines)
+	}
+}
+
+// TestSnapshotFiles: a snapshot's entries, one file and a folder as an
+// archive with relative names.
+func TestSnapshotFiles(t *testing.T) {
+	ctx := context.Background()
+	r := runner(t)
+	repo := Repo{Location: filepath.Join(t.TempDir(), "repo"), Password: "pw"}
+	if _, err := r.Init(ctx, repo); err != nil {
+		t.Fatal(err)
+	}
+	src, _ := filepath.EvalSymlinks(t.TempDir())
+	os.MkdirAll(filepath.Join(src, "public", "img"), 0o755)
+	os.WriteFile(filepath.Join(src, "public", "index.html"), []byte("hello"), 0o644)
+	os.WriteFile(filepath.Join(src, "public", "img", "a b.png"), []byte("png"), 0o600)
+	s, err := r.Backup(ctx, repo, BackupOptions{Host: "h", Tags: []string{"res=site-1"}, Paths: []string{src}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snap, err := r.SnapshotByID(ctx, repo, s.SnapshotID[:8])
+	if err != nil || snap == nil || snap.ID != s.SnapshotID || snap.Host != "h" || len(snap.Paths) != 1 || snap.Paths[0] != src {
+		t.Fatalf("snapshot = %+v, %v", snap, err)
+	}
+	if none, err := r.SnapshotByID(ctx, repo, "deadbeef"); none != nil || err != nil {
+		t.Fatalf("unknown snapshot = %+v, %v", none, err)
+	}
+
+	self, children, err := r.List(ctx, repo, snap.ID, filepath.Join(src, "public"))
+	if err != nil || self == nil || self.Type != "dir" || len(children) != 2 {
+		t.Fatalf("list = %+v %+v %v", self, children, err)
+	}
+	for _, c := range children {
+		if c.Name == "index.html" && (c.Type != "file" || c.Size != 5 || c.MTime.IsZero()) {
+			t.Fatalf("index.html = %+v", c)
+		}
+	}
+	if self, _, err := r.List(ctx, repo, snap.ID, filepath.Join(src, "nope")); self != nil || err != nil {
+		t.Fatalf("missing path = %+v, %v", self, err)
+	}
+
+	var file bytes.Buffer
+	if err := r.Dump(ctx, repo, snap.ID, filepath.Join(src, "public", "index.html"), &file); err != nil || file.String() != "hello" {
+		t.Fatalf("dump = %q, %v", file.String(), err)
+	}
+	var archive bytes.Buffer
+	if err := r.DumpTree(ctx, repo, snap.ID, filepath.Join(src, "public"), "tar", &archive); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	tr := tar.NewReader(&archive)
+	for {
+		h, err := tr.Next()
+		if err != nil {
+			break
+		}
+		names = append(names, h.Name)
+	}
+	if !slices.Contains(names, "index.html") || !slices.Contains(names, "img/a b.png") {
+		t.Fatalf("archive names %v", names)
 	}
 }

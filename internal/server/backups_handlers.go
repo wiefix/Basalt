@@ -797,27 +797,8 @@ func (s *Server) handleSnapshots(resolve targetResolver) handler {
 // snapshots asks the agent for the target's snapshots; it writes the error
 // response itself.
 func (s *Server) snapshots(w http.ResponseWriter, r *http.Request, t *backupTarget) ([]agentproto.SnapshotInfo, agentproto.BackupRepo, bool) {
-	policy, err := s.db.BackupPolicy(r.Context(), t.BackupTarget)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusUnprocessableEntity, "it has no backup storage")
-		return nil, agentproto.BackupRepo{}, false
-	}
-	if err != nil {
-		s.internalError(w, r, "load backup policy", err)
-		return nil, agentproto.BackupRepo{}, false
-	}
-	st, err := s.db.BackupStorageByID(r.Context(), policy.StorageID)
-	if err != nil {
-		s.internalError(w, r, "load backup storage", err)
-		return nil, agentproto.BackupRepo{}, false
-	}
-	repo, err := s.repoFor(st, t.ServerID)
-	if err != nil {
-		s.internalError(w, r, "prepare repository", err)
-		return nil, agentproto.BackupRepo{}, false
-	}
-	if !s.agents.Connected(t.ServerID) {
-		writeError(w, http.StatusConflict, "the server is offline")
+	repo, ok := s.targetRepo(w, r, t)
+	if !ok {
 		return nil, agentproto.BackupRepo{}, false
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), backupCheckTime)
@@ -829,6 +810,35 @@ func (s *Server) snapshots(w http.ResponseWriter, r *http.Request, t *backupTarg
 		return nil, agentproto.BackupRepo{}, false
 	}
 	return resp.Snapshots, repo, true
+}
+
+// targetRepo is the repository the target's backups go to, on a connected
+// server; it writes the error response itself.
+func (s *Server) targetRepo(w http.ResponseWriter, r *http.Request, t *backupTarget) (agentproto.BackupRepo, bool) {
+	policy, err := s.db.BackupPolicy(r.Context(), t.BackupTarget)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusUnprocessableEntity, "it has no backup storage")
+		return agentproto.BackupRepo{}, false
+	}
+	if err != nil {
+		s.internalError(w, r, "load backup policy", err)
+		return agentproto.BackupRepo{}, false
+	}
+	st, err := s.db.BackupStorageByID(r.Context(), policy.StorageID)
+	if err != nil {
+		s.internalError(w, r, "load backup storage", err)
+		return agentproto.BackupRepo{}, false
+	}
+	repo, err := s.repoFor(st, t.ServerID)
+	if err != nil {
+		s.internalError(w, r, "prepare repository", err)
+		return agentproto.BackupRepo{}, false
+	}
+	if !s.agents.Connected(t.ServerID) {
+		writeError(w, http.StatusConflict, "the server is offline")
+		return agentproto.BackupRepo{}, false
+	}
+	return repo, true
 }
 
 type restoreRequest struct {

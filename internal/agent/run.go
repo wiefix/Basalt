@@ -404,6 +404,34 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return a.backups.Restore(ctx, req, agentproto.StreamSender(ctx)), nil
+	case agentproto.TypeBackupBrowse, agentproto.TypeBackupExport, agentproto.TypeBackupRestoreCopy:
+		var req agentproto.SnapshotFilesRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		var resp any
+		var err error
+		switch typ {
+		case agentproto.TypeBackupBrowse:
+			resp, err = a.backups.Browse(ctx, req)
+		case agentproto.TypeBackupExport:
+			resp, err = a.backups.Export(ctx, req)
+		default:
+			resp, err = a.backups.RestoreCopy(ctx, req)
+		}
+		return resp, publicError(err)
+	case agentproto.TypeBackupExportRead:
+		var req agentproto.ExportRead
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.backups.ExportRead(req)
+	case agentproto.TypeBackupExportClose:
+		var req agentproto.ExportClose
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.backups.ExportClose(req)
 	case agentproto.TypeAppAttach:
 		var req agentproto.AppAttach
 		if err := json.Unmarshal(payload, &req); err != nil {

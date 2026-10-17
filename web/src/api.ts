@@ -387,6 +387,22 @@ export interface Snapshot {
   bytes: number;
 }
 
+export interface SnapshotEntry {
+  name: string;
+  type: "file" | "dir" | "symlink" | "other";
+  size: number;
+  mode: string;
+  mod_time: string;
+}
+
+export interface RestoredCopy {
+  folder: string;
+  files: number;
+  dirs: number;
+  bytes: number;
+  skipped: number;
+}
+
 export interface Webhook {
   path: string;
   secret: string;
@@ -1002,6 +1018,11 @@ export const api = {
   runBackup: (base: string) => post<{ backup: BackupRun }>(`${base}/backups`),
   snapshots: (base: string) => get<{ snapshots: Snapshot[] }>(`${base}/snapshots`),
   restore: (base: string, snapshots: string[]) => post<{ backup: BackupRun }>(`${base}/restore`, { snapshots }),
+  snapshotFiles: (siteId: number, snap: string, path: string) =>
+    get<{ path: string; entries: SnapshotEntry[] }>(`/api/v1/sites/${siteId}/snapshots/${snap}/files${q(path)}`),
+  snapshotDownloadUrl: (siteId: number, snap: string, path: string) => `/api/v1/sites/${siteId}/snapshots/${snap}/download${q(path)}`,
+  restoreCopy: (siteId: number, snap: string, path: string) =>
+    post<RestoredCopy>(`/api/v1/sites/${siteId}/snapshots/${snap}/restore-copy`, { path }),
 
   sftpUsers: (siteId: number) =>
     get<{ users: SFTPUser[]; connection: SFTPConnection | null }>(`/api/v1/sites/${siteId}/sftp-users`),

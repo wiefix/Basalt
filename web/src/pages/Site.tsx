@@ -61,7 +61,7 @@ export function SitePage({ user }: { user: User }) {
         <Route path="domains" element={<DomainsTab site={s} user={user} />} />
         <Route path="sftp" element={<SFTPTab site={s} user={user} host={server?.last_ip} />} />
         <Route path="databases" element={<DatabasesTab site={s} user={user} />} />
-        <Route path="backups" element={<BackupsTab target={{ base: `/api/v1/sites/${s.id}`, name: s.name }} user={user} />} />
+        <Route path="backups" element={<BackupsTab target={{ base: `/api/v1/sites/${s.id}`, name: s.name, siteId: s.id }} user={user} />} />
         <Route path="settings" element={<SettingsTab site={s} phpVersions={server?.isolated ? server.php_versions : []} />} />
       </Routes>
     </>

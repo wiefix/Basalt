@@ -5,6 +5,7 @@ import { api, can, type BackupItem, type BackupPolicy, type BackupRun, type Snap
 import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useConfirm, useToast } from "../components/ui";
 import { useEventStream } from "../components/stream";
 import { LogView } from "../components/LogView";
+import { SnapshotFilesModal } from "./SnapshotFiles";
 
 const pad = (n: number) => String(n).padStart(2, "0");
 const minuteText = (m: number) => `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
@@ -33,6 +34,7 @@ export interface BackupTarget {
   name: string;
   policyUrl?: string; // default base + "/backup-policy"
   queryKey?: unknown[]; // refreshed when the policy changes; default ["backups", base]
+  siteId?: number; // a site: its backed-up files can be browsed
 }
 
 const policyUrl = (t: BackupTarget) => t.policyUrl ?? `${t.base}/backup-policy`;
@@ -43,6 +45,7 @@ export function BackupsTab({ target, user }: { target: BackupTarget; user: User 
   const toast = useToast();
   const [shown, setShown] = useState<number | null>(null);
   const [restoring, setRestoring] = useState(false);
+  const [browsing, setBrowsing] = useState(false);
   const key = ["backups", target.base];
   const data = useQuery({ queryKey: key, queryFn: () => api.backups(target.base), refetchInterval: 15_000 });
   const running = data.data?.backups.find((b) => b.status === "running");
@@ -82,10 +85,15 @@ export function BackupsTab({ target, user }: { target: BackupTarget; user: User 
               {contents(items)}
             </p>
           </div>
-          <div className="row">
+          <div className="row wrap">
             {policy && can(user, "member") && (
               <button className="btn primary" onClick={() => run.mutate()} disabled={run.isPending || !!running || !restic || items.length === 0}>
                 <Icon name="archive" /> {running ? "Running…" : "Back up now"}
+              </button>
+            )}
+            {policy && target.siteId !== undefined && can(user, "member") && (
+              <button className="btn" onClick={() => setBrowsing(true)}>
+                <Icon name="folder" /> Browse files
               </button>
             )}
             {policy && can(user, "admin") && (
@@ -140,6 +148,9 @@ export function BackupsTab({ target, user }: { target: BackupTarget; user: User 
         )}
       </div>
       {shown !== null && <RunModal target={target} id={shown} onClose={() => setShown(null)} />}
+      {browsing && target.siteId !== undefined && (
+        <SnapshotFilesModal siteId={target.siteId} base={target.base} canWrite={can(user, "member")} onClose={() => setBrowsing(false)} />
+      )}
       {restoring && (
         <RestoreModal
           target={target}

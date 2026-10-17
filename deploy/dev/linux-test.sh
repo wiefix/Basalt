@@ -18,4 +18,5 @@ exec docker run --rm \
     for i in $(seq 50); do [ -S /run/mysqld/mysqld.sock ] && break; sleep 0.2; done
     echo "PHP-FPM $V and $(mariadb -N -e "SELECT VERSION()") started; $(restic version | cut -d" " -f1-2)"
     go test -count=1 -tags linux_integration -run "TestLinux" -v ./internal/e2e/ ./internal/dns/ 2>&1 | grep -vE "^\{\"level\""
+    go test -count=1 -run "TestSnapshotFiles|TestCheck" ./internal/restic/
   '

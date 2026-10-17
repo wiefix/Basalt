@@ -78,6 +78,39 @@ func (s *Site) Extract(archive, destDir string, overwrite bool, lim Limits) (*Ex
 	return x.res, err
 }
 
+// ExtractTar unpacks a tar stream into the existing directory destDir, with
+// the same confinement, normalisation and limits as Extract.
+func (s *Site) ExtractTar(r io.Reader, destDir string, lim Limits) (*ExtractResult, error) {
+	x, err := s.extractorAt(destDir, lim)
+	if err != nil {
+		return nil, err
+	}
+	return x.res, x.tar(r)
+}
+
+// ExtractFile writes r as the new file name in the existing directory
+// destDir, within the limits.
+func (s *Site) ExtractFile(r io.Reader, destDir, name string, lim Limits) (*ExtractResult, error) {
+	x, err := s.extractorAt(destDir, lim)
+	if err != nil {
+		return nil, err
+	}
+	return x.res, x.file(name, 0o644, r)
+}
+
+func (s *Site) extractorAt(destDir string, lim Limits) (*extractor, error) {
+	cd, err := Clean(destDir)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := s.root.Stat(cd); err != nil {
+		return nil, err
+	} else if !fi.IsDir() {
+		return nil, ErrNotDir
+	}
+	return &extractor{site: s, dest: cd, lim: lim, res: &ExtractResult{}}, nil
+}
+
 type extractor struct {
 	site      *Site
 	dest      string

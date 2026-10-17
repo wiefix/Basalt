@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Backup requests. The panel owns storages, schedules and history; the
@@ -25,6 +27,18 @@ const (
 	// TypeBackupVerify checks a repository's integrity (restic check);
 	// streams LogChunk frames.
 	TypeBackupVerify = "backup_verify"
+	// TypeBackupBrowse lists a folder of a snapshot of a site's files.
+	TypeBackupBrowse = "backup_browse"
+	// TypeBackupExport writes a file, or a folder as a zip archive, of a
+	// snapshot of a site's files to a temporary file on the server, which
+	// the panel then reads with TypeBackupExportRead and drops with
+	// TypeBackupExportClose. Streaming (it can take long; no frames).
+	TypeBackupExport      = "backup_export"
+	TypeBackupExportRead  = "backup_export_read"
+	TypeBackupExportClose = "backup_export_close"
+	// TypeBackupRestoreCopy restores a file or folder of a snapshot of a
+	// site's files into a new folder of the site. Streaming (no frames).
+	TypeBackupRestoreCopy = "backup_restore_copy"
 )
 
 // Storage kinds.
@@ -354,4 +368,113 @@ type VerifyResponse struct {
 	Log   string `json:"log"`
 	// Empty: the repository holds no backups yet (nothing was checked).
 	Empty bool `json:"empty,omitempty"`
+}
+
+// SnapshotFilesRequest is about a file or folder of a snapshot of a site's
+// files. Path is relative to the site's directory ("" is all of it).
+type SnapshotFilesRequest struct {
+	Repo     BackupRepo `json:"repo"`
+	Resource string     `json:"resource"`
+	SiteID   int64      `json:"site_id"`
+	Snapshot string     `json:"snapshot"`
+	Path     string     `json:"path"`
+}
+
+func (r *SnapshotFilesRequest) Validate() error {
+	if err := r.Repo.Validate(); err != nil {
+		return err
+	}
+	if r.SiteID <= 0 || r.Resource != fmt.Sprintf("site-%d", r.SiteID) {
+		return errors.New("invalid resource")
+	}
+	if !snapshotRE.MatchString(r.Snapshot) {
+		return errors.New("invalid snapshot id")
+	}
+	if !ValidSnapshotPath(r.Path) {
+		return errors.New("invalid path")
+	}
+	return nil
+}
+
+// ValidSnapshotPath reports whether p can name something in a snapshot:
+// UTF-8 without control characters, at most 4096 bytes.
+func ValidSnapshotPath(p string) bool {
+	if len(p) > 4096 || !utf8.ValidString(p) {
+		return false
+	}
+	for _, c := range p {
+		if unicode.IsControl(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// SnapshotEntry is a file, folder or other entry of a snapshot.
+type SnapshotEntry struct {
+	Name    string    `json:"name"`
+	Type    string    `json:"type"` // file, dir, symlink, other
+	Size    uint64    `json:"size"`
+	Mode    string    `json:"mode"` // octal permission bits, e.g. "0644"
+	ModTime time.Time `json:"mod_time"`
+}
+
+// BrowseResponse lists a folder of a snapshot. Path is the folder,
+// relative to the site's directory ("" for the top).
+type BrowseResponse struct {
+	Path    string          `json:"path"`
+	Entries []SnapshotEntry `json:"entries"`
+}
+
+// ExportResponse describes an exported file, ready to be read.
+type ExportResponse struct {
+	ID   string `json:"id"`
+	Name string `json:"name"` // file name to save it as
+	Size int64  `json:"size"`
+}
+
+var exportIDRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// ExportRead reads part of an exported file.
+type ExportRead struct {
+	ID     string `json:"id"`
+	Offset int64  `json:"offset"`
+	Length int    `json:"length"`
+}
+
+func (r *ExportRead) Validate() error {
+	if !exportIDRE.MatchString(r.ID) {
+		return errors.New("invalid export id")
+	}
+	if r.Offset < 0 || r.Length <= 0 || r.Length > 1<<20 {
+		return errors.New("invalid range")
+	}
+	return nil
+}
+
+type ExportChunk struct {
+	Data []byte `json:"data"`
+}
+
+// ExportClose drops an exported file.
+type ExportClose struct {
+	ID string `json:"id"`
+}
+
+func (r *ExportClose) Validate() error {
+	if !exportIDRE.MatchString(r.ID) {
+		return errors.New("invalid export id")
+	}
+	return nil
+}
+
+// RestoreCopyResponse tells where a restored copy went: Folder is relative
+// to the site's directory. Skipped counts entries left out (symbolic
+// links and other special files).
+type RestoreCopyResponse struct {
+	Folder  string `json:"folder"`
+	Files   int    `json:"files"`
+	Dirs    int    `json:"dirs"`
+	Bytes   int64  `json:"bytes"`
+	Skipped int    `json:"skipped"`
 }
