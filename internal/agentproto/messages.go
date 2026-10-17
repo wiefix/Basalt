@@ -111,6 +111,9 @@ type Hello struct {
 	// Updatable: the agent can update Basalt here (installed with systemd
 	// units by the installer).
 	Updatable bool `json:"updatable,omitempty"`
+	// PHPLimits: each site's PHP runs as its own systemd service, so the
+	// sites' CPU and memory limits apply.
+	PHPLimits bool `json:"php_limits,omitempty"`
 }
 
 type Metrics struct {
@@ -505,4 +508,23 @@ type SiteInstall struct {
 type SiteInstallResponse struct {
 	Version string `json:"version,omitempty"`
 	Files   int    `json:"files"`
+}
+
+// TypeSiteTrash lists the folders of deleted sites waiting in the trash;
+// with Remove (an entry's name) it deletes that one first.
+const TypeSiteTrash = "site_trash"
+
+type SiteTrash struct {
+	Remove string `json:"remove,omitempty"`
+}
+
+type TrashEntry struct {
+	Name      string    `json:"name"` // <site id>-<unix time>
+	SiteID    int64     `json:"site_id"`
+	DeletedAt time.Time `json:"deleted_at"`
+	Bytes     int64     `json:"bytes"`
+}
+
+type SiteTrashResponse struct {
+	Entries []TrashEntry `json:"entries"`
 }

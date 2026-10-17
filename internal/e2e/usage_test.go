@@ -85,3 +85,35 @@ func TestSiteUsage(t *testing.T) {
 	m.call(http.StatusOK, "POST", base+"/usage", map[string]any{})
 	m.call(http.StatusForbidden, "PUT", base+"/quota", map[string]any{"quota_mb": 100})
 }
+
+// TestSiteTrash: a deleted site's files wait in the server's trash, where
+// an admin sees and removes them.
+func TestSiteTrash(t *testing.T) {
+	p := startPanel(t)
+	h := startHost(t, p)
+	r := p.call(http.StatusCreated, "POST", "/api/v1/sites", map[string]any{
+		"server_id": mustAtoi(h.id), "name": "gone", "domains": []string{"gone.localhost"}, "tls": "internal",
+	})
+	sid := jsonID(r["site"].(map[string]any)["id"])
+	p.call(http.StatusOK, "DELETE", "/api/v1/sites/"+sid, nil)
+	trash := "/api/v1/servers/" + h.id + "/trash"
+	l := p.call(http.StatusOK, "GET", trash, nil)
+	entries := l["entries"].([]any)
+	if len(entries) != 1 || jsonID(entries[0].(map[string]any)["site_id"]) != sid || l["keep_days"] != float64(30) {
+		t.Fatalf("trash = %v", l)
+	}
+	name := entries[0].(map[string]any)["name"].(string)
+	p.call(http.StatusUnprocessableEntity, "DELETE", trash+"/..%2F1-1", nil)
+	p.call(http.StatusNotFound, "DELETE", trash+"/99-1", nil)
+	if l := p.call(http.StatusOK, "DELETE", trash+"/"+name, nil); len(l["entries"].([]any)) != 0 {
+		t.Fatalf("after removing = %v", l)
+	}
+	if _, err := os.Stat(filepath.Join(h.sitesRoot, ".trash", name)); !os.IsNotExist(err) {
+		t.Fatal("files still in the trash")
+	}
+	p.call(http.StatusCreated, "POST", "/api/v1/users", map[string]string{"email": "m@example.com", "name": "M", "password": "a long password 1", "role": "member"})
+	m := *p
+	m.hc = &http.Client{Jar: newJar()}
+	m.call(http.StatusOK, "POST", "/api/v1/auth/login", map[string]string{"email": "m@example.com", "password": "a long password 1"})
+	m.call(http.StatusForbidden, "GET", trash, nil)
+}

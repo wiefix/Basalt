@@ -321,6 +321,8 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("POST /api/v1/backup-storages/{id}/check", s.requireRole(store.RoleAdmin, s.handleCheckStorage))
 	rt.Handle("GET /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleViewer, s.handleListSFTPUsers))
 	rt.Handle("POST /api/v1/sites/{id}/sftp-users", s.requireRole(store.RoleAdmin, s.handleCreateSFTPUser))
+	rt.Handle("GET /api/v1/servers/{id}/trash", s.requireRole(store.RoleAdmin, s.handleTrash))
+	rt.Handle("DELETE /api/v1/servers/{id}/trash/{name}", s.requireRole(store.RoleAdmin, s.handleEmptyTrashEntry))
 	rt.Handle("GET /api/v1/servers/{id}/sftp-bans", s.requireRole(store.RoleAdmin, s.handleSFTPBans))
 	rt.Handle("DELETE /api/v1/servers/{id}/sftp-bans/{ip}", s.requireRole(store.RoleAdmin, s.handleSFTPUnban))
 	rt.Handle("PUT /api/v1/sites/{id}/sftp-users/{uid}", s.requireRole(store.RoleAdmin, s.handleUpdateSFTPUser))

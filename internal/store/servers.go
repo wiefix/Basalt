@@ -46,6 +46,7 @@ type Server struct {
 	// Updatable: its agent can update Basalt there.
 	Updatable bool
 	MariaDB   string // version of the local MariaDB, "" if absent
+	PHPLimits bool   // sites' PHP runs as systemd services with limits
 	CreatedAt time.Time
 }
 
@@ -79,7 +80,7 @@ var ErrNameTaken = errors.New("name already in use")
 const serverColumns = `id, name, enrolled_at IS NOT NULL, enroll_expires_at, COALESCE(cert_fp, ''),
 	COALESCE(prev_cert_fp, ''), cert_expires_at, hostname, os, arch, kernel, distro, agent_version,
 	cpu_count, mem_total, last_seen_at, last_ip, php_versions, isolated, docker, docker_security, restic,
-	detected_ips, public_ips, https_port, updatable, mariadb, created_at`
+	detected_ips, public_ips, https_port, updatable, mariadb, php_limits, created_at`
 
 func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 	var s Server
@@ -89,7 +90,7 @@ func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 	err := row.Scan(&s.ID, &s.Name, &s.Enrolled, &enrollExp, &s.CertFP, &s.PrevCertFP, &certExp,
 		&s.Hostname, &s.OS, &s.Arch, &s.Kernel, &s.Distro, &s.AgentVersion,
 		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &phpVersions, &s.Isolated, &s.Docker, &dockerSec, &s.Restic,
-		&detected, &public, &s.HTTPSPort, &s.Updatable, &s.MariaDB, &created)
+		&detected, &public, &s.HTTPSPort, &s.Updatable, &s.MariaDB, &s.PHPLimits, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -183,9 +184,9 @@ func (db *DB) UpdateServerHello(ctx context.Context, id int64, s Server) error {
 	return db.execOne(ctx,
 		`UPDATE servers SET hostname = ?, os = ?, arch = ?, kernel = ?, distro = ?, agent_version = ?,
 		 cpu_count = ?, mem_total = ?, last_ip = ?, last_seen_at = ?, php_versions = ?, isolated = ?, docker = ?,
-		 docker_security = ?, detected_ips = ?, https_port = ?, updatable = ? WHERE id = ?`,
+		 docker_security = ?, detected_ips = ?, https_port = ?, updatable = ?, php_limits = ? WHERE id = ?`,
 		s.Hostname, s.OS, s.Arch, s.Kernel, s.Distro, s.AgentVersion, s.CPUCount, s.MemTotal,
-		s.LastIP, s.LastSeen.Unix(), string(php), s.Isolated, s.Docker, sec, string(detected), s.HTTPSPort, s.Updatable, id)
+		s.LastIP, s.LastSeen.Unix(), string(php), s.Isolated, s.Docker, sec, string(detected), s.HTTPSPort, s.Updatable, s.PHPLimits, id)
 }
 
 // SetServerPublicIPs sets the addresses automatic DNS records use for the

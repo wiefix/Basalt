@@ -78,6 +78,17 @@ for i in $(seq 30); do
   docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " && break; sleep 1
 done
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/; echo
+echo "### the site's PHP runs as its own systemd service, with CPU and memory limits"
+docker exec basalt-node1 systemctl is-active basalt-php-site-$SITE.service
+docker exec basalt-node1 sh -c "! ls /etc/php/*/fpm/pool.d/basalt-site-$SITE.conf 2>/dev/null" || { echo "the site's pool is still in the shared PHP-FPM"; exit 1; }
+$API -X PUT -d '{"cpu_percent":50,"ram_mb":256}' http://127.0.0.1:8080/api/v1/sites/$SITE/php-settings >/dev/null
+LIMITS=$(docker exec basalt-node1 systemctl show -p CPUQuotaPerSecUSec -p MemoryMax --value basalt-php-site-$SITE.service | tr '\n' ' ')
+echo "  limits: $LIMITS"
+[ "$LIMITS" = "500ms 268435456 " ] || { echo "limits not applied"; exit 1; }
+for i in $(seq 30); do
+  docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " && break; sleep 1
+done
+docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "site down after setting limits"; exit 1; }
 
 echo "### app on node1 (container reached by its IP on a private network, no published port)"
 APP=$($API -d "{\"server_id\":$NODE,\"name\":\"who\",\"image\":\"traefik/whoami:v1.10\",\"port\":80,\"domains\":[\"who.test\"],\"tls\":\"internal\"}" http://127.0.0.1:8080/api/v1/apps | python3 -c 'import sys,json; print(json.load(sys.stdin)["app"]["id"])')
@@ -246,7 +257,8 @@ docker exec basalt-node1 sh /deploy/install.sh uninstall --purge --yes
 docker exec basalt-node1 sh -c '
   ! test -e /srv/basalt && ! test -e /var/lib/basalt || exit 1
   ! id basalt-s'$SITE' 2>/dev/null && ! id basalt 2>/dev/null && ! id basalt-proxy 2>/dev/null || exit 2
-  ! ls /etc/php/*/fpm/pool.d/basalt-site-* 2>/dev/null || exit 3
+  ! ls /etc/php/*/fpm/pool.d/basalt-site-* /etc/systemd/system/basalt-php-site-* 2>/dev/null && ! test -e /etc/basalt || exit 3
+  ! systemctl list-units --all --plain --no-legend "basalt-php-site-*" | grep -q . || exit 7
   [ -z "$(docker ps -aq --filter label=basalt.app)" ] && [ -z "$(docker volume ls -q --filter label=basalt.app)" ] || exit 4
   [ -z "$(mariadb -N -e "SHOW DATABASES LIKE '"'"'s%\_%'"'"'")" ] || exit 5
   [ -z "$(mariadb -N -e "SELECT user FROM mysql.user WHERE user LIKE '"'"'s%\_%'"'"'")" ] || exit 6

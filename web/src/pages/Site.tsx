@@ -65,7 +65,7 @@ export function SitePage({ user }: { user: User }) {
         <Route path="databases" element={<DatabasesTab site={s} user={user} />} />
         <Route path="backups" element={<BackupsTab target={{ base: `/api/v1/sites/${s.id}`, name: s.name, siteId: s.id }} user={user} />} />
         <Route path="logs" element={<LogsTab site={s} />} />
-        <Route path="settings" element={<SettingsTab site={s} phpVersions={server?.isolated ? server.php_versions : []} />} />
+        <Route path="settings" element={<SettingsTab site={s} phpVersions={server?.isolated ? server.php_versions : []} phpLimits={!!server?.php_limits} />} />
       </Routes>
     </>
   );
@@ -425,12 +425,12 @@ function EditSFTPModal({
   );
 }
 
-function SettingsTab({ site, phpVersions }: { site: Site; phpVersions: string[] }) {
+function SettingsTab({ site, phpVersions, phpLimits }: { site: Site; phpVersions: string[]; phpLimits: boolean }) {
   return (
     <div className="stack" style={{ maxWidth: 640 }}>
       <UsageCard site={site} />
       <RuntimeCard site={site} phpVersions={phpVersions} />
-      {site.php_version && <PHPOptionsCard site={site} />}
+      {site.php_version && <PHPOptionsCard site={site} limits={phpLimits} />}
       <DeleteCard site={site} />
     </div>
   );
@@ -533,7 +533,7 @@ function UsageCard({ site }: { site: Site }) {
 }
 
 // PHPOptionsCard edits the PHP options a site may change.
-function PHPOptionsCard({ site }: { site: Site }) {
+function PHPOptionsCard({ site, limits }: { site: Site; limits: boolean }) {
   const qc = useQueryClient();
   const toast = useToast();
   const cur = site.php_settings ?? {};
@@ -545,6 +545,8 @@ function PHPOptionsCard({ site }: { site: Site }) {
     vars: String(cur.max_input_vars ?? ""),
     timezone: cur.timezone ?? "",
     display: !!cur.display_errors,
+    cpu: String(cur.cpu_percent ?? ""),
+    ram: String(cur.ram_mb ?? ""),
   });
   const n = (v: string) => (v.trim() === "" ? undefined : Number(v));
   const save = useMutation({
@@ -557,6 +559,8 @@ function PHPOptionsCard({ site }: { site: Site }) {
         max_input_vars: n(f.vars),
         timezone: f.timezone.trim() || undefined,
         display_errors: f.display || undefined,
+        cpu_percent: n(f.cpu),
+        ram_mb: n(f.ram),
       }),
     onSuccess: (r) => {
       qc.setQueryData(["site", site.id], (old: { site: Site } | undefined) => (old ? { ...old, site: r.site } : old));
@@ -593,6 +597,17 @@ function PHPOptionsCard({ site }: { site: Site }) {
         <Field label="Timezone" help="date.timezone, e.g. Europe/Berlin">
           <input className="input mono" value={f.timezone} placeholder="UTC" onChange={(e) => setF({ ...f, timezone: e.target.value })} />
         </Field>
+      </div>
+      <h3 style={{ margin: "4px 0 0" }}>Limits for the whole site</h3>
+      {!limits && (
+        <p className="faint small" style={{ margin: 0 }}>
+          Not enforced on this server: they need each site's PHP to run as its own systemd service (servers installed with the
+          installer on systemd).
+        </p>
+      )}
+      <div className="grid-2">
+        {num("cpu", "CPU, %", "no limit", "100% is one core, 10–1600")}
+        {num("ram", "Memory, MB", "no limit", "all the site's PHP processes together, 64–65536")}
       </div>
       <label className="row small">
         <input type="checkbox" checked={f.display} onChange={(e) => setF({ ...f, display: e.target.checked })} />

@@ -191,3 +191,43 @@ func (s *Server) handleSetSiteQuota(w http.ResponseWriter, r *http.Request, p *p
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site)})
 }
+
+// handleTrash lists the files of deleted sites waiting on a server (removed
+// after 30 days); DELETE removes one at once.
+func (s *Server) handleTrash(w http.ResponseWriter, r *http.Request, p *principal) {
+	s.trash(w, r, p, "")
+}
+
+func (s *Server) handleEmptyTrashEntry(w http.ResponseWriter, r *http.Request, p *principal) {
+	name := r.PathValue("name")
+	if name == "" || len(name) > 64 {
+		writeError(w, http.StatusNotFound, "no such file in the trash")
+		return
+	}
+	s.trash(w, r, p, name)
+}
+
+func (s *Server) trash(w http.ResponseWriter, r *http.Request, p *principal, remove string) {
+	srv, ok := s.pathServer(w, r)
+	if !ok {
+		return
+	}
+	if !s.agents.Connected(srv.ID) {
+		writeError(w, http.StatusConflict, "the server is offline")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	var resp agentproto.SiteTrashResponse
+	if err := s.agents.Stream(ctx, srv.ID, agentproto.TypeSiteTrash, agentproto.SiteTrash{Remove: remove}, &resp, func(json.RawMessage) error { return nil }); err != nil {
+		writeAgentError(w, err)
+		return
+	}
+	if remove != "" {
+		s.audit(r, &p.user.ID, "site.trash_removed", map[string]any{"server_id": srv.ID, "entry": remove})
+	}
+	if resp.Entries == nil {
+		resp.Entries = []agentproto.TrashEntry{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": resp.Entries, "keep_days": 30})
+}

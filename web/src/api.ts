@@ -39,6 +39,7 @@ export interface Server {
   last_ip?: string;
   cert_expires?: string;
   enroll_expires?: string;
+  php_limits?: boolean;
   mariadb?: string;
   php_versions: string[];
   isolated: boolean;
@@ -117,6 +118,8 @@ export interface PHPSettings {
   max_input_vars?: number;
   display_errors?: boolean;
   timezone?: string;
+  cpu_percent?: number;
+  ram_mb?: number;
 }
 
 export interface FileEntry {
@@ -420,6 +423,13 @@ export interface UpdatesInfo {
     by: string;
     servers: { id: number; name: string; status: string; error?: string }[];
   } | null;
+}
+
+export interface TrashEntry {
+  name: string;
+  site_id: number;
+  deleted_at: string;
+  bytes: number;
 }
 
 export interface SFTPBan {
@@ -1084,6 +1094,9 @@ export const api = {
   updateSFTPUser: (siteId: number, id: number, b: { password?: string; public_keys?: string[] }) =>
     put<{ user: SFTPUser; password?: string; sync_error?: string }>(`/api/v1/sites/${siteId}/sftp-users/${id}`, b),
   deleteSFTPUser: (siteId: number, id: number) => del<{ ok: boolean }>(`/api/v1/sites/${siteId}/sftp-users/${id}`),
+  trash: (serverId: number) => get<{ entries: TrashEntry[]; keep_days: number }>(`/api/v1/servers/${serverId}/trash`),
+  removeTrash: (serverId: number, name: string) =>
+    del<{ entries: TrashEntry[]; keep_days: number }>(`/api/v1/servers/${serverId}/trash/${encodeURIComponent(name)}`),
   sftpBans: (serverId: number) => get<{ bans: SFTPBan[] }>(`/api/v1/servers/${serverId}/sftp-bans`),
   sftpUnban: (serverId: number, ip: string) => del<{ bans: SFTPBan[] }>(`/api/v1/servers/${serverId}/sftp-bans/${encodeURIComponent(ip)}`),
 };

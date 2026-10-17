@@ -40,15 +40,40 @@ type Host struct {
 	PIDFile func(version string) string
 	// Binary returns the php-fpm binary for a version (default /usr/sbin/php-fpm<v>).
 	Binary func(version string) string
+
+	// Units: each site's PHP runs as its own systemd service (its own FPM
+	// master in its own cgroup, so CPU and memory can be limited per site);
+	// without systemd, all sites' pools share the distribution's master.
+	Units     bool
+	UnitDir   string                     // /etc/systemd/system
+	ConfDir   string                     // per-site FPM configurations, /etc/basalt/php
+	Systemctl func(args ...string) error // runs systemctl
 }
 
 func DefaultHost(runDir string) *Host {
-	return &Host{
-		EtcDir:  "/etc/php",
-		RunDir:  runDir,
-		PIDFile: func(v string) string { return "/run/php/php" + v + "-fpm.pid" },
-		Binary:  func(v string) string { return "/usr/sbin/php-fpm" + v },
+	h := &Host{
+		EtcDir:    "/etc/php",
+		RunDir:    runDir,
+		PIDFile:   func(v string) string { return "/run/php/php" + v + "-fpm.pid" },
+		Binary:    func(v string) string { return "/usr/sbin/php-fpm" + v },
+		UnitDir:   "/etc/systemd/system",
+		ConfDir:   "/etc/basalt/php",
+		Systemctl: systemctl,
 	}
+	if _, err := os.Stat("/run/systemd/system"); err == nil && os.Geteuid() == 0 {
+		if _, err := exec.LookPath("systemctl"); err == nil {
+			h.Units = true
+		}
+	}
+	return h
+}
+
+func systemctl(args ...string) error {
+	out, err := exec.Command("systemctl", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("systemctl %s: %s", strings.Join(args, " "), lastLine(string(out)))
+	}
+	return nil
 }
 
 // Versions lists installed FPM versions, newest first.
@@ -77,6 +102,52 @@ func (h *Host) Versions() []string {
 
 func (h *Host) Socket(siteID int64) string {
 	return filepath.Join(h.RunDir, "site-"+strconv.FormatInt(siteID, 10)+".sock")
+}
+
+// UnitName is the systemd service running a site's PHP (Units mode).
+func UnitName(siteID int64) string {
+	return "basalt-php-site-" + strconv.FormatInt(siteID, 10) + ".service"
+}
+
+func (h *Host) unitFile(siteID int64) string { return filepath.Join(h.UnitDir, UnitName(siteID)) }
+
+func (h *Host) siteConf(siteID int64) string {
+	return filepath.Join(h.ConfDir, "site-"+strconv.FormatInt(siteID, 10)+".conf")
+}
+
+// RenderSite produces, for Units mode, the site's own FPM configuration (a
+// global section and its pool) and its systemd unit with the limits.
+func (h *Host) RenderSite(p Pool) (conf, unit string, err error) {
+	pool, err := h.Render(p)
+	if err != nil {
+		return "", "", err
+	}
+	id := strconv.FormatInt(p.SiteID, 10)
+	var g strings.Builder
+	fmt.Fprintf(&g, "; Managed by Basalt. Changes are overwritten.\n[global]\n")
+	fmt.Fprintf(&g, "pid = %s\n", filepath.Join(h.RunDir, "site-"+id+".pid"))
+	// Not into the site's folder: the master runs as root.
+	g.WriteString("error_log = syslog\n")
+	fmt.Fprintf(&g, "syslog.ident = basalt-php-site-%s\n", id)
+	g.WriteString("daemonize = no\n\n")
+	conf = g.String() + pool[strings.Index(pool, "[basalt-site-"):]
+
+	var u strings.Builder
+	fmt.Fprintf(&u, "# Managed by Basalt. Changes are overwritten.\n[Unit]\nDescription=PHP %s for Basalt site %s\nAfter=network.target\n\n", p.Version, id)
+	u.WriteString("[Service]\nType=notify\n")
+	fmt.Fprintf(&u, "ExecStart=%s --nodaemonize --fpm-config %s\n", h.Binary(p.Version), h.siteConf(p.SiteID))
+	u.WriteString("ExecReload=/bin/kill -USR2 $MAINPID\nRestart=on-failure\nRestartSec=2\n")
+	u.WriteString("Slice=basalt-sites.slice\nPrivateTmp=yes\n")
+	// Every PHP process of the site: the children allowed plus the master.
+	fmt.Fprintf(&u, "TasksMax=%d\n", clamp(p.MaxChildren, 1, 200, 10)+8)
+	if p.CPUPercent > 0 {
+		fmt.Fprintf(&u, "CPUQuota=%d%%\n", p.CPUPercent)
+	}
+	if p.RAMMB > 0 {
+		fmt.Fprintf(&u, "MemoryMax=%dM\nMemorySwapMax=0\n", p.RAMMB)
+	}
+	u.WriteString("\n[Install]\nWantedBy=multi-user.target\n")
+	return conf, u.String(), nil
 }
 
 func (h *Host) poolFile(version string, siteID int64) string {
@@ -172,6 +243,9 @@ func (h *Host) Apply(ctx context.Context, p Pool) error {
 	if !slices.Contains(h.Versions(), p.Version) {
 		return fmt.Errorf("PHP %s is not installed on this server", p.Version)
 	}
+	if h.Units {
+		return h.applyUnit(ctx, p)
+	}
 	conf, err := h.Render(p)
 	if err != nil {
 		return err
@@ -209,9 +283,90 @@ func (h *Host) Apply(ctx context.Context, p Pool) error {
 	return nil
 }
 
-// Remove deletes the site's pools under all versions.
+// applyUnit writes the site's own FPM configuration and unit, checks the
+// configuration (restoring the previous one if PHP-FPM rejects it) and
+// (re)starts the service; pools of the site in the shared masters (from
+// before, or without systemd) go away.
+func (h *Host) applyUnit(ctx context.Context, p Pool) error {
+	conf, unit, err := h.RenderSite(p)
+	if err != nil {
+		return err
+	}
+	for _, d := range []string{h.RunDir, h.ConfDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return err
+		}
+	}
+	confPath, unitPath := h.siteConf(p.SiteID), h.unitFile(p.SiteID)
+	prevConf, confErr := os.ReadFile(confPath)
+	prevUnit, unitErr := os.ReadFile(unitPath)
+	confChanged := confErr != nil || string(prevConf) != conf
+	unitChanged := unitErr != nil || string(prevUnit) != unit
+	if confChanged {
+		if err := writeFile(confPath, []byte(conf)); err != nil {
+			return err
+		}
+		out, err := exec.CommandContext(ctx, h.Binary(p.Version), "--test", "--fpm-config", confPath).CombinedOutput()
+		if err != nil {
+			if confErr == nil {
+				writeFile(confPath, prevConf)
+			} else {
+				os.Remove(confPath)
+			}
+			return fmt.Errorf("php-fpm %s rejected the configuration: %s", p.Version, lastLine(string(out)))
+		}
+	}
+	name := UnitName(p.SiteID)
+	switch {
+	case unitChanged:
+		if err := writeFile(unitPath, []byte(unit)); err != nil {
+			return err
+		}
+		if err := h.Systemctl("daemon-reload"); err != nil {
+			return err
+		}
+		if err := h.Systemctl("enable", name); err != nil {
+			return err
+		}
+		if err := h.Systemctl("restart", name); err != nil {
+			return err
+		}
+	case confChanged:
+		if err := h.Systemctl("reload-or-restart", name); err != nil {
+			return err
+		}
+	default:
+		if err := h.Systemctl("start", name); err != nil { // e.g. stopped by hand
+			return err
+		}
+	}
+	return h.removeSharedPools(p.SiteID)
+}
+
+// removeSharedPools drops the site's pools from the distribution's masters.
+func (h *Host) removeSharedPools(siteID int64) error {
+	var errs []error
+	for _, v := range h.Versions() {
+		path := h.poolFile(v, siteID)
+		if _, err := os.Stat(path); err == nil {
+			errs = append(errs, h.removePool(v, siteID))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// Remove deletes the site's pools under all versions (and its service).
 func (h *Host) Remove(siteID int64) error {
 	var errs []error
+	if _, err := os.Stat(h.unitFile(siteID)); err == nil && h.Systemctl != nil {
+		name := UnitName(siteID)
+		errs = append(errs, h.Systemctl("disable", "--now", name))
+		errs = append(errs, os.Remove(h.unitFile(siteID)))
+		errs = append(errs, h.Systemctl("daemon-reload"))
+	}
+	if err := os.Remove(h.siteConf(siteID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, err)
+	}
 	for _, v := range h.Versions() {
 		errs = append(errs, h.removePool(v, siteID))
 	}

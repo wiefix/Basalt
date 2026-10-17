@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
-import { api, upload, type FileEntry } from "../api";
+import { api, ApiError, upload, type FileEntry } from "../api";
 import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useConfirm, useToast } from "./ui";
 
 const TEXT_EXT =
@@ -40,6 +40,7 @@ export function FileManager({ siteId, canWrite }: { siteId: number; canWrite: bo
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
   const nextUpload = useRef(1);
 
   const entries = listing.data?.entries ?? [];
@@ -63,15 +64,33 @@ export function FileManager({ siteId, canWrite }: { siteId: number; canWrite: bo
     }
   };
 
+  // startUploads uploads files, each at its path relative to the current
+  // folder (a dropped or chosen folder keeps its structure); the folders
+  // they need are created first.
   const startUploads = useCallback(
-    async (files: File[]) => {
+    async (files: { file: File; rel: string }[]) => {
       if (!canWrite || files.length === 0) return;
       const dir = path;
-      const items = files.map((f) => ({ id: nextUpload.current++, name: f.name, progress: 0, file: f }));
-      setUploads((u) => [...u, ...items.map(({ file: _f, ...i }) => i)]);
+      const items = files.map((f) => ({ id: nextUpload.current++, name: f.rel, progress: 0, file: f.file, rel: f.rel }));
+      setUploads((u) => [...u, ...items.map(({ file: _f, rel: _r, ...i }) => i)]);
+      const folders = new Set<string>();
+      for (const it of items) {
+        const parts = it.rel.split("/").slice(0, -1);
+        for (let i = 1; i <= parts.length; i++) folders.add(parts.slice(0, i).join("/"));
+      }
+      for (const f of [...folders].sort((a, b) => a.split("/").length - b.split("/").length)) {
+        try {
+          await api.fileOp(siteId, "mkdir", { path: join(dir, f) });
+        } catch (e) {
+          if (!(e instanceof ApiError && e.status === 409)) {
+            toast(`Folder ${f}: ${errorMessage(e)}`, true);
+            return;
+          }
+        }
+      }
       for (const it of items) {
         try {
-          await upload(siteId, join(dir, it.file.name), it.file, (p) =>
+          await upload(siteId, join(dir, it.rel), it.file, (p) =>
             setUploads((u) => u.map((x) => (x.id === it.id ? { ...x, progress: p } : x))),
           );
           setUploads((u) => u.map((x) => (x.id === it.id ? { ...x, progress: 1, done: true } : x)));
@@ -82,17 +101,24 @@ export function FileManager({ siteId, canWrite }: { siteId: number; canWrite: bo
       qc.invalidateQueries({ queryKey: ["files", siteId, dir] });
       setTimeout(() => setUploads((u) => u.filter((x) => !x.done)), 2500);
     },
-    [canWrite, path, siteId, qc],
+    [canWrite, path, siteId, qc, toast],
   );
 
-  const onDrop = (e: DragEvent) => {
+  const onDrop = async (e: DragEvent) => {
     e.preventDefault();
     setDragOver(false);
-    const items = Array.from(e.dataTransfer.items ?? []);
-    if (items.some((i) => i.webkitGetAsEntry?.()?.isDirectory)) {
-      toast("Folders cannot be dropped directly. Zip the folder, upload it, then extract it here.", true);
+    const entries = Array.from(e.dataTransfer.items ?? [])
+      .map((i) => i.webkitGetAsEntry?.())
+      .filter((x): x is FileSystemEntry => !!x);
+    if (entries.length === 0) {
+      startUploads(Array.from(e.dataTransfer.files).map((f) => ({ file: f, rel: f.name })));
+      return;
     }
-    startUploads(Array.from(e.dataTransfer.files).filter((f) => f.size > 0 || f.type !== ""));
+    try {
+      startUploads(await collectEntries(entries));
+    } catch (err) {
+      toast(errorMessage(err), true);
+    }
   };
 
   const open = (e: FileEntry) => {
@@ -169,6 +195,9 @@ export function FileManager({ siteId, canWrite }: { siteId: number; canWrite: bo
               <button className="btn sm" onClick={() => setDialog({ kind: "mkdir" })}>
                 <Icon name="folderPlus" size={14} /> <span className="hide-sm">New folder</span>
               </button>
+              <button className="btn sm" onClick={() => folderInput.current?.click()} title="Upload a folder with everything in it">
+                <Icon name="folder" size={14} /> <span className="hide-sm">Upload folder</span>
+              </button>
               <button className="btn sm primary" onClick={() => fileInput.current?.click()}>
                 <Icon name="upload" size={14} /> Upload
               </button>
@@ -178,7 +207,17 @@ export function FileManager({ siteId, canWrite }: { siteId: number; canWrite: bo
                 multiple
                 hidden
                 onChange={(e) => {
-                  startUploads(Array.from(e.target.files ?? []));
+                  startUploads(Array.from(e.target.files ?? []).map((f) => ({ file: f, rel: f.name })));
+                  e.target.value = "";
+                }}
+              />
+              <input
+                ref={folderInput}
+                type="file"
+                hidden
+                {...{ webkitdirectory: "" }}
+                onChange={(e) => {
+                  startUploads(Array.from(e.target.files ?? []).map((f) => ({ file: f, rel: f.webkitRelativePath || f.name })));
                   e.target.value = "";
                 }}
               />
@@ -267,7 +306,7 @@ export function FileManager({ siteId, canWrite }: { siteId: number; canWrite: bo
       ) : entries.length === 0 ? (
         <div className="empty">
           <h3>This folder is empty</h3>
-          {canWrite && <p>Drop files here or use Upload.</p>}
+          {canWrite && <p>Drop files or folders here, or use Upload.</p>}
         </div>
       ) : (
         <div className="table-wrap">
@@ -625,4 +664,28 @@ function Editor({
       )}
     </Modal>
   );
+}
+
+// collectEntries walks dropped files and folders into files with their
+// paths relative to the drop (at most 10000 files).
+async function collectEntries(entries: FileSystemEntry[]): Promise<{ file: File; rel: string }[]> {
+  const out: { file: File; rel: string }[] = [];
+  const walk = async (e: FileSystemEntry, prefix: string): Promise<void> => {
+    if (out.length > 10000) throw new Error("Too many files: zip the folder, upload it, then extract it here.");
+    if (e.isFile) {
+      const file = await new Promise<File>((res, rej) => (e as FileSystemFileEntry).file(res, rej));
+      out.push({ file, rel: prefix + e.name });
+      return;
+    }
+    if (!e.isDirectory) return;
+    const reader = (e as FileSystemDirectoryEntry).createReader();
+    for (;;) {
+      // readEntries returns a batch at a time; empty means done.
+      const batch = await new Promise<FileSystemEntry[]>((res, rej) => reader.readEntries(res, rej));
+      if (batch.length === 0) break;
+      for (const c of batch) await walk(c, prefix + e.name + "/");
+    }
+  };
+  for (const e of entries) await walk(e, "");
+  return out;
 }

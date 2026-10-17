@@ -88,6 +88,8 @@ var apiDocs = map[string]apiDoc{
 		body: fileOpRequest{}},
 	"GET /api/v1/sites/{id}/sftp-users":                {summary: "A site's SFTP accounts and connection details"},
 	"POST /api/v1/sites/{id}/sftp-users":               {summary: "Create an SFTP account", body: createSFTPUserRequest{}},
+	"GET /api/v1/servers/{id}/trash":                   {summary: "Files of deleted sites waiting on the server (removed after 30 days)"},
+	"DELETE /api/v1/servers/{id}/trash/{name}":         {summary: "Remove a deleted site's files now"},
 	"GET /api/v1/servers/{id}/sftp-bans":               {summary: "Addresses the server's SFTP refuses after failed logins"},
 	"DELETE /api/v1/servers/{id}/sftp-bans/{ip}":       {summary: "Let a banned address use SFTP again"},
 	"PUT /api/v1/sites/{id}/sftp-users/{uid}":          {summary: "Change an SFTP account's password or public keys", body: updateSFTPUserRequest{}},

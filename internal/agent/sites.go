@@ -384,6 +384,9 @@ func (m *sitesManager) janitor(ctx context.Context) {
 			return
 		case <-t.C:
 		}
+		if m.root != "" {
+			m.cleanTrash(time.Now())
+		}
 		m.mu.Lock()
 		for id, u := range m.uploads {
 			if time.Since(u.lastUsed) > uploadIdleTimeout {

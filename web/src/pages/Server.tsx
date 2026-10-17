@@ -207,6 +207,7 @@ export function ServerPage({ user }: { user: User }) {
 
           {s.status === "online" && <CertificatesCard serverId={id} />}
           {s.status === "online" && can(user, "admin") && <SFTPBansCard serverId={id} />}
+          {s.status === "online" && can(user, "admin") && <TrashCard serverId={id} />}
           <RoutesCard serverId={id} user={user} />
         </>
       )}
@@ -481,6 +482,54 @@ function AddRouteModal({ serverId, onClose }: { serverId: number; onClose: () =>
         </label>
       </form>
     </Modal>
+  );
+}
+
+// TrashCard lists the files of deleted sites still on the server (hidden
+// when there are none).
+function TrashCard({ serverId }: { serverId: number }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const trash = useQuery({ queryKey: ["trash", serverId], queryFn: () => api.trash(serverId), retry: false });
+  const remove = useMutation({
+    mutationFn: (name: string) => api.removeTrash(serverId, name),
+    onSuccess: (d) => qc.setQueryData(["trash", serverId], d),
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  const list = trash.data?.entries ?? [];
+  if (trash.isPending || trash.error || list.length === 0) return null;
+  const ask = async (name: string, siteId: number) => {
+    if (await confirm({ title: `Delete the files of site #${siteId} now?`, body: <p>They cannot be recovered afterwards.</p>, confirm: "Delete", danger: true }))
+      remove.mutate(name);
+  };
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Deleted sites</h2>
+      </div>
+      <div className="card-body muted small" style={{ paddingBottom: 0 }}>
+        The files of deleted sites stay on the server for {trash.data.keep_days} days (in the sites folder, .trash), then go.
+      </div>
+      <div className="table-wrap">
+        <table className="table">
+          <tbody>
+            {list.map((e) => (
+              <tr key={e.name}>
+                <td>site #{e.site_id}</td>
+                <td className="muted small">deleted {formatDate(e.deleted_at)}</td>
+                <td className="num muted">{formatBytes(e.bytes)}</td>
+                <td className="num">
+                  <button className="btn sm" disabled={remove.isPending} onClick={() => ask(e.name, e.site_id)}>
+                    Delete now
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

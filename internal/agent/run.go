@@ -297,6 +297,7 @@ func (a *Agent) session(ctx context.Context) error {
 	hello.Docker, hello.DockerSecurity = a.dockerVersion(ctx)
 	hello.Restic = a.backups.Version(ctx)
 	hello.Updatable = a.updater.updatable()
+	hello.PHPLimits = a.sites.isolate && a.sites.php.Units
 	hello.DNSPort, hello.DNSError = a.dns.Status()
 	hello.HTTPSPort = a.proxy.opts.HTTPSPort
 	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
@@ -484,6 +485,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		}
 		resp, err := a.siteInstall(ctx, req)
 		return resp, publicError(err)
+	case agentproto.TypeSiteTrash:
+		var req agentproto.SiteTrash
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.sites.trash(ctx, req.Remove)
 	case agentproto.TypeSiteUsage:
 		var req agentproto.SiteUsageRequest
 		if err := json.Unmarshal(payload, &req); err != nil {

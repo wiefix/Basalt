@@ -1,6 +1,12 @@
 package php
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -65,6 +71,7 @@ func TestRenderSettings(t *testing.T) {
 	for i, bad := range []Settings{
 		{MemoryMB: 16}, {UploadMB: 5000}, {MaxChildren: 201}, {MaxExecutionTime: -1}, {MaxInputVars: 50},
 		{Timezone: "UTC\nphp_admin_value[open_basedir] = /"}, {Timezone: "Europe/Berlin;x"}, {Timezone: "europe/berlin"},
+		{CPUPercent: 5}, {CPUPercent: 2000}, {RAMMB: 10},
 	} {
 		if bad.Validate() == nil {
 			t.Errorf("case %d valid", i)
@@ -76,6 +83,105 @@ func TestRenderSettings(t *testing.T) {
 	for _, ok := range []string{"UTC", "Europe/Berlin", "America/Argentina/Buenos_Aires", "Etc/GMT+3"} {
 		if (Settings{Timezone: ok}).Validate() != nil {
 			t.Errorf("%s refused", ok)
+		}
+	}
+}
+
+// TestApplyUnits: in systemd mode a site gets its own FPM configuration
+// and service with its limits; the service is restarted only when needed,
+// a rejected configuration is rolled back, and the site's pool leaves the
+// shared master.
+func TestApplyUnits(t *testing.T) {
+	dir := t.TempDir()
+	fpm := filepath.Join(dir, "php-fpm8.4")
+	writeScript := func(exit int) {
+		os.WriteFile(fpm, []byte(fmt.Sprintf("#!/bin/sh\necho 'test result' >&2\nexit %d\n", exit)), 0o755)
+	}
+	writeScript(0)
+	etc := filepath.Join(dir, "etc")
+	os.MkdirAll(filepath.Join(etc, "8.4", "fpm", "pool.d"), 0o755)
+	// A pool of the site in the shared master, from before.
+	shared := filepath.Join(etc, "8.4", "fpm", "pool.d", "basalt-site-3.conf")
+	os.WriteFile(shared, []byte("[basalt-site-3]\n"), 0o644)
+	master := exec.Command("sleep", "60")
+	master.Start()
+	defer master.Process.Kill()
+	pidFile := filepath.Join(dir, "fpm.pid")
+	os.WriteFile(pidFile, []byte(strconv.Itoa(master.Process.Pid)), 0o644)
+
+	var calls []string
+	h := &Host{EtcDir: etc, RunDir: filepath.Join(dir, "run"), UnitDir: filepath.Join(dir, "units"), ConfDir: filepath.Join(dir, "conf"),
+		PIDFile: func(string) string { return pidFile }, Binary: func(string) string { return fpm }, Units: true,
+		Systemctl: func(args ...string) error { calls = append(calls, strings.Join(args, " ")); return nil }}
+	os.MkdirAll(h.UnitDir, 0o755)
+	pool := Pool{SiteID: 3, Version: "8.4", User: "basalt-s3", SocketGroup: "basalt-www", SiteDir: "/srv/basalt/sites/3",
+		Settings: Settings{CPUPercent: 50, RAMMB: 512, MaxChildren: 4}}
+	apply := func(p Pool) []string {
+		t.Helper()
+		calls = nil
+		if err := h.Apply(context.Background(), p); err != nil {
+			t.Fatal(err)
+		}
+		return calls
+	}
+
+	if got := apply(pool); strings.Join(got, ";") != "daemon-reload;enable basalt-php-site-3.service;restart basalt-php-site-3.service" {
+		t.Fatalf("first apply: %v", got)
+	}
+	unit, _ := os.ReadFile(filepath.Join(h.UnitDir, "basalt-php-site-3.service"))
+	for _, want := range []string{"Type=notify", "ExecStart=" + fpm + " --nodaemonize --fpm-config " + filepath.Join(h.ConfDir, "site-3.conf"),
+		"CPUQuota=50%", "MemoryMax=512M", "TasksMax=12", "Slice=basalt-sites.slice"} {
+		if !strings.Contains(string(unit), want) {
+			t.Errorf("unit lacks %q", want)
+		}
+	}
+	conf, _ := os.ReadFile(filepath.Join(h.ConfDir, "site-3.conf"))
+	for _, want := range []string{"[global]", "daemonize = no", "error_log = syslog", "[basalt-site-3]", "user = basalt-s3", "pm.max_children = 4"} {
+		if !strings.Contains(string(conf), want) {
+			t.Errorf("site configuration lacks %q", want)
+		}
+	}
+	if _, err := os.Stat(shared); !os.IsNotExist(err) {
+		t.Fatal("the shared pool stayed")
+	}
+
+	if got := apply(pool); strings.Join(got, ";") != "start basalt-php-site-3.service" {
+		t.Fatalf("unchanged: %v", got)
+	}
+	pool.MemoryMB = 128
+	if got := apply(pool); strings.Join(got, ";") != "reload-or-restart basalt-php-site-3.service" {
+		t.Fatalf("pool change: %v", got)
+	}
+	pool.CPUPercent = 0
+	if got := apply(pool); len(got) != 3 || got[2] != "restart basalt-php-site-3.service" {
+		t.Fatalf("limit change: %v", got)
+	}
+	if unit, _ := os.ReadFile(filepath.Join(h.UnitDir, "basalt-php-site-3.service")); strings.Contains(string(unit), "CPUQuota") {
+		t.Fatal("CPU limit kept")
+	}
+
+	// PHP-FPM rejects the configuration: the previous one stays.
+	before, _ := os.ReadFile(filepath.Join(h.ConfDir, "site-3.conf"))
+	writeScript(1)
+	pool.MemoryMB = 256
+	calls = nil
+	if err := h.Apply(context.Background(), pool); err == nil || len(calls) != 0 {
+		t.Fatalf("rejected configuration: %v %v", err, calls)
+	}
+	if after, _ := os.ReadFile(filepath.Join(h.ConfDir, "site-3.conf")); string(after) != string(before) {
+		t.Fatal("rejected configuration not rolled back")
+	}
+
+	calls = nil
+	if err := h.Remove(3); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(calls, ";") != "disable --now basalt-php-site-3.service;daemon-reload" {
+		t.Fatalf("remove: %v", calls)
+	}
+	for _, f := range []string{filepath.Join(h.UnitDir, "basalt-php-site-3.service"), filepath.Join(h.ConfDir, "site-3.conf")} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Fatalf("%s left", f)
 		}
 	}
 }

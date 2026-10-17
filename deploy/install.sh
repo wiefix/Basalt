@@ -15,7 +15,7 @@
 #   Remove:      sh install.sh uninstall [--purge] [--yes]
 #                stops and removes the Basalt services and binary; sites, apps
 #                and data stay. --purge also deletes them: site files, users,
-#                PHP pools, site databases, app containers and volumes, Basalt's
+#                PHP pools and services, site databases, app containers and volumes, Basalt's
 #                data. Local backups in /var/backups/basalt are always kept.
 #
 # Running it again upgrades the binary and restarts the services; existing
@@ -121,6 +121,13 @@ if [ "$MODE" = uninstall ]; then
 		[ -z "$ids" ] || docker volume rm -f $ids >/dev/null 2>&1 || true
 	fi
 	say "Removing PHP pools"
+	for unit in "$UNITS"/basalt-php-site-*.service; do
+		[ -e "$unit" ] || continue
+		systemctl disable --now "$(basename "$unit")" >/dev/null 2>&1 || true
+		rm -f "$unit"
+	done
+	systemctl daemon-reload
+	rm -rf /etc/basalt
 	reload_php=0
 	for pool in /etc/php/*/fpm/pool.d/basalt-site-*.conf; do
 		[ -e "$pool" ] || continue
