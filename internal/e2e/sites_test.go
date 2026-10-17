@@ -69,6 +69,9 @@ func startHostWith(t *testing.T, p *panel, dockerSocket string, configure ...fun
 	cfg := agent.Config{
 		DataDir: agentDir, ProxyDir: proxyDir, SitesRoot: sitesRoot,
 		HTTPPort: freePort(t), HTTPSPort: httpsPort, SFTPListen: "127.0.0.1:0", DockerSocket: dockerSocket,
+		// Never ask real CAs for test domains (CI has a network): nothing
+		// listens here, so public certificates simply are not issued.
+		ACMEDirectory: "https://127.0.0.1:9/directory",
 	}
 	if bin, err := exec.LookPath("restic"); err == nil {
 		cfg.Restic = bin

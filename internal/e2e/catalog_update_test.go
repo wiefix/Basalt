@@ -108,7 +108,11 @@ func TestTemplateUpdateAPI(t *testing.T) {
 	p.call(http.StatusUnprocessableEntity, "POST", base+"/template-update", map[string]any{"inputs": map[string]string{"OWNER": "x"}, "backup": true})
 
 	// With a backup that fails, nothing changes.
-	eventually(t, "restic reported", func() bool { return p.server(h.id)["restic"] != "" })
+	// The panel only needs to believe restic is there (as with Docker
+	// above): the backup fails on the agent all the same.
+	if _, err := p.db.W.Exec(`UPDATE servers SET restic = '0.19.1' WHERE id = ?`, sid); err != nil {
+		t.Fatal(err)
+	}
 	st := p.call(http.StatusCreated, "POST", "/api/v1/backup-storages", map[string]any{
 		"name": "local", "kind": "local", "path": filepath.Join(t.TempDir(), "backups")})["storage"].(map[string]any)
 	p.call(200, "PUT", base+"/backup-policy", map[string]any{"storage_id": st["id"], "schedule": "manual", "keep_last": 3})
