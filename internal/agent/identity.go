@@ -22,6 +22,9 @@ const (
 	// single atomic rename.
 	fileCreds = "agent.pem"
 	fileCA    = "ca.crt"
+	// fileRemoved records that the panel removed this server: the agent
+	// stops connecting until it is enrolled again.
+	fileRemoved = "removed"
 )
 
 var ErrNotEnrolled = errors.New("agent is not enrolled; run `basalt agent enroll` first")
@@ -136,7 +139,13 @@ func saveEnrollment(dir string, cfg config, key *ecdsa.PrivateKey, certDER, caDE
 	}
 	b, _ := json.MarshalIndent(cfg, "", "  ")
 	// Written last: its presence means enrollment completed.
-	return writeAtomic(filepath.Join(dir, fileConfig), b, 0o600)
+	if err := writeAtomic(filepath.Join(dir, fileConfig), b, 0o600); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, fileRemoved)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }
 
 func writeAtomic(path string, data []byte, mode os.FileMode) error {

@@ -222,15 +222,33 @@ func TestAgentLifecycle(t *testing.T) {
 	p.hub.Disconnect(gotID)
 	eventually(t, "reconnect with renewed certificate", func() bool { return p.hub.Connected(gotID) })
 
-	// 8. Removing the server revokes the agent: the stream is dropped and
-	// reconnection attempts are refused.
+	// 8. Removing the server revokes the agent: the stream is dropped, the
+	// panel answers that the server is gone, and the agent stops trying
+	// (it keeps running: its sites go on serving) and remembers it.
 	p.call(http.StatusNoContent, "DELETE", "/api/v1/servers/"+id, nil)
-	time.Sleep(2500 * time.Millisecond) // longer than the agent's first backoff
+	removed := filepath.Join(agentDir, "removed")
+	eventually(t, "agent records its removal", func() bool { _, err := os.Stat(removed); return err == nil })
 	if p.hub.Connected(gotID) {
 		t.Fatal("removed server's agent is still connected")
 	}
+	select {
+	case <-agentDone:
+		t.Fatal("the agent stopped instead of serving on")
+	case <-time.After(200 * time.Millisecond):
+	}
 	cancel()
 	<-agentDone
+
+	// 9. Enrolling again clears the mark.
+	again := p.call(http.StatusCreated, "POST", "/api/v1/servers", map[string]string{"name": "edge-again"})["enrollment"].(map[string]any)["token"].(string)
+	if _, err := agent.Enroll(context.Background(), agent.EnrollOptions{
+		DataDir: agentDir, PanelURL: p.agentURL, Token: again, CASHA256: p.hub.CAFingerprint(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(removed); !os.IsNotExist(err) {
+		t.Fatal("re-enrolling kept the removal mark")
+	}
 }
 
 func TestConnectRequiresTrustedClientCertificate(t *testing.T) {

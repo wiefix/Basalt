@@ -243,7 +243,8 @@ func (h *Hub) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	srv, err := h.db.ServerByID(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
-		http.Error(w, "server has been removed", http.StatusForbidden)
+		// Gone, not forbidden: the agent stops retrying.
+		http.Error(w, "server has been removed", http.StatusGone)
 		return
 	}
 	if err != nil {

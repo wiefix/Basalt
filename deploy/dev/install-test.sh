@@ -194,4 +194,25 @@ for i in $(seq 120); do
   [ "$($API http://127.0.0.1:8080/api/v1/servers | grep -o '"status":"online"' | wc -l)" -ge 2 ] && break; sleep 1
 done
 $API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; l=json.load(sys.stdin)["servers"]; [print("  after recovery:", s["name"], s["status"]) for s in l]; sys.exit(0 if all(s["status"]=="online" for s in l) else "an agent did not reconnect")'
+echo "### node1 removed from the panel: its agent stops connecting, sites keep running"
+$API -d '{"name":"main"}' http://127.0.0.1:8080/api/v1/sites/$SITE/databases >/dev/null
+docker exec basalt-node1 mariadb -N -e "SHOW DATABASES LIKE 's${SITE}\_%'" | grep -q main || { echo "site database missing"; exit 1; }
+$API -X DELETE http://127.0.0.1:8080/api/v1/servers/$NODE >/dev/null
+for i in $(seq 90); do docker exec basalt-node1 test -f /var/lib/basalt/agent/removed && break; sleep 1; done
+docker exec basalt-node1 test -f /var/lib/basalt/agent/removed || { echo "agent did not record its removal"; exit 1; }
+docker exec basalt-node1 journalctl -u basalt-agent --no-pager -o cat | grep -m1 "removed from the panel" | cut -c1-160
+docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "site stopped with the panel's removal"; exit 1; }
+echo "### uninstall keeps the data; --purge deletes it"
+docker exec basalt-node1 sh /deploy/install.sh uninstall
+docker exec basalt-node1 sh -c '! systemctl is-active -q basalt-agent basalt-proxy && ! test -e /usr/local/bin/basalt && test -d /srv/basalt/sites && id basalt-s'$SITE' >/dev/null' || { echo "plain uninstall removed too much or too little"; exit 1; }
+docker exec basalt-node1 sh /deploy/install.sh uninstall --purge --yes
+docker exec basalt-node1 sh -c '
+  ! test -e /srv/basalt && ! test -e /var/lib/basalt || exit 1
+  ! id basalt-s'$SITE' 2>/dev/null && ! id basalt 2>/dev/null && ! id basalt-proxy 2>/dev/null || exit 2
+  ! ls /etc/php/*/fpm/pool.d/basalt-site-* 2>/dev/null || exit 3
+  [ -z "$(docker ps -aq --filter label=basalt.app)" ] && [ -z "$(docker volume ls -q --filter label=basalt.app)" ] || exit 4
+  [ -z "$(mariadb -N -e "SHOW DATABASES LIKE '"'"'s%\_%'"'"'")" ] || exit 5
+  [ -z "$(mariadb -N -e "SELECT user FROM mysql.user WHERE user LIKE '"'"'s%\_%'"'"'")" ] || exit 6
+' || { echo "purge left something behind (code $?)"; exit 1; }
+echo "  node1 is clean"
 echo "### done"

@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,7 +29,9 @@ type EnrollOptions struct {
 // Enroll exchanges a one-time token for a client certificate. The private key
 // is generated here and never leaves the host.
 func Enroll(ctx context.Context, o EnrollOptions) (int64, error) {
-	if enrolled(o.DataDir) {
+	// A server the panel removed may enroll again in place: its identity
+	// is dead, while its other data (SFTP host key, DNS zones) is kept.
+	if _, err := os.Stat(filepath.Join(o.DataDir, fileRemoved)); enrolled(o.DataDir) && err != nil {
 		return 0, fmt.Errorf("already enrolled (remove %s to re-enroll)", o.DataDir)
 	}
 	base, err := parsePanelURL(o.PanelURL)

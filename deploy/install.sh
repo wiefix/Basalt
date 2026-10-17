@@ -12,6 +12,12 @@
 #   --with-dns makes this server an authoritative nameserver (port 53, UDP
 #   and TCP); --no-dns turns that off again.
 #
+#   Remove:      sh install.sh uninstall [--purge] [--yes]
+#                stops and removes the Basalt services and binary; sites, apps
+#                and data stay. --purge also deletes them: site files, users,
+#                PHP pools, site databases, app containers and volumes, Basalt's
+#                data. Local backups in /var/backups/basalt are always kept.
+#
 # Running it again upgrades the binary and restarts the services; existing
 # data and enrollment are kept.
 set -eu
@@ -29,14 +35,14 @@ say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
-	sed -n '2,17p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
+	sed -n '2,22p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
 	exit 2
 }
 
 MODE=${1:-}
 [ -n "$MODE" ] || usage
 shift
-DOMAIN="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0 USERNS=auto WITH_DNS=keep
+DOMAIN="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0 USERNS=auto WITH_DNS=keep PURGE=0 YES=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--domain) DOMAIN=$2; shift 2 ;;
@@ -51,6 +57,8 @@ while [ $# -gt 0 ]; do
 	--no-dns) WITH_DNS=0; shift ;;
 	--docker-userns) USERNS=on; shift ;;
 	--no-docker-userns) USERNS=off; shift ;;
+	--purge) PURGE=1; shift ;;
+	--yes) YES=1; shift ;;
 	-h | --help) usage ;;
 	*) die "unknown option $1" ;;
 	esac
@@ -72,10 +80,79 @@ aarch64 | arm64) ARCH=arm64 ;;
 *) die "unsupported CPU architecture $(uname -m)" ;;
 esac
 case "$MODE" in
-panel) ;;
+panel | uninstall) ;;
 agent) [ -n "$PANEL" ] && [ -n "$TOKEN" ] && [ -n "$CA_SHA" ] || die "agent mode needs --panel, --token and --ca-sha256" ;;
 *) usage ;;
 esac
+
+# ---------- uninstall ----------
+
+if [ "$MODE" = uninstall ]; then
+	if [ "$PURGE" -eq 1 ] && [ "$YES" -ne 1 ]; then
+		echo "This deletes every site's files and databases, the apps' containers and volumes,"
+		echo "and Basalt's data on this server ($LIB, /srv/basalt). Backups in /var/backups/basalt stay."
+		printf 'Type "purge" to continue: '
+		read -r answer </dev/tty || answer=""
+		[ "$answer" = purge ] || die "nothing was changed"
+	fi
+	say "Stopping the Basalt services"
+	for unit in basalt-agent basalt-proxy basalt-server; do
+		systemctl disable --now "$unit.service" >/dev/null 2>&1 || true
+		rm -f "$UNITS/$unit.service"
+	done
+	systemctl daemon-reload
+	rm -f "$BIN"
+	if [ "$PURGE" -eq 0 ]; then
+		say "Basalt is removed; its data stays"
+		echo "  Kept: $LIB, /srv/basalt, the site users, PHP pools, databases and app containers."
+		echo "  Run again with --purge to delete them."
+		exit 0
+	fi
+	if command -v docker >/dev/null 2>&1; then
+		say "Removing app containers, networks and volumes"
+		ids=$(docker ps -aq --filter label=basalt.app 2>/dev/null || true)
+		# shellcheck disable=SC2086
+		[ -z "$ids" ] || docker rm -f $ids >/dev/null 2>&1 || true
+		ids=$(docker network ls -q --filter name=^basalt-app- 2>/dev/null || true)
+		# shellcheck disable=SC2086
+		[ -z "$ids" ] || docker network rm $ids >/dev/null 2>&1 || true
+		ids=$(docker volume ls -q --filter label=basalt.app 2>/dev/null || true)
+		# shellcheck disable=SC2086
+		[ -z "$ids" ] || docker volume rm -f $ids >/dev/null 2>&1 || true
+	fi
+	say "Removing PHP pools"
+	reload_php=0
+	for pool in /etc/php/*/fpm/pool.d/basalt-site-*.conf; do
+		[ -e "$pool" ] || continue
+		rm -f "$pool"
+		reload_php=1
+	done
+	if [ "$reload_php" -eq 1 ]; then
+		for unit in /lib/systemd/system/php*-fpm.service; do
+			[ -e "$unit" ] && systemctl reload-or-restart "$(basename "$unit")" >/dev/null 2>&1 || true
+		done
+	fi
+	if command -v mariadb >/dev/null 2>&1 && mariadb -N -e 'SELECT 1' >/dev/null 2>&1; then
+		say "Removing site databases"
+		# Basalt names them s<site>_<name>, as their users.
+		mariadb -N -e "SELECT schema_name FROM information_schema.schemata WHERE schema_name REGEXP '^s[0-9]+_[a-z0-9_]+\$'" |
+			while read -r db; do mariadb -e "DROP DATABASE \`$db\`"; done
+		mariadb -N -e "SELECT user FROM mysql.user WHERE host = 'localhost' AND user REGEXP '^s[0-9]+_[a-z0-9_]+\$'" |
+			while read -r u; do mariadb -e "DROP USER '$u'@'localhost'"; done
+	fi
+	say "Removing site users and Basalt's data"
+	for u in $(getent passwd | cut -d: -f1 | grep -E '^basalt-s[0-9]+$' || true); do
+		pkill -u "$u" >/dev/null 2>&1 || true
+		userdel "$u" >/dev/null 2>&1 || true
+	done
+	rm -rf "$LIB" /srv/basalt /run/basalt
+	userdel basalt >/dev/null 2>&1 || true
+	userdel basalt-proxy >/dev/null 2>&1 || true
+	groupdel basalt-www >/dev/null 2>&1 || true
+	say "Basalt and its data are removed"
+	[ -d /var/backups/basalt ] && echo "  Backups kept in /var/backups/basalt."
+	exit 0
+fi
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -344,7 +421,8 @@ if [ "$MODE" = panel ]; then
 	done
 fi
 
-if [ ! -f "$LIB/agent/agent.json" ]; then
+# Not enrolled yet, or removed from the panel and enrolling again.
+if [ ! -f "$LIB/agent/agent.json" ] || [ -f "$LIB/agent/removed" ]; then
 	if [ "$MODE" = panel ]; then
 		say "Registering this server with the panel"
 		ENROLL=$(runuser -u basalt -- "$BIN" server local-enroll --data-dir "$LIB/server" --agent-url https://127.0.0.1:8443 --name "$(hostname -s)")

@@ -20,6 +20,8 @@ import {
 } from "../components/ui";
 import { EnrollInstructions } from "./Servers";
 
+const UNINSTALL = "curl -fsSL https://github.com/wiefix/Basalt/releases/latest/download/install.sh | sudo sh -s -- uninstall";
+
 export function ServerPage({ user }: { user: User }) {
   const id = Number(useParams().id);
   const qc = useQueryClient();
@@ -56,10 +58,19 @@ export function ServerPage({ user }: { user: User }) {
     const ok = await confirm({
       title: `Remove ${s.name}?`,
       body: (
-        <p>
-          The agent loses access immediately. Sites and files on the machine are left untouched, but the panel will no
-          longer manage them.
-        </p>
+        <>
+          <p>
+            The agent loses access immediately and stops connecting. Sites, apps and files on the machine keep running, but
+            the panel will no longer manage them, and its records of them here are deleted.
+          </p>
+          <p className="muted small">
+            To remove Basalt from the machine afterwards, run there (<span className="mono">--purge</span> also deletes the
+            sites, apps and their data):
+          </p>
+          <pre className="mono small" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+            {UNINSTALL}
+          </pre>
+        </>
       ),
       confirm: "Remove server",
       danger: true,

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -167,6 +168,11 @@ func (a *Agent) identity() *identity {
 	return a.id
 }
 
+// errRemoved: the panel answered that this server no longer exists.
+var errRemoved = errors.New("the server was removed from the panel")
+
+const removedHelp = "sites keep running; to remove Basalt from this server run the installer with \"uninstall\", to connect it again enroll it with a new token"
+
 // Run keeps a connection to the panel open until ctx is cancelled,
 // reconnecting with jittered exponential backoff.
 func (a *Agent) Run(ctx context.Context) error {
@@ -179,11 +185,26 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.apps.run(ctx)
 	defer a.health.stop()
 
+	if b, err := os.ReadFile(filepath.Join(a.dir, fileRemoved)); err == nil {
+		a.log.Error("this server was removed from the panel; not connecting", "removed", strings.TrimSpace(string(b)), "help", removedHelp)
+		<-ctx.Done()
+		return nil
+	}
 	backoff := minBackoff
 	for {
 		start := time.Now()
 		err := a.session(ctx)
 		if ctx.Err() != nil {
+			return nil
+		}
+		if errors.Is(err, errRemoved) {
+			// Retrying cannot help: the panel forgot this server. Sites,
+			// SFTP and DNS go on serving what they had.
+			if werr := os.WriteFile(filepath.Join(a.dir, fileRemoved), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); werr != nil {
+				a.log.Warn("record removal", "err", werr)
+			}
+			a.log.Error("this server was removed from the panel; no longer connecting", "help", removedHelp)
+			<-ctx.Done()
 			return nil
 		}
 		if time.Since(start) > maxBackoff {
@@ -242,6 +263,9 @@ func (a *Agent) session(ctx context.Context) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusGone {
+		return errRemoved
+	}
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("panel rejected connection (%s): %s", resp.Status, strings.TrimSpace(string(msg)))
