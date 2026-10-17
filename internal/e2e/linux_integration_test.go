@@ -5,11 +5,17 @@
 package e2e
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -57,11 +63,34 @@ func TestLinuxIsolationAndPHP(t *testing.T) {
 		t.Fatal(err)
 	}
 	httpsPort := freePort(t)
+	// A WordPress-shaped archive whose front page connects to the database
+	// with the wp-config.php Basalt writes.
+	var wp bytes.Buffer
+	gz := gzip.NewWriter(&wp)
+	tw := tar.NewWriter(gz)
+	for name, body := range map[string]string{
+		"wordpress/index.php":       `<?php require __DIR__ . '/wp-config.php'; $m = new mysqli(DB_HOST, DB_USER, DB_PASSWORD, DB_NAME); echo $m->connect_errno ? "fail" : "wp-ok";`,
+		"wordpress/wp-settings.php": "<?php\n",
+	} {
+		tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))})
+		io.WriteString(tw, body)
+	}
+	tw.Close()
+	gz.Close()
+	wpSum := sha1.Sum(wp.Bytes())
+	wpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sha1") {
+			io.WriteString(w, hex.EncodeToString(wpSum[:]))
+			return
+		}
+		w.Write(wp.Bytes())
+	}))
+	defer wpServer.Close()
 	a, err := agent.New(agent.Config{
 		DataDir: agentDir, ProxyDir: proxyDir, SitesRoot: sitesRoot,
 		HTTPPort: freePort(t), HTTPSPort: httpsPort, SFTPListen: "127.0.0.1:0",
 		Isolate: true, PHPRunDir: "/run/basalt-it/php", MySQLSocket: "/run/mysqld/mysqld.sock",
-		Restic: "restic",
+		Restic: "restic", WordPressURL: wpServer.URL + "/latest.tar.gz",
 	}, log)
 	if err != nil {
 		t.Fatal(err)
@@ -331,6 +360,10 @@ try {
 	if v := mysql("SELECT v FROM " + credA["database"].(string) + ".t"); v != "hello-db" {
 		t.Fatalf("database after restore: %q", v)
 	}
+	// Disk usage counts the site's files and its database.
+	if u := p.call(200, "POST", "/api/v1/sites/"+idA+"/usage", map[string]any{})["site"].(map[string]any)["usage"].(map[string]any); u["db_bytes"].(float64) <= 0 || u["disk_bytes"].(float64) <= 0 {
+		t.Fatalf("usage = %v", u)
+	}
 	restored := filepath.Join(sitesRoot, idA, "public", "db.php")
 	if b, _ := os.ReadFile(restored); !strings.Contains(string(b), "PDO") {
 		t.Fatalf("file after restore: %q", b)
@@ -359,6 +392,29 @@ try {
 	}
 	if code, _, b := p.raw("GET", snapBase+"/download"+q("public/db.php"), "", nil); code != http.StatusOK || !strings.Contains(string(b), "PDO") {
 		t.Fatalf("download from the backup: %d %q", code, b)
+	}
+
+	// WordPress in one click: a new database, the files, a wp-config.php
+	// that connects as the site's database user.
+	rw := p.call(http.StatusCreated, "POST", "/api/v1/sites", map[string]any{
+		"server_id": mustAtoi(sid), "name": "wp", "domains": []string{"wp.localhost"}, "tls": "internal", "php_version": phpVersion,
+	})
+	idW := jsonID(rw["site"].(map[string]any)["id"])
+	inst := p.call(http.StatusCreated, "POST", "/api/v1/sites/"+idW+"/install", map[string]any{"app": "wordpress"})
+	if inst["database"].(map[string]any)["name"] != "s"+idW+"_wp" {
+		t.Fatalf("install = %v", inst)
+	}
+	eventually(t, "WordPress connects to its database", func() bool {
+		_, body := get("wp.localhost", "/")
+		return body == "wp-ok"
+	})
+	if fi, err := os.Stat(filepath.Join(sitesRoot, idW, "public", "wp-config.php")); err != nil || fi.Mode().Perm() != 0o600 ||
+		strconv.Itoa(int(fi.Sys().(*syscall.Stat_t).Uid)) != mustUID(t, "basalt-s"+idW) {
+		t.Fatalf("wp-config.php: %v %v", fi, err)
+	}
+	p.call(http.StatusUnprocessableEntity, "POST", "/api/v1/sites/"+idW+"/install", map[string]any{"app": "wordpress"})
+	if dbs := p.call(200, "GET", "/api/v1/sites/"+idW+"/databases", nil)["databases"].([]any); len(dbs) != 1 {
+		t.Fatalf("a failed install left a database: %v", dbs)
 	}
 
 	// Sites with databases cannot be deleted by accident.

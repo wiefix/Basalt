@@ -262,6 +262,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		Restic:        cfg.Restic,
 		PanelDomain:   cfg.PanelDomain,
 		ReleaseKey:    cfg.ReleaseKey,
+		WordPressURL:  cfg.WordPressURL,
 		PanelUpstream: cfg.PanelUpstream,
 	}, log)
 	if err != nil {

@@ -464,3 +464,45 @@ type LogChunk struct {
 type AppsSync struct {
 	AppIDs []int64 `json:"app_ids"`
 }
+
+// TypeSiteUsage measures the disk space of sites and their databases.
+// Streaming (walking big sites takes a while; no frames).
+const TypeSiteUsage = "site_usage"
+
+type SiteUsageRequest struct {
+	Sites     []int64  `json:"sites"`
+	Databases []string `json:"databases,omitempty"`
+}
+
+type SiteUsage struct {
+	SiteID int64  `json:"site_id"`
+	Bytes  int64  `json:"bytes"` // space taken on disk
+	Files  int64  `json:"files"`
+	Error  string `json:"error,omitempty"`
+}
+
+type SiteUsageResponse struct {
+	Sites     []SiteUsage      `json:"sites"`
+	Databases map[string]int64 `json:"databases,omitempty"`
+}
+
+// TypeSiteInstall installs a web application into a site's empty public
+// folder. Streaming (the download takes a while; no frames).
+const TypeSiteInstall = "site_install"
+
+// Site applications.
+const AppWordPress = "wordpress"
+
+type SiteInstall struct {
+	SiteID int64  `json:"site_id"`
+	App    string `json:"app"`
+	// The database the application uses (created by the panel).
+	DBName     string `json:"db_name"`
+	DBUser     string `json:"db_user"`
+	DBPassword string `json:"db_password"`
+}
+
+type SiteInstallResponse struct {
+	Version string `json:"version,omitempty"`
+	Files   int    `json:"files"`
+}

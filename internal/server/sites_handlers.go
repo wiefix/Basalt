@@ -24,12 +24,17 @@ type siteView struct {
 	TLS        proxy.TLSMode `json:"tls"`
 	PHPVersion string        `json:"php_version"`
 	PHP        php.Settings  `json:"php_settings"`
+	Usage      siteUsageView `json:"usage"`
+	QuotaMB    int           `json:"quota_mb"`
+	OverQuota  bool          `json:"over_quota"`
 	CreatedAt  time.Time     `json:"created_at"`
 }
 
 func viewSite(s *store.Site) siteView {
 	return siteView{ID: s.ID, ServerID: s.ServerID, Name: s.Name, Kind: s.Kind,
-		Domains: s.Domains, TLS: s.TLS, PHPVersion: s.PHPVersion, PHP: s.PHP, CreatedAt: s.CreatedAt}
+		Domains: s.Domains, TLS: s.TLS, PHPVersion: s.PHPVersion, PHP: s.PHP, CreatedAt: s.CreatedAt,
+		Usage:   siteUsageView{DiskBytes: s.Usage.DiskBytes, DiskFiles: s.Usage.DiskFiles, DBBytes: s.Usage.DBBytes, At: s.Usage.At},
+		QuotaMB: s.QuotaMB, OverQuota: s.QuotaMB > 0 && s.Usage.Total() > int64(s.QuotaMB)<<20}
 }
 
 func (s *Server) pathSite(w http.ResponseWriter, r *http.Request) (*store.Site, bool) {

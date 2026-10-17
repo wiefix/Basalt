@@ -119,6 +119,7 @@ type Server struct {
 	auditCheckEvery   time.Duration
 	auditWatch        auditWatch
 	rel               releaseOptions
+	usageEvery        time.Duration
 	updates           updater
 
 	setupMu    sync.Mutex
@@ -202,6 +203,7 @@ func New(o Options) *Server {
 		offlineAfter:    o.OfflineAfter,
 		certCheckEvery:  o.CertCheckEvery,
 		auditCheckEvery: o.AuditCheckEvery,
+		usageEvery:      usageEvery,
 		rel:             releaseOptions{URL: o.ReleaseURL, Key: o.ReleaseKey, AllowPrivate: o.ReleaseAllowPrivate, Version: o.Version},
 		setupToken:      o.SetupToken,
 		ipLimiter:       auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
@@ -280,6 +282,9 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("PUT /api/v1/sites/{id}/php", s.requireRole(store.RoleAdmin, s.handleSetSitePHP))
 	rt.Handle("PUT /api/v1/sites/{id}/php-settings", s.requireRole(store.RoleAdmin, s.handleSetSitePHPSettings))
 	rt.Handle("GET /api/v1/sites/{id}/php-log", s.requireRole(store.RoleViewer, s.handlePHPLog))
+	rt.Handle("POST /api/v1/sites/{id}/install", s.requireRole(store.RoleAdmin, s.handleSiteInstall))
+	rt.Handle("POST /api/v1/sites/{id}/usage", s.requireRole(store.RoleMember, s.handleMeasureSite))
+	rt.Handle("PUT /api/v1/sites/{id}/quota", s.requireRole(store.RoleAdmin, s.handleSetSiteQuota))
 	rt.Handle("DELETE /api/v1/sites/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteSite))
 	rt.Handle("GET /api/v1/sites/{id}/files", s.requireRole(store.RoleViewer, s.handleListFiles))
 	rt.Handle("GET /api/v1/sites/{id}/files/stat", s.requireRole(store.RoleViewer, s.handleStatFile))
@@ -447,6 +452,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go s.catalogLoop(ctx)
 	go s.healthLoop(ctx)
 	go s.updateLoop(ctx)
+	go s.usageLoop(ctx)
 	go s.WatchServers(ctx)
 	go s.WatchCertificates(ctx)
 	go s.WatchAuditLog(ctx)

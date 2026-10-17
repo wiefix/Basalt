@@ -86,6 +86,7 @@ type Agent struct {
 	PanelDomain   string
 	PanelUpstream string
 	ReleaseKey    string
+	WordPressURL  string
 }
 
 // Proxy configures `basalt proxy`.
@@ -214,6 +215,7 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs.StringVar(&cfg.Restic, "restic", env("RESTIC", "restic"), "restic binary used for backups")
 	fs.StringVar(&cfg.GitCAFile, "git-ca-file", env("GIT_CA_FILE", ""), "extra CA certificates (PEM) trusted for https git repositories")
 	fs.StringVar(&cfg.ReleaseKey, "release-key", env("RELEASE_KEY", ""), "public key (authorized_keys line) updates must be signed with (default: the Basalt release key)")
+	fs.StringVar(&cfg.WordPressURL, "wordpress-url", env("WORDPRESS_URL", ""), "WordPress .tar.gz to install (with a .sha1 next to it; default wordpress.org latest)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
 	}

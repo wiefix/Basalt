@@ -893,3 +893,18 @@ textarea.input {
   flex-direction: column;
   gap: 4px;
 }
+
+/* A horizontal gauge, e.g. disk usage against a quota. */
+.meter {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border);
+  overflow: hidden;
+}
+.meter-fill {
+  height: 100%;
+  background: var(--accent);
+}
+.meter-fill.err {
+  background: var(--err);
+}

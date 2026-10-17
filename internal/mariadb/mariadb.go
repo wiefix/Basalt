@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -122,6 +123,38 @@ func (s *Server) DropDatabase(ctx context.Context, name, user string) error {
 	}
 	_, err := s.db.ExecContext(ctx, "DROP DATABASE IF EXISTS `"+name+"`")
 	return mapError(err)
+}
+
+// Sizes returns the bytes (data and indexes) of each named database; a
+// database that does not exist is left out.
+func (s *Server) Sizes(ctx context.Context, names []string) (map[string]int64, error) {
+	out := map[string]int64{}
+	if len(names) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(names))
+	marks := make([]string, len(names))
+	for i, n := range names {
+		if !ValidName(n) {
+			return nil, fmt.Errorf("invalid database name %q", n)
+		}
+		args[i], marks[i] = n, "?"
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT table_schema, COALESCE(SUM(data_length + index_length), 0)
+		FROM information_schema.tables WHERE table_schema IN (`+strings.Join(marks, ",")+`) GROUP BY table_schema`, args...)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var n int64
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		out[name] = n
+	}
+	return out, rows.Err()
 }
 
 func mapError(err error) error {

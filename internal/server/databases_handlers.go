@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -158,4 +159,82 @@ func (s *Server) handleDeleteDatabase(w http.ResponseWriter, r *http.Request, p 
 	}
 	s.audit(r, &p.user.ID, "database.deleted", map[string]any{"site_id": site.ID, "database": d.Name})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type siteInstallRequest struct {
+	App string `json:"app"` // wordpress
+}
+
+// handleSiteInstall installs an application (WordPress) into a PHP site's
+// empty public folder, with a new database for it.
+func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *principal) {
+	site, ok := s.pathSite(w, r)
+	if !ok {
+		return
+	}
+	var req siteInstallRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if req.App != agentproto.AppWordPress {
+		writeError(w, http.StatusUnprocessableEntity, "unknown application (wordpress is available)")
+		return
+	}
+	if site.PHPVersion == "" {
+		writeError(w, http.StatusUnprocessableEntity, "WordPress needs PHP: switch the site to a PHP version first")
+		return
+	}
+	if v, _ := s.db.ServerMariaDB(r.Context(), site.ServerID); v == "" {
+		writeError(w, http.StatusUnprocessableEntity, "WordPress needs MariaDB, which is not installed on this server")
+		return
+	}
+	if !s.agents.Connected(site.ServerID) {
+		writeError(w, http.StatusConflict, "the server is offline")
+		return
+	}
+	var d *store.Database
+	var err error
+	for i := 1; i <= 9; i++ {
+		name := "s" + strconv.FormatInt(site.ID, 10) + "_wp"
+		if i > 1 {
+			name += strconv.Itoa(i)
+		}
+		d, err = s.db.CreateDatabaseRecord(r.Context(), site.ID, site.ServerID, name, name)
+		if !errors.Is(err, store.ErrNameTaken) {
+			break
+		}
+	}
+	if err != nil {
+		s.internalError(w, r, "create database record", err)
+		return
+	}
+	password := rand.Text()
+	if err := s.dbCall(r.Context(), site.ServerID, agentproto.DatabaseRequest{
+		Op: agentproto.DBCreate, Name: d.Name, User: d.Username, Password: password,
+	}); err != nil {
+		s.db.DeleteDatabaseRecord(context.WithoutCancel(r.Context()), d.ID)
+		writeAgentError(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
+	defer cancel()
+	var resp agentproto.SiteInstallResponse
+	err = s.agents.Stream(ctx, site.ServerID, agentproto.TypeSiteInstall, agentproto.SiteInstall{
+		SiteID: site.ID, App: req.App, DBName: d.Name, DBUser: d.Username, DBPassword: password,
+	}, &resp, func(json.RawMessage) error { return nil })
+	if err != nil {
+		// Nothing half-done stays: the new database goes again.
+		cleanup := context.WithoutCancel(r.Context())
+		if derr := s.dbCall(cleanup, site.ServerID, agentproto.DatabaseRequest{Op: agentproto.DBDrop, Name: d.Name, User: d.Username}); derr == nil {
+			s.db.DeleteDatabaseRecord(cleanup, d.ID)
+		}
+		writeAgentError(w, err)
+		return
+	}
+	s.audit(r, &p.user.ID, "site.app_installed", map[string]any{"site_id": site.ID, "app": req.App, "version": resp.Version, "database": d.Name})
+	out := map[string]any{"app": req.App, "version": resp.Version, "files": resp.Files, "database": viewDatabase(d)}
+	if len(site.Domains) > 0 {
+		out["url"] = "https://" + site.Domains[0] + "/"
+	}
+	writeJSON(w, http.StatusCreated, out)
 }

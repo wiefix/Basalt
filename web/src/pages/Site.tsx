@@ -428,6 +428,7 @@ function EditSFTPModal({
 function SettingsTab({ site, phpVersions }: { site: Site; phpVersions: string[] }) {
   return (
     <div className="stack" style={{ maxWidth: 640 }}>
+      <UsageCard site={site} />
       <RuntimeCard site={site} phpVersions={phpVersions} />
       {site.php_version && <PHPOptionsCard site={site} />}
       <DeleteCard site={site} />
@@ -477,6 +478,57 @@ function RuntimeCard({ site, phpVersions }: { site: Site; phpVersions: string[] 
         </button>
       </div>
     </form>
+  );
+}
+
+// UsageCard shows the disk space a site takes and its soft quota.
+function UsageCard({ site }: { site: Site }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [quota, setQuota] = useState(site.quota_mb ? String(site.quota_mb) : "");
+  const update = (r: { site: Site }) => qc.setQueryData(["site", site.id], (old: { site: Site } | undefined) => (old ? { ...old, site: r.site } : old));
+  const measure = useMutation({ mutationFn: () => api.measureSite(site.id), onSuccess: update, onError: (e) => toast(errorMessage(e), true) });
+  const save = useMutation({
+    mutationFn: () => api.setSiteQuota(site.id, quota.trim() ? Number(quota) : 0),
+    onSuccess: (r) => {
+      update(r);
+      toast(r.site.quota_mb ? `Quota set to ${r.site.quota_mb} MB` : "Quota removed");
+    },
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  const u = site.usage;
+  const total = u.disk_bytes + u.db_bytes;
+  const pct = site.quota_mb ? Math.min(100, (total / (site.quota_mb * 1048576)) * 100) : 0;
+  return (
+    <div className="card card-body form">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2>Disk usage</h2>
+        <button className="btn sm" disabled={measure.isPending} onClick={() => measure.mutate()}>
+          <Icon name="refresh" size={14} /> {measure.isPending ? "Measuring…" : "Measure now"}
+        </button>
+      </div>
+      {u.at ? (
+        <p className="muted small" style={{ margin: 0 }}>
+          {formatBytes(total)} in all: files {formatBytes(u.disk_bytes)} ({u.disk_files.toLocaleString()} files), databases{" "}
+          {formatBytes(u.db_bytes)}. Measured {formatDate(u.at)}; again every 6 hours.
+        </p>
+      ) : (
+        <p className="muted small" style={{ margin: 0 }}>Not measured yet: it is measured every 6 hours.</p>
+      )}
+      {site.quota_mb > 0 && u.at && (
+        <div className="meter" title={`${pct.toFixed(0)}% of the quota`}>
+          <div className={site.over_quota ? "meter-fill err" : "meter-fill"} style={{ width: `${pct}%` }} />
+        </div>
+      )}
+      <Field label="Quota, MB" help="A soft limit: nothing stops the site, but going over it is notified (event “A site goes over its disk quota”). Empty: none.">
+        <div className="row">
+          <input className="input mono" style={{ width: 160 }} type="number" min={0} value={quota} onChange={(e) => setQuota(e.target.value)} />
+          <button className="btn" disabled={save.isPending} onClick={() => save.mutate()}>
+            Save
+          </button>
+        </div>
+      </Field>
+    </div>
   );
 }
 

@@ -39,6 +39,7 @@ export interface Server {
   last_ip?: string;
   cert_expires?: string;
   enroll_expires?: string;
+  mariadb?: string;
   php_versions: string[];
   isolated: boolean;
   restic: string; // version, "" when backups cannot run there
@@ -102,6 +103,9 @@ export interface Site {
   tls: "auto" | "internal";
   php_version: string;
   php_settings: PHPSettings;
+  usage: { disk_bytes: number; disk_files: number; db_bytes: number; at: string | null };
+  quota_mb: number;
+  over_quota: boolean;
   created_at: string;
 }
 
@@ -883,6 +887,10 @@ export const api = {
     put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/domains`, { domains }),
   setSitePHP: (id: number, version: string) => put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/php`, { version }),
   setSitePHPSettings: (id: number, s: PHPSettings) => put<{ site: Site }>(`/api/v1/sites/${id}/php-settings`, s),
+  installSite: (id: number, app: "wordpress") =>
+    post<{ app: string; version: string; files: number; url?: string; database: Database }>(`/api/v1/sites/${id}/install`, { app }),
+  measureSite: (id: number) => post<{ site: Site }>(`/api/v1/sites/${id}/usage`),
+  setSiteQuota: (id: number, quota_mb: number) => put<{ site: Site }>(`/api/v1/sites/${id}/quota`, { quota_mb }),
   phpLog: (id: number) => get<{ log: string; size: number; truncated?: boolean; path: string }>(`/api/v1/sites/${id}/php-log`),
   deleteSite: (id: number) => del<{ sync: Sync; cleanup_error?: string }>(`/api/v1/sites/${id}`),
 

@@ -22,8 +22,24 @@ type Site struct {
 	TLS        proxy.TLSMode
 	PHPVersion string
 	PHP        php.Settings
-	CreatedAt  time.Time
+	Usage      SiteUsage
+	// QuotaMB is a soft limit on Usage (0: none); QuotaAlerted, that going
+	// over it was reported.
+	QuotaMB      int
+	QuotaAlerted bool
+	CreatedAt    time.Time
 }
+
+// SiteUsage is the disk space a site took when last measured.
+type SiteUsage struct {
+	DiskBytes int64
+	DiskFiles int64
+	DBBytes   int64
+	At        *time.Time
+}
+
+// Total is files and databases together.
+func (u SiteUsage) Total() int64 { return u.DiskBytes + u.DBBytes }
 
 // CreateSite creates a site and the route that serves it, in one transaction.
 func (db *DB) CreateSite(ctx context.Context, serverID int64, name string, domains []string, tls proxy.TLSMode, phpVersion string) (*Site, error) {
@@ -104,7 +120,9 @@ func (db *DB) SetSiteDomains(ctx context.Context, siteID int64, domains []string
 	return tx.Commit()
 }
 
-const siteQuery = `SELECT s.id, s.server_id, s.name, s.kind, s.php_version, s.php_settings, s.created_at, r.id, r.tls, COALESCE(d.domain, '')
+const siteQuery = `SELECT s.id, s.server_id, s.name, s.kind, s.php_version, s.php_settings,
+	s.disk_bytes, s.disk_files, s.db_bytes, s.usage_at, s.quota_mb, s.quota_alerted,
+	s.created_at, r.id, r.tls, COALESCE(d.domain, '')
 	FROM sites s JOIN proxy_routes r ON r.site_id = s.id
 	LEFT JOIN proxy_route_domains d ON d.route_id = r.id`
 
@@ -115,9 +133,13 @@ func (db *DB) scanSites(rows *sql.Rows) ([]*Site, error) {
 		var s Site
 		var created int64
 		var domain, settings string
-		if err := rows.Scan(&s.ID, &s.ServerID, &s.Name, &s.Kind, &s.PHPVersion, &settings, &created, &s.RouteID, &s.TLS, &domain); err != nil {
+		var usageAt sql.NullInt64
+		if err := rows.Scan(&s.ID, &s.ServerID, &s.Name, &s.Kind, &s.PHPVersion, &settings,
+			&s.Usage.DiskBytes, &s.Usage.DiskFiles, &s.Usage.DBBytes, &usageAt, &s.QuotaMB, &s.QuotaAlerted,
+			&created, &s.RouteID, &s.TLS, &domain); err != nil {
 			return nil, err
 		}
+		s.Usage.At = timePtr(usageAt)
 		if err := json.Unmarshal([]byte(settings), &s.PHP); err != nil {
 			return nil, err
 		}
@@ -195,6 +217,27 @@ func (db *DB) DeleteSite(ctx context.Context, id int64) error {
 }
 
 // SetSitePHP switches a site between static ("") and a PHP version.
+// SetSiteUsage records a measurement of a site's disk space.
+func (db *DB) SetSiteUsage(ctx context.Context, siteID int64, u SiteUsage) error {
+	var at any
+	if u.At != nil {
+		at = u.At.Unix()
+	}
+	return db.execOne(ctx, `UPDATE sites SET disk_bytes = ?, disk_files = ?, db_bytes = ?, usage_at = ? WHERE id = ?`,
+		u.DiskBytes, u.DiskFiles, u.DBBytes, at, siteID)
+}
+
+// SetSiteQuota sets a site's soft quota (0: none) and forgets an earlier
+// report of going over it.
+func (db *DB) SetSiteQuota(ctx context.Context, siteID int64, mb int) error {
+	return db.execOne(ctx, `UPDATE sites SET quota_mb = ?, quota_alerted = 0 WHERE id = ?`, mb, siteID)
+}
+
+// SetSiteQuotaAlerted records whether going over the quota was reported.
+func (db *DB) SetSiteQuotaAlerted(ctx context.Context, siteID int64, alerted bool) error {
+	return db.execOne(ctx, `UPDATE sites SET quota_alerted = ? WHERE id = ?`, alerted, siteID)
+}
+
 // SetSitePHPSettings stores a site's PHP options.
 func (db *DB) SetSitePHPSettings(ctx context.Context, siteID int64, st php.Settings) error {
 	b, _ := json.Marshal(st)

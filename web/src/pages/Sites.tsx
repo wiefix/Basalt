@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router";
 import { api, can, type User } from "../api";
-import { ErrorBox, Field, Icon, Loading, Modal, formatDate } from "../components/ui";
+import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useToast } from "../components/ui";
 
 export function SitesPage({ user }: { user: User }) {
   const sites = useQuery({ queryKey: ["sites"], queryFn: api.sites });
@@ -45,6 +45,7 @@ export function SitesPage({ user }: { user: User }) {
                 <th>Site</th>
                 <th>Domains</th>
                 <th>Server</th>
+                <th className="num hide-sm">Disk</th>
                 <th>Created</th>
               </tr>
             </thead>
@@ -71,6 +72,14 @@ export function SitesPage({ user }: { user: User }) {
                       {serverName(s.server_id)}
                     </Link>
                   </td>
+                  <td className="num muted hide-sm">
+                    {s.usage?.at ? formatBytes(s.usage.disk_bytes + s.usage.db_bytes) : "—"}
+                    {s.over_quota && (
+                      <span className="badge err" style={{ marginLeft: 6 }}>
+                        over quota
+                      </span>
+                    )}
+                  </td>
                   <td className="muted">{formatDate(s.created_at)}</td>
                 </tr>
               ))}
@@ -95,15 +104,28 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
   const [php, setPhp] = useState("");
   const server = enrolled.find((s) => s.id === Number(serverId || enrolled[0]?.id));
   const phpVersions = server?.isolated ? server.php_versions : [];
+  const canWordPress = phpVersions.length > 0 && !!server?.mariadb;
+  const toast = useToast();
   const create = useMutation({
-    mutationFn: () =>
-      api.createSite({
+    mutationFn: async () => {
+      const wordpress = php === "wordpress";
+      const r = await api.createSite({
         server_id: Number(serverId || enrolled[0]?.id),
         name: name.trim(),
         domains: domains.split(/[\s,]+/).filter(Boolean),
         tls,
-        php_version: php,
-      }),
+        php_version: wordpress ? phpVersions[0] : php,
+      });
+      if (wordpress) {
+        try {
+          const w = await api.installSite(r.site.id, "wordpress");
+          toast(`WordPress ${w.version} installed: open the site now to choose its admin account`);
+        } catch (e) {
+          toast(`The site was created, but WordPress was not installed: ${errorMessage(e)}`, true);
+        }
+      }
+      return r;
+    },
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["sites"] });
       navigate(`/sites/${r.site.id}`);
@@ -178,8 +200,15 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
                   PHP {v}
                 </option>
               ))}
+              {canWordPress && <option value="wordpress">WordPress (PHP {phpVersions[0]}, MariaDB)</option>}
             </select>
           </Field>
+          {php === "wordpress" && (
+            <div className="alert warn small">
+              WordPress is downloaded from wordpress.org with a new database. Open the site right after: whoever opens it
+              first chooses the admin account.
+            </div>
+          )}
           <Field label="Certificate">
             <select className="input" value={tls} onChange={(e) => setTls(e.target.value)}>
               <option value="auto">Let's Encrypt (public domains)</option>

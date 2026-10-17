@@ -30,6 +30,7 @@ const (
 	EventMailProblem  = "mail.problem"
 	EventCertExpiring = "cert.expiring"
 	EventAuditBroken  = "audit.broken"
+	EventSiteQuota    = "site.quota"
 )
 
 var notificationEvents = []struct {
@@ -45,6 +46,7 @@ var notificationEvents = []struct {
 	{EventMailProblem, "The mail deliverability check finds a new problem"},
 	{EventCertExpiring, "A certificate is not renewed and expires within 14 days"},
 	{EventAuditBroken, "The audit log was changed outside the panel"},
+	{EventSiteQuota, "A site goes over its disk quota"},
 }
 
 func validEvent(e string) bool {

@@ -35,6 +35,12 @@ func TestPHPSettingsAPI(t *testing.T) {
 		t.Fatalf("settings = %v", st)
 	}
 
+	// WordPress needs a PHP site (the install itself is in the Linux test).
+	p.call(http.StatusUnprocessableEntity, "POST", base+"/install", map[string]any{"app": "drupal"})
+	if e := p.call(http.StatusUnprocessableEntity, "POST", base+"/install", map[string]any{"app": "wordpress"}); !strings.Contains(e["error"].(string), "PHP") {
+		t.Fatalf("install on a static site: %v", e)
+	}
+
 	// The log: empty before PHP writes it, then its end in whole lines.
 	if l := p.call(http.StatusOK, "GET", base+"/php-log", nil); l["log"] != "" || l["size"] != float64(0) {
 		t.Fatalf("empty log = %v", l)

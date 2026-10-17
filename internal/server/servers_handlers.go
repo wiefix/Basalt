@@ -52,6 +52,7 @@ type serverView struct {
 	Docker         string           `json:"docker"`
 	DockerSecurity *docker.Security `json:"docker_security,omitempty"`
 	Restic         string           `json:"restic"`
+	MariaDB        string           `json:"mariadb"`
 	// Addresses for automatic DNS records: found on the host, set by an
 	// admin, and the ones in use.
 	DetectedIPs []string  `json:"detected_ips"`
@@ -78,7 +79,7 @@ func (s *Server) viewServer(srv *store.Server) serverView {
 		CPUCount: srv.CPUCount, MemTotal: srv.MemTotal, LastSeen: srv.LastSeen, LastIP: srv.LastIP,
 		CertExpires: srv.CertExpires, EnrollExpires: srv.EnrollExpires, CreatedAt: srv.CreatedAt,
 		PHPVersions: srv.PHPVersions, Isolated: srv.Isolated, Docker: srv.Docker,
-		DockerSecurity: srv.DockerSecurity, Restic: srv.Restic,
+		DockerSecurity: srv.DockerSecurity, Restic: srv.Restic, MariaDB: srv.MariaDB,
 		DetectedIPs: nonNil(srv.DetectedIPs), PublicIPs: nonNil(srv.PublicIPs), DNSIPs: dnsIPs,
 	}
 }

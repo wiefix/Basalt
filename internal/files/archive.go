@@ -88,6 +88,18 @@ func (s *Site) ExtractTar(r io.Reader, destDir string, lim Limits) (*ExtractResu
 	return x.res, x.tar(r)
 }
 
+// ExtractTarStrip is ExtractTar for archives whose entries all sit in one
+// folder (prefix, e.g. "wordpress/"): that folder is left out, and entries
+// outside it are skipped.
+func (s *Site) ExtractTarStrip(r io.Reader, destDir, prefix string, lim Limits) (*ExtractResult, error) {
+	x, err := s.extractorAt(destDir, lim)
+	if err != nil {
+		return nil, err
+	}
+	x.strip = prefix
+	return x.res, x.tar(r)
+}
+
 // ExtractFile writes r as the new file name in the existing directory
 // destDir, within the limits.
 func (s *Site) ExtractFile(r io.Reader, destDir, name string, lim Limits) (*ExtractResult, error) {
@@ -112,6 +124,7 @@ func (s *Site) extractorAt(destDir string, lim Limits) (*extractor, error) {
 }
 
 type extractor struct {
+	strip     string // leading folder dropped from entry names
 	site      *Site
 	dest      string
 	overwrite bool
@@ -177,6 +190,13 @@ func (x *extractor) tar(r io.Reader) error {
 }
 
 func (x *extractor) target(name string) (string, error) {
+	if x.strip != "" {
+		rest, ok := strings.CutPrefix(strings.TrimPrefix(name, "./"), x.strip)
+		if !ok {
+			return "", nil // outside the folder: skipped
+		}
+		name = rest
+	}
 	c, err := Clean(name)
 	if err != nil {
 		return "", err

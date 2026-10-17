@@ -86,6 +86,9 @@ type Config struct {
 	// before the panel has sent any state, so the UI is reachable at once.
 	PanelDomain   string
 	PanelUpstream string
+	// WordPressURL is where WordPress is downloaded from (a .tar.gz with a
+	// .sha1 next to it; default wordpress.org).
+	WordPressURL string
 	// ReleaseKey is the key release checksums must be signed with (default:
 	// the Basalt release key).
 	ReleaseKey string
@@ -120,6 +123,7 @@ type Agent struct {
 	RenewBefore     time.Duration
 	collector       *collector
 	updater         *updater
+	wordpressURL    string
 }
 
 func New(cfg Config, log *slog.Logger) (*Agent, error) {
@@ -166,6 +170,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		RenewBefore:     renewBefore,
 		collector:       newCollector(),
 		updater:         newUpdater(cfg, log.With("subsystem", "update")),
+		wordpressURL:    cfg.WordPressURL,
 	}, nil
 }
 
@@ -472,6 +477,22 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return struct{}{}, a.backups.ExportClose(req)
+	case agentproto.TypeSiteInstall:
+		var req agentproto.SiteInstall
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		resp, err := a.siteInstall(ctx, req)
+		return resp, publicError(err)
+	case agentproto.TypeSiteUsage:
+		var req agentproto.SiteUsageRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		if len(req.Sites) > 10000 || len(req.Databases) > 10000 {
+			return nil, errors.New("too many sites")
+		}
+		return a.siteUsage(ctx, req)
 	case agentproto.TypeUpdatePrepare:
 		var req agentproto.UpdatePrepare
 		if err := json.Unmarshal(payload, &req); err != nil {
