@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,11 @@ func TestCertStatus(t *testing.T) {
 	writeCert(t, dir, "acme-v02.api.letsencrypt.org-directory", "shop.example.com", "R11", soon)
 	writeCert(t, dir, "acme.zerossl.com-v2-dv90", "shop.example.com", "ZeroSSL", later) // newest wins
 	writeCert(t, dir, "acme-v02.api.letsencrypt.org-directory", "wildcard_.example.org", "E6", soon)
+	os.MkdirAll(filepath.Join(dir, "logs"), 0o700)
+	os.WriteFile(filepath.Join(dir, "logs", "tls.log"), []byte(
+		`{"level":"info","ts":1792250000,"logger":"tls.obtain","msg":"acquiring lock","identifier":"new.example.com"}`+"\n"+
+			`{"level":"error","ts":1792250001,"logger":"tls.obtain","msg":"could not get certificate from issuer","identifier":"new.example.com","error":"HTTP 400 urn:ietf:params:acme:error:dns - no valid A records"}`+"\n"+
+			"garbage\n"), 0o600)
 	resp, err := certStatus(dir, agentproto.CertStatus{Names: []string{"shop.example.com", "*.example.org", "new.example.com"}})
 	if err != nil {
 		t.Fatal(err)
@@ -46,6 +52,9 @@ func TestCertStatus(t *testing.T) {
 	if len(c) != 3 || !c[0].NotAfter.Equal(later) || c[0].Issuer != "ZeroSSL" || !c[1].NotAfter.Equal(soon) || c[1].Issuer != "E6" ||
 		!c[2].NotAfter.IsZero() {
 		t.Fatalf("certs = %+v", c)
+	}
+	if !strings.Contains(c[2].Error, "no valid A records") || c[2].ErrorAt.Unix() != 1792250001 || c[0].Error != "" {
+		t.Fatalf("errors = %q %v / %q", c[2].Error, c[2].ErrorAt, c[0].Error)
 	}
 	for _, bad := range []string{"../etc", "Shop.example.com", "a/b.example.com", "*"} {
 		if _, err := certStatus(dir, agentproto.CertStatus{Names: []string{bad}}); err == nil {

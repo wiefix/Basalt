@@ -1476,7 +1476,36 @@ function LinksCard({ app, user }: { app: App; user: User }) {
 }
 
 function ConnectionTab({ app }: { app: App }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
   const conn = useQuery({ queryKey: ["db-connection", app.id], queryFn: () => api.databaseConnection(app.id), gcTime: 0 });
+  const change = useMutation({
+    mutationFn: () => api.databasePassword(app.id, true),
+    onSuccess: (r) => {
+      qc.setQueryData(["db-connection", app.id], { connection: r.connection });
+      qc.invalidateQueries({ queryKey: ["app", app.id] });
+      const apps = r.updated_apps.length ? ` Updated in ${r.updated_apps.join(", ")}${r.redeploying.length ? "; redeploying" : ""}.` : "";
+      toast(`New password set.${apps}`);
+    },
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  const ask = async () => {
+    const ok = await confirm({
+      title: "Give the database a new password?",
+      body: (
+        <p>
+          {app.engine === "redis"
+            ? "Redis restarts with it (a few seconds). "
+            : "It changes at once; connections already open stay. "}
+          Linked apps whose environment holds the connection URL get the new one and are redeployed. Anything else using the
+          old password stops connecting.
+        </p>
+      ),
+      confirm: "Change password",
+    });
+    if (ok) change.mutate();
+  };
   if (conn.isPending) return <Loading />;
   if (conn.error) return <ErrorBox error={conn.error} />;
   const c = conn.data.connection;
@@ -1505,10 +1534,12 @@ function ConnectionTab({ app }: { app: App }) {
         </div>
         {row("Password", c.credentials.password)}
         {row("Root password", c.credentials.root_password)}
-        <p className="faint small" style={{ margin: 0 }}>
-          Stored encrypted. The database sets these when it is first created; changing them later is done inside the
-          database.
-        </p>
+        <p className="faint small" style={{ margin: 0 }}>Stored encrypted.</p>
+        <div>
+          <button className="btn" disabled={change.isPending} onClick={ask}>
+            <Icon name="key" size={14} /> {change.isPending ? "Changing…" : "Change password"}
+          </button>
+        </div>
       </div>
     </div>
   );

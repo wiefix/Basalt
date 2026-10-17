@@ -485,6 +485,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		}
 		resp, err := a.siteInstall(ctx, req)
 		return resp, publicError(err)
+	case agentproto.TypeDBPassword:
+		var req agentproto.ContainerDBPassword
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.backups.setDBPassword(ctx, req)
 	case agentproto.TypeAccessLog:
 		var req agentproto.AccessLogRequest
 		if err := json.Unmarshal(payload, &req); err != nil {

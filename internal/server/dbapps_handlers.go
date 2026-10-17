@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -256,4 +257,112 @@ func (s *Server) applyLinks(ctx context.Context, app *store.App) error {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	return s.agents.Call(ctx, app.ServerID, agentproto.TypeAppAttach, agentproto.AppAttach{AppID: app.ID, Attach: app.Links}, nil)
+}
+
+type dbPasswordRequest struct {
+	// RedeployApps redeploys the linked apps whose environment held the
+	// old connection URL, so they connect with the new password (default).
+	RedeployApps *bool `json:"redeploy_apps"`
+}
+
+// handleDatabasePassword gives a container database a new password. SQL
+// databases change it in place (connections already open stay); Redis is
+// redeployed with it. Linked apps whose variables held the old connection
+// URL get the new one.
+func (s *Server) handleDatabasePassword(w http.ResponseWriter, r *http.Request, p *principal) {
+	app, ok := s.databaseApp(w, r)
+	if !ok {
+		return
+	}
+	var req dbPasswordRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	e, ok := dbengine.Get(app.Engine)
+	if !ok {
+		s.internalError(w, r, "database engine", errors.New("unknown engine "+app.Engine))
+		return
+	}
+	if !s.agents.Connected(app.ServerID) {
+		writeError(w, http.StatusConflict, "the server is offline")
+		return
+	}
+	env, err := s.appEnv(app)
+	if err != nil {
+		s.internalError(w, r, "decrypt app env", err)
+		return
+	}
+	old := e.CredentialsFrom(env)
+	next := old
+	next.Password = rand.Text()
+	if e.SQL {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+		defer cancel()
+		if err := s.agents.Call(ctx, app.ServerID, agentproto.TypeDBPassword, agentproto.ContainerDBPassword{
+			AppID: app.ID, Service: app.Name, Engine: e.ID, Database: old.Database, User: old.User, Password: next.Password,
+		}, nil); err != nil {
+			writeAgentError(w, err)
+			return
+		}
+	}
+	for k, v := range e.Env(next) {
+		env[k] = v
+	}
+	b, _ := json.Marshal(env)
+	sealed := s.box.Seal(b, envAD(app.ID))
+	if err := s.db.SetAppEnv(r.Context(), app.ID, sealed); err != nil {
+		s.internalError(w, r, "set app env", err)
+		return
+	}
+	app.EnvSealed = sealed
+	resp := map[string]any{}
+	if !e.SQL {
+		// Redis takes its password from the command line: a new container.
+		if _, err := s.startDeployment(r.Context(), app, deployOptions{actorID: &p.user.ID, ip: clientIP(r), trigger: "manual"}); err != nil {
+			resp["deploy_error"] = err.Error()
+		}
+	}
+
+	oldURL, newURL := e.URL(app.Name, old), e.URL(app.Name, next)
+	updated, redeploying := []string{}, []string{}
+	for _, id := range app.Links {
+		target, err := s.db.AppByID(r.Context(), id)
+		if err != nil {
+			continue
+		}
+		tenv, err := s.appEnv(target)
+		if err != nil {
+			continue
+		}
+		changed := false
+		for k, v := range tenv {
+			if v == oldURL {
+				tenv[k], changed = newURL, true
+			}
+		}
+		if !changed {
+			continue
+		}
+		b, _ := json.Marshal(tenv)
+		if err := s.db.SetAppEnv(r.Context(), target.ID, s.box.Seal(b, envAD(target.ID))); err != nil {
+			s.internalError(w, r, "set app env", err)
+			return
+		}
+		updated = append(updated, target.Name)
+		if req.RedeployApps == nil || *req.RedeployApps {
+			if deps, err := s.db.Deployments(r.Context(), target.ID, 1); err == nil && len(deps) > 0 {
+				if _, err := s.startDeployment(r.Context(), target, deployOptions{actorID: &p.user.ID, ip: clientIP(r), trigger: "manual"}); err == nil {
+					redeploying = append(redeploying, target.Name)
+				}
+			}
+		}
+	}
+	s.audit(r, &p.user.ID, "database.password_changed", map[string]any{"database_id": app.ID, "apps_updated": updated})
+	conn, err := s.connection(app)
+	if err != nil {
+		s.internalError(w, r, "database connection", err)
+		return
+	}
+	resp["connection"], resp["updated_apps"], resp["redeploying"] = conn, updated, redeploying
+	writeJSON(w, http.StatusOK, resp)
 }

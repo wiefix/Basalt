@@ -20,7 +20,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -273,10 +275,13 @@ func TestCertificateNotifications(t *testing.T) {
 	}))
 	t.Cleanup(receiver.Close)
 
-	p := startPanelWith(t, server.Options{CertCheckEvery: 200 * time.Millisecond})
+	var clock atomic.Pointer[time.Time]
+	start := time.Now()
+	clock.Store(&start)
+	p := startPanelWith(t, server.Options{CertCheckEvery: 200 * time.Millisecond, Now: func() time.Time { return *clock.Load() }})
 	h := startHost(t, p)
 	p.call(http.StatusCreated, "POST", "/api/v1/notifications", map[string]any{"name": "ops", "kind": "webhook",
-		"url": receiver.URL, "allow_private": true, "events": []string{"cert.expiring"}})
+		"url": receiver.URL, "allow_private": true, "events": []string{"cert.expiring", "cert.missing"}})
 	for _, r := range []map[string]any{
 		{"kind": "reverse_proxy", "domains": []string{"shop.example.com", "new.example.com"}, "upstream": "127.0.0.1:9", "tls": "auto"},
 		{"kind": "reverse_proxy", "domains": []string{"dev.localhost"}, "upstream": "127.0.0.1:9", "tls": "auto"},
@@ -314,6 +319,27 @@ func TestCertificateNotifications(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("no notification")
+	}
+	select {
+	case m := <-got:
+		t.Fatalf("repeated: %v", m)
+	case <-time.After(time.Second):
+	}
+
+	// A day later new.example.com still has none: reported once, with the
+	// proxy's last error.
+	os.MkdirAll(filepath.Join(h.proxyDir, "logs"), 0o700)
+	os.WriteFile(filepath.Join(h.proxyDir, "logs", "tls.log"), []byte(`{"level":"error","ts":`+strconv.FormatInt(start.Unix(), 10)+
+		`,"logger":"tls.obtain","msg":"could not get certificate from issuer","identifier":"new.example.com","error":"no valid A records found for new.example.com"}`+"\n"), 0o600)
+	later := start.Add(25 * time.Hour)
+	clock.Store(&later)
+	select {
+	case m := <-got:
+		if m["event"] != "cert.missing" || m["title"] != "No certificate for new.example.com" || !strings.Contains(m["text"].(string), "no valid A records") {
+			t.Fatalf("message %v", m)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no notification about the missing certificate")
 	}
 	select {
 	case m := <-got:

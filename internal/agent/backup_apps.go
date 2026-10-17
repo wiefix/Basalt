@@ -224,3 +224,54 @@ func pipeSnapshot(ctx context.Context, r *restic.Runner, repo restic.Repo, snaps
 	}
 	return nil
 }
+
+// Changing a database user's password inside its container: the SQL goes
+// in on standard input, MySQL and MariaDB connect as root with the root
+// password from the container's own environment.
+const (
+	mysqlRoot   = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot`
+	mariadbRoot = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot`
+)
+
+func (b *backupManager) setDBPassword(ctx context.Context, req agentproto.ContainerDBPassword) error {
+	if err := req.Validate(); err != nil {
+		return err
+	}
+	bin, err := b.dockerCLI()
+	if err != nil {
+		return err
+	}
+	c, err := b.apps.current(ctx, b.apps.dc, req.AppID, req.Service)
+	if err != nil {
+		return err
+	}
+	if c == nil || c.State != "running" {
+		return errors.New("the database is not running: start it first")
+	}
+	// Names and the password match fixed alphabets (Validate): nothing in
+	// the SQL needs escaping.
+	var inner []string
+	var sql string
+	switch req.Engine {
+	case "postgres":
+		inner = []string{"psql", "--username", req.User, "--dbname", req.Database, "--no-password", "--quiet", "--set", "ON_ERROR_STOP=1"}
+		sql = fmt.Sprintf(`ALTER ROLE "%s" WITH PASSWORD '%s';`, req.User, req.Password)
+	case "mysql", "mariadb":
+		script := mysqlRoot
+		if req.Engine == "mariadb" {
+			script = mariadbRoot
+		}
+		inner = []string{"sh", "-c", script}
+		sql = fmt.Sprintf("ALTER USER '%s'@'%%' IDENTIFIED BY '%s';\nFLUSH PRIVILEGES;\n", req.User, req.Password)
+	}
+	cmd := command(ctx, b.dockerArgs(bin, append([]string{"exec", "-i", c.ID}, inner...)...))
+	cmd.Stdin = strings.NewReader(sql)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if len(msg) > 300 {
+			msg = msg[len(msg)-300:]
+		}
+		return fmt.Errorf("change the password: %s", msg)
+	}
+	return nil
+}

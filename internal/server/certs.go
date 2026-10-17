@@ -6,6 +6,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
@@ -14,8 +15,12 @@ import (
 )
 
 // The proxy renews a certificate 30 days before it expires; one with less
-// than certWarnBefore left is not being renewed.
-const certWarnBefore = 14 * 24 * time.Hour
+// than certWarnBefore left is not being renewed. A name still without a
+// certificate after certMissingAfter is reported too.
+const (
+	certWarnBefore   = 14 * 24 * time.Hour
+	certMissingAfter = 24 * time.Hour
+)
 
 // publicNames lists the names a server's proxy gets public certificates
 // for: domains of its routes with automatic TLS.
@@ -58,6 +63,8 @@ type certView struct {
 	Issuer   string     `json:"issuer,omitempty"`
 	DaysLeft *int       `json:"days_left,omitempty"`
 	Expiring bool       `json:"expiring"` // not renewed in time
+	Error    string     `json:"error,omitempty"`
+	ErrorAt  *time.Time `json:"error_at,omitempty"`
 }
 
 // handleServerCerts lists the public certificates of a server's domains.
@@ -79,7 +86,11 @@ func (s *Server) handleServerCerts(w http.ResponseWriter, r *http.Request, p *pr
 	now := s.now()
 	out := make([]certView, len(certs))
 	for i, c := range certs {
-		out[i] = certView{Name: c.Name, Issuer: c.Issuer}
+		out[i] = certView{Name: c.Name, Issuer: c.Issuer, Error: c.Error}
+		if !c.ErrorAt.IsZero() {
+			at := c.ErrorAt
+			out[i].ErrorAt = &at
+		}
 		if !c.NotAfter.IsZero() {
 			na := c.NotAfter
 			days := int(math.Floor(na.Sub(now).Hours() / 24))
@@ -94,10 +105,11 @@ func (s *Server) handleServerCerts(w http.ResponseWriter, r *http.Request, p *pr
 // expiring (once per certificate). It runs until ctx ends.
 func (s *Server) WatchCertificates(ctx context.Context) {
 	notified := map[string]bool{}
+	missing := map[string]time.Time{} // server|name -> when first seen without a certificate
 	t := time.NewTicker(s.certCheckEvery)
 	defer t.Stop()
 	for {
-		s.checkCertificates(ctx, notified)
+		s.checkCertificates(ctx, notified, missing)
 		select {
 		case <-ctx.Done():
 			return
@@ -106,7 +118,7 @@ func (s *Server) WatchCertificates(ctx context.Context) {
 	}
 }
 
-func (s *Server) checkCertificates(ctx context.Context, notified map[string]bool) {
+func (s *Server) checkCertificates(ctx context.Context, notified map[string]bool, missing map[string]time.Time) {
 	servers, err := s.db.ListServers(ctx)
 	if err != nil {
 		return
@@ -121,9 +133,33 @@ func (s *Server) checkCertificates(ctx context.Context, notified map[string]bool
 			s.log.Warn("certificate status", "server_id", srv.ID, "err", err)
 			continue
 		}
+		seen := map[string]bool{}
 		for _, c := range certs {
+			mkey := fmt.Sprintf("%d|%s", srv.ID, c.Name)
+			seen[mkey] = true
+			if c.NotAfter.IsZero() {
+				since, ok := missing[mkey]
+				if !ok {
+					missing[mkey] = now
+					continue
+				}
+				if now.Sub(since) < certMissingAfter || notified[mkey+"|missing"] {
+					continue
+				}
+				notified[mkey+"|missing"] = true
+				text := fmt.Sprintf("%s has been on %s for over a day without a certificate. Check that the domain points to "+
+					"the server and that ports 80 and 443 are reachable (for a wildcard or an app on several servers: "+
+					"that its zone is under DNS here).", c.Name, srv.Name)
+				if c.Error != "" {
+					text += "\nThe last error: " + c.Error
+				}
+				s.notify(notify.Message{Event: EventCertMissing, Title: "No certificate for " + c.Name, At: now,
+					Link: fmt.Sprintf("/servers/%d", srv.ID), Text: text})
+				continue
+			}
+			delete(missing, mkey)
 			left := c.NotAfter.Sub(now)
-			if c.NotAfter.IsZero() || left >= certWarnBefore {
+			if left >= certWarnBefore {
 				continue
 			}
 			key := fmt.Sprintf("%d|%s|%d", srv.ID, c.Name, c.NotAfter.Unix())
@@ -140,6 +176,12 @@ func (s *Server) checkCertificates(ctx context.Context, notified map[string]bool
 					"check that the domain still points to the server and that ports 80 and 443 are reachable "+
 					"(for a wildcard or an app on several servers: that the zone is under DNS here).",
 					srv.Name, c.NotAfter.UTC().Format("2006-01-02"), c.Issuer)})
+		}
+		// Names gone from the server's routes are forgotten.
+		for k := range missing {
+			if strings.HasPrefix(k, fmt.Sprintf("%d|", srv.ID)) && !seen[k] {
+				delete(missing, k)
+			}
 		}
 	}
 }

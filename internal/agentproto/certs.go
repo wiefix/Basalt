@@ -21,6 +21,9 @@ type CertInfo struct {
 	Name     string    `json:"name"`
 	NotAfter time.Time `json:"not_after,omitzero"`
 	Issuer   string    `json:"issuer,omitempty"`
+	// Error is the proxy's latest failure to get or renew it, if any.
+	Error   string    `json:"error,omitempty"`
+	ErrorAt time.Time `json:"error_at,omitzero"`
 }
 
 type CertStatusResponse struct {

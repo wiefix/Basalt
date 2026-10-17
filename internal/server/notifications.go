@@ -31,6 +31,7 @@ const (
 	EventCertExpiring = "cert.expiring"
 	EventAuditBroken  = "audit.broken"
 	EventSiteQuota    = "site.quota"
+	EventCertMissing  = "cert.missing"
 )
 
 var notificationEvents = []struct {
@@ -45,6 +46,7 @@ var notificationEvents = []struct {
 	{EventServerUp, "A server reported offline is back"},
 	{EventMailProblem, "The mail deliverability check finds a new problem"},
 	{EventCertExpiring, "A certificate is not renewed and expires within 14 days"},
+	{EventCertMissing, "A domain still has no certificate a day after it was added"},
 	{EventAuditBroken, "The audit log was changed outside the panel"},
 	{EventSiteQuota, "A site goes over its disk quota"},
 }

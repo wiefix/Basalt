@@ -2,6 +2,7 @@ package e2e
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
@@ -204,6 +205,24 @@ func TestDatabaseWithDocker(t *testing.T) {
 		t.Fatalf("data after replacement: %v %s", err, out)
 	}
 
+	// A new password: changed in place, the linked app's URL follows; the
+	// old one no longer signs in.
+	pw := p.call(200, "POST", "/api/v1/apps/"+pg+"/password", map[string]any{})
+	if apps := pw["updated_apps"].([]any); len(apps) != 1 || apps[0] != "web" {
+		t.Fatalf("password change = %v", pw)
+	}
+	newURL := p.call(200, "GET", "/api/v1/apps/"+web+"/env", nil)["env"].(map[string]any)["DATABASE_URL"].(string)
+	if newURL == url || newURL != pw["connection"].(map[string]any)["url"] {
+		t.Fatalf("app URL %q after the change (was %q)", newURL, url)
+	}
+	if out, err := run("basalt-app-"+web, "postgres:18-alpine", "psql", newURL, "-tAc", "SELECT v FROM t"); err != nil || out != "kept" {
+		t.Fatalf("new password: %v %s", err, out)
+	}
+	if _, err := run("basalt-app-"+web, "postgres:18-alpine", "psql", url, "-tAc", "SELECT 1"); err == nil {
+		t.Fatal("the old password still signs in")
+	}
+	url = newURL
+
 	// Unlinked: no longer reachable.
 	p.call(200, "DELETE", "/api/v1/apps/"+pg+"/links/"+web, nil)
 	if _, err := run("basalt-app-"+web, "postgres:18-alpine", "pg_isready", "-h", "pg", "-t", "2"); err == nil {
@@ -222,6 +241,19 @@ func TestDatabaseWithDocker(t *testing.T) {
 	}
 	if out, _ := run("basalt-app-"+web, "redis:8-alpine", "redis-cli", "-h", "cache", "ping"); strings.Contains(out, "PONG") {
 		t.Fatal("redis answers without a password")
+	}
+	// Redis takes a new password with a new container.
+	p.call(200, "POST", "/api/v1/apps/"+cache+"/password", map[string]any{})
+	deps := p.call(200, "GET", "/api/v1/apps/"+cache+"/deployments", nil)["deployments"].([]any)
+	if d, log := followDeployment(t, p, "/api/v1/apps/"+cache, jsonID(deps[0].(map[string]any)["id"])); d["status"] != "succeeded" {
+		t.Fatalf("redis redeployment: %v\n%s", d, log)
+	}
+	newRedis := p.call(200, "GET", "/api/v1/apps/"+web+"/env", nil)["env"].(map[string]any)["REDIS_URL"].(string)
+	if out, err := run("basalt-app-"+web, "redis:8-alpine", "redis-cli", "-u", newRedis, "--no-auth-warning", "ping"); err != nil || out != "PONG" || newRedis == redisURL {
+		t.Fatalf("redis with the new password: %v %s", err, out)
+	}
+	if out, _ := run("basalt-app-"+web, "redis:8-alpine", "redis-cli", "-u", redisURL, "--no-auth-warning", "ping"); out == "PONG" {
+		t.Fatal("redis still takes the old password")
 	}
 
 	// Deleting the app detaches the database from its network.
@@ -301,6 +333,35 @@ func TestEveryEngineWithDocker(t *testing.T) {
 				"--network", "basalt-app-" + web, image}, args...)...).CombinedOutput()
 			if s := strings.TrimSpace(string(out)); err != nil || !strings.HasSuffix(s, "1") && s != "PONG" {
 				t.Fatalf("client: %v %s", err, s)
+			}
+			if engine != "redis" {
+				// A new password signs in; the old one no longer does.
+				nc := p.call(200, "POST", base+"/password", map[string]any{})["connection"].(map[string]any)
+				npw := nc["credentials"].(map[string]any)["password"].(string)
+				sign := func(pass, url string) error {
+					var a []string
+					switch engine {
+					case "postgres":
+						a = []string{"psql", url, "-tAc", "SELECT 1"}
+					case "mysql":
+						a = []string{"mysql", "-h", host, "-u", user, "-p" + pass, db, "-sNe", "SELECT 1"}
+					case "mariadb":
+						a = []string{"mariadb", "-h", host, "-u", user, "-p" + pass, db, "-sNe", "SELECT 1"}
+					}
+					out, err := exec.Command("docker", append([]string{"--host", "unix://" + sock, "run", "--rm",
+						"--network", "basalt-app-" + web, image}, a...)...).CombinedOutput()
+					if err == nil && !strings.HasSuffix(strings.TrimSpace(string(out)), "1") {
+						err = fmt.Errorf("%s", out)
+					}
+					return err
+				}
+				if err := sign(npw, nc["url"].(string)); err != nil {
+					t.Fatalf("new password: %v", err)
+				}
+				if sign(pw, c["url"].(string)) == nil {
+					t.Fatal("the old password still signs in")
+				}
+				pw = npw
 			}
 			if storage == nil {
 				return

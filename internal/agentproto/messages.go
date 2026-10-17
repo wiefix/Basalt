@@ -1,14 +1,15 @@
 package agentproto
 
 import (
-	"github.com/wiefix/basalt/internal/php"
-
+	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/wiefix/basalt/internal/dns"
 	"github.com/wiefix/basalt/internal/docker"
 	"github.com/wiefix/basalt/internal/files"
+	"github.com/wiefix/basalt/internal/php"
 	"github.com/wiefix/basalt/internal/proxy"
 	"github.com/wiefix/basalt/internal/sftpd"
 )
@@ -555,4 +556,33 @@ type AccessEntry struct {
 
 type AccessLogResponse struct {
 	Entries []AccessEntry `json:"entries"`
+}
+
+// TypeDBPassword changes the password of a container database's user
+// (PostgreSQL, MySQL, MariaDB) inside its running container.
+const TypeDBPassword = "db_password"
+
+type ContainerDBPassword struct {
+	AppID    int64  `json:"app_id"`
+	Service  string `json:"service"`
+	Engine   string `json:"engine"` // postgres, mysql, mariadb
+	Database string `json:"database"`
+	User     string `json:"user"`
+	Password string `json:"password"`
+}
+
+var dbPasswordRE = regexp.MustCompile(`^[A-Za-z0-9]{16,128}$`)
+
+func (r *ContainerDBPassword) Validate() error {
+	switch {
+	case r.AppID <= 0 || !ServiceNameRE.MatchString(r.Service):
+		return errors.New("invalid database app")
+	case !dumpEngines[r.Engine]:
+		return errors.New("only PostgreSQL, MySQL and MariaDB passwords are changed this way")
+	case !sqlNameRE.MatchString(r.User) || !sqlNameRE.MatchString(r.Database):
+		return errors.New("invalid database or user name")
+	case !dbPasswordRE.MatchString(r.Password):
+		return errors.New("invalid password")
+	}
+	return nil
 }

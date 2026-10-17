@@ -61,6 +61,10 @@ func AccessLogName(r Route) string {
 
 func AccessLogPath(dir, name string) string { return filepath.Join(dir, "logs", name+".log") }
 
+// TLSLogPath is where the proxy records certificate events (issuance,
+// renewal, their errors) for the agent to report.
+func TLSLogPath(dir string) string { return filepath.Join(dir, "logs", "tls.log") }
+
 // Never served from static sites even if present in the site root. PHP
 // sources are hidden too: a site switched from PHP to static must not
 // expose its code (and the credentials in it) as plain text.
@@ -94,6 +98,12 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 	logs := obj{
 		// Everything but access logs goes where it always did (stderr).
 		"default": obj{"exclude": []any{"http.log.access"}},
+		"tls": obj{
+			"writer":  obj{"output": "file", "filename": TLSLogPath(o.Dir), "roll_size_mb": 5, "roll_keep": 2},
+			"encoder": obj{"format": "json"},
+			"include": []any{"tls"},
+			"exclude": []any{"tls.handshake"},
+		},
 	}
 	for _, r := range d.Routes {
 		if name := AccessLogName(r); name != "" {

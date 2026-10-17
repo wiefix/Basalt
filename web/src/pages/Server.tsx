@@ -619,6 +619,12 @@ function CertificatesCard({ serverId }: { serverId: number }) {
                         not issued yet
                       </span>
                     )}
+                    {c.error && (
+                      <div className="small" style={{ color: "var(--err)", overflowWrap: "anywhere", marginTop: 4 }}>
+                        {c.error_at && <span className="faint">{formatDate(c.error_at)}: </span>}
+                        {c.error}
+                      </div>
+                    )}
                   </td>
                 </tr>
               ))}

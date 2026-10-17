@@ -891,7 +891,15 @@ export const api = {
     get<{ metrics: Metrics[] }>(`/api/v1/servers/${id}/metrics?minutes=${minutes}`),
   serverCertificates: (id: number) =>
     get<{
-      certificates: { name: string; not_after: string | null; issuer?: string; days_left?: number; expiring: boolean }[];
+      certificates: {
+        name: string;
+        not_after: string | null;
+        issuer?: string;
+        days_left?: number;
+        expiring: boolean;
+        error?: string;
+        error_at?: string;
+      }[];
     }>(`/api/v1/servers/${id}/certificates`),
   setPublicIPs: (id: number, ips: string[]) => put<{ server: Server }>(`/api/v1/servers/${id}/public-ips`, { ips }),
   pingServer: (id: number) => post<{ rtt_ms: number; agent_time: string }>(`/api/v1/servers/${id}/ping`),
@@ -1027,6 +1035,11 @@ export const api = {
   ) => post<{ app: App; sync: Sync; warnings: string[] }>("/api/v1/apps", b),
   databaseEngines: () => get<{ engines: Engine[] }>("/api/v1/database-engines"),
   databaseConnection: (id: number) => get<{ connection: DatabaseConnection }>(`/api/v1/apps/${id}/connection`),
+  databasePassword: (id: number, redeploy_apps: boolean) =>
+    post<{ connection: DatabaseConnection; updated_apps: string[]; redeploying: string[]; deploy_error?: string }>(
+      `/api/v1/apps/${id}/password`,
+      { redeploy_apps },
+    ),
   linkApp: (id: number, appId: number, envVar: string) =>
     post<{ app: App; attach_error?: string }>(`/api/v1/apps/${id}/links`, { app_id: appId, env_var: envVar }),
   unlinkApp: (id: number, appId: number) => del<{ app: App; attach_error?: string }>(`/api/v1/apps/${id}/links/${appId}`),
