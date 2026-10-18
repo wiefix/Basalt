@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
@@ -20,7 +21,8 @@ import (
 	"github.com/wiefix/basalt/internal/restic"
 )
 
-// Single files and folders of a snapshot of a site's files: browsing,
+// Single files and folders of a snapshot of a site's files (an app's
+// volumes: backup_volumes.go), and database dumps: browsing,
 // downloading (through a temporary file the panel reads in chunks, so a
 // slow download never holds up the agent channel) and restoring a copy into
 // a new folder of the site.
@@ -38,17 +40,27 @@ var restoreCopyLimits = files.Limits{MaxTotalBytes: 100 << 30, MaxFiles: 1_000_0
 
 var errNotInBackup = errors.New("no such file or folder in this backup")
 
-// snapshotNode finds what the request names: the snapshot (which must hold
-// files of this very site), the absolute path in it, the path relative to
-// the site's directory ("" for all of it) and the entry itself.
-func (b *backupManager) snapshotNode(ctx context.Context, r *restic.Runner, repo restic.Repo, req agentproto.SnapshotFilesRequest) (snapID, abs, rel string, node *restic.Node, err error) {
+// checkSnapshot loads the snapshot the request names; it must hold the
+// requested part of this very resource.
+func (b *backupManager) checkSnapshot(ctx context.Context, r *restic.Runner, repo restic.Repo, req agentproto.SnapshotFilesRequest) (*restic.Snapshot, error) {
 	snap, err := r.SnapshotByID(ctx, repo, req.Snapshot)
 	if err != nil {
-		return "", "", "", nil, err
+		return nil, err
 	}
 	if snap == nil || snap.Host != backupHost || len(snap.Paths) != 1 ||
-		!slices.Contains(snap.Tags, "res="+req.Resource) || !slices.Contains(snap.Tags, "part=files") {
-		return "", "", "", nil, errors.New("no such backup of the site's files")
+		!slices.Contains(snap.Tags, "res="+req.Resource) || !slices.Contains(snap.Tags, "part="+req.PartOf()) {
+		return nil, errors.New("no such backup of this part")
+	}
+	return snap, nil
+}
+
+// snapshotNode finds what the request names in a snapshot of a site's
+// files: the snapshot, the absolute path in it, the path relative to the
+// site's directory ("" for all of it) and the entry itself.
+func (b *backupManager) snapshotNode(ctx context.Context, r *restic.Runner, repo restic.Repo, req agentproto.SnapshotFilesRequest) (snapID, abs, rel string, node *restic.Node, err error) {
+	snap, err := b.checkSnapshot(ctx, r, repo, req)
+	if err != nil {
+		return "", "", "", nil, err
 	}
 	c, err := files.Clean(req.Path)
 	if err != nil {
@@ -76,7 +88,7 @@ func entryType(t string) string {
 	return "other"
 }
 
-// Browse lists a folder of a snapshot of a site's files.
+// Browse lists a folder of a snapshot of a site's files or of a volume.
 func (b *backupManager) Browse(ctx context.Context, req agentproto.SnapshotFilesRequest) (agentproto.BrowseResponse, error) {
 	if err := req.Validate(); err != nil {
 		return agentproto.BrowseResponse{}, err
@@ -86,6 +98,12 @@ func (b *backupManager) Browse(ctx context.Context, req agentproto.SnapshotFiles
 		return agentproto.BrowseResponse{}, err
 	}
 	r := b.runner(nil)
+	switch {
+	case req.IsDump():
+		return agentproto.BrowseResponse{}, errors.New("a database dump is one file: download it")
+	case req.PartOf() != agentproto.PartFiles:
+		return b.browseVolume(ctx, r, repo, req)
+	}
 	id, abs, rel, node, err := b.snapshotNode(ctx, r, repo, req)
 	if err != nil {
 		return agentproto.BrowseResponse{}, err
@@ -104,7 +122,13 @@ func (b *backupManager) Browse(ctx context.Context, req agentproto.SnapshotFiles
 			Mode: fmt.Sprintf("%04o", fs.FileMode(n.Mode).Perm()),
 		})
 	}
-	slices.SortFunc(out.Entries, func(a, b agentproto.SnapshotEntry) int {
+	out.Entries = sortEntries(out.Entries)
+	return out, nil
+}
+
+// sortEntries puts folders first, then sorts by name, and bounds the list.
+func sortEntries(list []agentproto.SnapshotEntry) []agentproto.SnapshotEntry {
+	slices.SortFunc(list, func(a, b agentproto.SnapshotEntry) int {
 		if (a.Type == "dir") != (b.Type == "dir") {
 			if a.Type == "dir" {
 				return -1
@@ -113,10 +137,10 @@ func (b *backupManager) Browse(ctx context.Context, req agentproto.SnapshotFiles
 		}
 		return cmp.Compare(a.Name, b.Name)
 	})
-	if len(out.Entries) > files.MaxEntries {
-		out.Entries = out.Entries[:files.MaxEntries]
+	if len(list) > files.MaxEntries {
+		list = list[:files.MaxEntries]
 	}
-	return out, nil
+	return list
 }
 
 func (b *backupManager) exportDir() string { return filepath.Join(b.dataDir, "exports") }
@@ -140,8 +164,8 @@ func (b *backupManager) cleanExports() int {
 	return left
 }
 
-// Export writes a file, or a folder as a zip archive, of a snapshot to a
-// temporary file for the panel to read.
+// Export writes a file, or a folder as a zip archive, of a snapshot (or a
+// database dump) to a temporary file for the panel to read.
 func (b *backupManager) Export(ctx context.Context, req agentproto.SnapshotFilesRequest) (agentproto.ExportResponse, error) {
 	if err := req.Validate(); err != nil {
 		return agentproto.ExportResponse{}, err
@@ -151,6 +175,12 @@ func (b *backupManager) Export(ctx context.Context, req agentproto.SnapshotFiles
 		return agentproto.ExportResponse{}, err
 	}
 	r := b.runner(nil)
+	switch {
+	case req.IsDump():
+		return b.exportDump(ctx, r, repo, req)
+	case req.PartOf() != agentproto.PartFiles:
+		return b.exportVolume(ctx, r, repo, req)
+	}
 	id, abs, rel, node, err := b.snapshotNode(ctx, r, repo, req)
 	if err != nil {
 		return agentproto.ExportResponse{}, err
@@ -170,7 +200,30 @@ func (b *backupManager) Export(ctx context.Context, req agentproto.SnapshotFiles
 	default:
 		return agentproto.ExportResponse{}, errors.New("only files and folders can be downloaded")
 	}
+	return b.export(func(w io.Writer) (string, error) { return name, dump(w) })
+}
 
+// exportDump writes a database dump of a snapshot for the panel to read.
+func (b *backupManager) exportDump(ctx context.Context, r *restic.Runner, repo restic.Repo, req agentproto.SnapshotFilesRequest) (agentproto.ExportResponse, error) {
+	snap, err := b.checkSnapshot(ctx, r, repo, req)
+	if err != nil {
+		return agentproto.ExportResponse{}, err
+	}
+	part := req.PartOf()
+	db, site := strings.CutPrefix(part, agentproto.PartMariaDB)
+	file := dumpFile(db)
+	if !site {
+		db = strings.TrimPrefix(part, agentproto.PartDump)
+		file = dumpFileOf(db)
+	}
+	return b.export(func(w io.Writer) (string, error) {
+		return fmt.Sprintf("%s-%s.sql", db, snap.ID[:8]), r.Dump(ctx, repo, snap.ID, "/"+file, w)
+	})
+}
+
+// export writes what write produces (and the name to save it as) to a new
+// temporary file in the exports directory.
+func (b *backupManager) export(write func(io.Writer) (string, error)) (agentproto.ExportResponse, error) {
 	if err := os.MkdirAll(b.exportDir(), 0o700); err != nil {
 		return agentproto.ExportResponse{}, err
 	}
@@ -188,7 +241,7 @@ func (b *backupManager) Export(ctx context.Context, req agentproto.SnapshotFiles
 	if err != nil {
 		return agentproto.ExportResponse{}, err
 	}
-	err = dump(f)
+	name, err := write(f)
 	size, _ := f.Seek(0, io.SeekCurrent)
 	if cerr := f.Close(); err == nil {
 		err = cerr
@@ -239,9 +292,9 @@ func (b *backupManager) ExportClose(req agentproto.ExportClose) error {
 }
 
 // RestoreCopy restores a file or folder of a snapshot into a new folder
-// "restored-<time>" at the top of the site, leaving everything else as it
-// is. The copy is written through the site's confined file access, as the
-// site's user; symbolic links and special files are left out.
+// "restored-<time>" at the top of the site (or volume), leaving everything
+// else as it is. A site's copy is written through the site's confined file
+// access, as the site's user; symbolic links and special files are left out.
 func (b *backupManager) RestoreCopy(ctx context.Context, req agentproto.SnapshotFilesRequest) (agentproto.RestoreCopyResponse, error) {
 	if err := req.Validate(); err != nil {
 		return agentproto.RestoreCopyResponse{}, err
@@ -251,6 +304,12 @@ func (b *backupManager) RestoreCopy(ctx context.Context, req agentproto.Snapshot
 		return agentproto.RestoreCopyResponse{}, err
 	}
 	r := b.runner(nil)
+	switch {
+	case req.IsDump():
+		return agentproto.RestoreCopyResponse{}, errors.New("a database dump is restored from the Restore dialog")
+	case req.PartOf() != agentproto.PartFiles:
+		return b.restoreVolumeCopy(ctx, r, repo, req)
+	}
 	id, abs, rel, node, err := b.snapshotNode(ctx, r, repo, req)
 	if err != nil {
 		return agentproto.RestoreCopyResponse{}, err
@@ -266,7 +325,7 @@ func (b *backupManager) RestoreCopy(ctx context.Context, req agentproto.Snapshot
 	b.slots <- struct{}{}
 	defer func() { <-b.slots }()
 
-	base := "restored-" + time.Now().UTC().Format("20060102-150405")
+	base := restoredName()
 	folder := base
 	for i := 2; ; i++ {
 		err := site.Mkdir(folder)
@@ -285,6 +344,10 @@ func (b *backupManager) RestoreCopy(ctx context.Context, req agentproto.Snapshot
 	}
 	return agentproto.RestoreCopyResponse{Folder: folder, Files: res.Files, Dirs: res.Dirs, Bytes: res.Bytes, Skipped: len(res.Skipped)}, nil
 }
+
+// restoredName is the folder a restored copy goes into (made unique with
+// -2, -3… when taken).
+func restoredName() string { return "restored-" + time.Now().UTC().Format("20060102-150405") }
 
 func (b *backupManager) restoreInto(ctx context.Context, r *restic.Runner, repo restic.Repo, site *files.Site, id, abs, rel, typ, folder string) (*files.ExtractResult, error) {
 	dest, base := folder, path.Base(rel)

@@ -108,6 +108,10 @@ func TestSnapshotFiles(t *testing.T) {
 	otherSnap := backup(other)
 	p.call(http.StatusUnprocessableEntity, "GET", "/api/v1/sites/"+sid+"/snapshots/"+otherSnap+"/files?path=public", nil)
 	p.call(http.StatusUnprocessableEntity, "GET", "/api/v1/sites/"+sid+"/snapshots/"+otherSnap+"/download?path=public/secret.txt", nil)
+	// A site has no volumes; the files' snapshot is no database dump.
+	p.call(http.StatusUnprocessableEntity, "GET", base+"/files?volume=html", nil)
+	p.call(http.StatusUnprocessableEntity, "GET", base+"/download?database=s1_wp", nil)
+	p.call(http.StatusUnprocessableEntity, "GET", base+"/download?database="+url.QueryEscape("a;b"), nil)
 
 	// Downloads: a file as it was, a folder as a zip with relative names.
 	code, hdr, body := p.raw("GET", base+"/download?path=public/index.html", "", nil)

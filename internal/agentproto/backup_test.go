@@ -21,3 +21,38 @@ func TestVerifyRequest(t *testing.T) {
 		t.Error("invalid repository accepted")
 	}
 }
+
+func TestSnapshotFilesRequest(t *testing.T) {
+	repo := BackupRepo{Kind: StorageLocal, Path: "/var/backups/basalt", Password: "pw"}
+	ok := func(r SnapshotFilesRequest) SnapshotFilesRequest {
+		r.Repo, r.Snapshot = repo, "0123abcd"
+		return r
+	}
+	for _, r := range []SnapshotFilesRequest{
+		{Resource: "site-3", SiteID: 3},
+		{Resource: "site-3", SiteID: 3, Part: "files", Path: "public/x"},
+		{Resource: "site-3", SiteID: 3, Part: "mariadb-s3_wp"},
+		{Resource: "app-4", AppID: 4, Part: "volume-data", Path: "a/b"},
+		{Resource: "app-4", AppID: 4, Part: "dump-shop"},
+	} {
+		if r := ok(r); r.Validate() != nil {
+			t.Errorf("%+v: %v", r, r.Validate())
+		}
+	}
+	for name, r := range map[string]SnapshotFilesRequest{
+		"site of another resource": {Resource: "site-4", SiteID: 3},
+		"site and app":             {Resource: "app-4", AppID: 4, SiteID: 3, Part: "volume-data"},
+		"site volume":              {Resource: "site-3", SiteID: 3, Part: "volume-data"},
+		"app files":                {Resource: "app-4", AppID: 4},
+		"app mariadb":              {Resource: "app-4", AppID: 4, Part: "mariadb-x"},
+		"site app dump":            {Resource: "site-3", SiteID: 3, Part: "dump-x"},
+		"bad volume":               {Resource: "app-4", AppID: 4, Part: "volume-../x"},
+		"bad database":             {Resource: "app-4", AppID: 4, Part: "dump-a;b"},
+		"path in a dump":           {Resource: "app-4", AppID: 4, Part: "dump-shop", Path: "x"},
+		"control in path":          {Resource: "app-4", AppID: 4, Part: "volume-data", Path: "a\nb"},
+	} {
+		if r := ok(r); r.Validate() == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

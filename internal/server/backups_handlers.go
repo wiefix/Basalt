@@ -379,6 +379,9 @@ func (s *Server) backupRoutes(mux *router, prefix string, t targetResolver) {
 	mux.Handle("DELETE "+prefix+"/backup-policy", s.requireRole(store.RoleAdmin, s.handleDeleteBackupPolicy(t)))
 	mux.Handle("GET "+prefix+"/snapshots", s.requireRole(store.RoleMember, s.handleSnapshots(t)))
 	mux.Handle("POST "+prefix+"/restore", s.requireRole(store.RoleAdmin, s.handleRestore(t)))
+	mux.Handle("GET "+prefix+"/snapshots/{sid}/files", s.requireRole(store.RoleMember, s.handleSnapshotFiles(t)))
+	mux.Handle("GET "+prefix+"/snapshots/{sid}/download", s.requireRole(store.RoleMember, s.handleSnapshotDownload(t)))
+	mux.Handle("POST "+prefix+"/snapshots/{sid}/restore-copy", s.requireRole(store.RoleMember, s.handleRestoreCopy(t)))
 }
 
 type handler = func(w http.ResponseWriter, r *http.Request, p *principal)

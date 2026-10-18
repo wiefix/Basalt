@@ -36,6 +36,8 @@ type backupManager struct {
 	slots chan struct{}
 	lmu   sync.Mutex
 	locks map[string]*sync.Mutex // by resource, and by repository ("repo:…")
+
+	indexes volumeIndexes // listings of volume snapshots, for browsing
 }
 
 func newBackupManager(cfg Config, sites *sitesManager, apps *appsManager, log *slog.Logger) *backupManager {

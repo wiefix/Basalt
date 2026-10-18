@@ -34,7 +34,7 @@ export interface BackupTarget {
   name: string;
   policyUrl?: string; // default base + "/backup-policy"
   queryKey?: unknown[]; // refreshed when the policy changes; default ["backups", base]
-  siteId?: number; // a site: its backed-up files can be browsed
+  siteId?: number; // a site: restored copies open in its file manager
 }
 
 const policyUrl = (t: BackupTarget) => t.policyUrl ?? `${t.base}/backup-policy`;
@@ -91,9 +91,9 @@ export function BackupsTab({ target, user }: { target: BackupTarget; user: User 
                 <Icon name="archive" /> {running ? "Running…" : "Back up now"}
               </button>
             )}
-            {policy && target.siteId !== undefined && can(user, "member") && (
-              <button className="btn" onClick={() => setBrowsing(true)}>
-                <Icon name="folder" /> Browse files
+            {policy && can(user, "member") && (
+              <button className="btn" onClick={() => setBrowsing(true)} title="Download files, folders and database dumps, or restore a copy">
+                <Icon name="folder" /> Browse backups
               </button>
             )}
             {policy && can(user, "admin") && (
@@ -148,7 +148,7 @@ export function BackupsTab({ target, user }: { target: BackupTarget; user: User 
         )}
       </div>
       {shown !== null && <RunModal target={target} id={shown} onClose={() => setShown(null)} />}
-      {browsing && target.siteId !== undefined && (
+      {browsing && (
         <SnapshotFilesModal siteId={target.siteId} base={target.base} canWrite={can(user, "member")} onClose={() => setBrowsing(false)} />
       )}
       {restoring && (

@@ -6,6 +6,7 @@ import (
 	"mime"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -14,9 +15,10 @@ import (
 	"github.com/wiefix/basalt/internal/files"
 )
 
-// Single files and folders of a backup of a site's files: browse a
-// snapshot, download a file (or a folder as a zip archive), and restore a
-// copy into a new folder of the site without touching anything else.
+// Single files and folders of a backup: of a site's files or of an app's
+// volume. Browse a snapshot, download a file (or a folder as a zip
+// archive), restore a copy into a new folder of the site or volume without
+// touching anything else, and download a database dump.
 
 const (
 	exportTimeout      = time.Hour
@@ -25,10 +27,11 @@ const (
 
 var snapshotParamRE = regexp.MustCompile(`^[0-9a-f]{8,64}$`)
 
-// snapshotFiles reads the site, snapshot and path of a request and the
-// repository; it writes the error response itself.
-func (s *Server) snapshotFiles(w http.ResponseWriter, r *http.Request, p string) (*backupTarget, agentproto.SnapshotFilesRequest, bool) {
-	t, ok := s.pathSiteTarget(w, r)
+// snapshotFiles reads the target, snapshot, part (volume or database) and
+// path of a request and the repository; it writes the error response
+// itself.
+func (s *Server) snapshotFiles(w http.ResponseWriter, r *http.Request, resolve targetResolver, volume, database, p string) (*backupTarget, agentproto.SnapshotFilesRequest, bool) {
+	t, ok := resolve(w, r)
 	if !ok {
 		return nil, agentproto.SnapshotFilesRequest{}, false
 	}
@@ -37,8 +40,26 @@ func (s *Server) snapshotFiles(w http.ResponseWriter, r *http.Request, p string)
 		writeError(w, http.StatusNotFound, "backup not found")
 		return nil, agentproto.SnapshotFilesRequest{}, false
 	}
-	p = strings.Trim(p, "/")
-	if !agentproto.ValidSnapshotPath(p) {
+	req := agentproto.SnapshotFilesRequest{Resource: t.resource(), Snapshot: snap, Path: strings.Trim(p, "/")}
+	switch {
+	case t.site != nil && volume != "":
+		writeError(w, http.StatusUnprocessableEntity, "a site has no volumes")
+		return nil, agentproto.SnapshotFilesRequest{}, false
+	case t.site != nil:
+		req.SiteID, req.Part = t.site.ID, agentproto.PartFiles
+		if database != "" {
+			req.Part = agentproto.PartMariaDB + database
+		}
+	case volume != "" && database != "", volume == "" && database == "":
+		writeError(w, http.StatusUnprocessableEntity, "choose a volume or a database of the app")
+		return nil, agentproto.SnapshotFilesRequest{}, false
+	default:
+		req.AppID, req.Part = t.app.ID, agentproto.PartVolume+volume
+		if database != "" {
+			req.Part = agentproto.PartDump + database
+		}
+	}
+	if !agentproto.ValidSnapshotPath(req.Path) || (req.IsDump() && req.Path != "") {
 		writeError(w, http.StatusUnprocessableEntity, "invalid path")
 		return nil, agentproto.SnapshotFilesRequest{}, false
 	}
@@ -49,32 +70,50 @@ func (s *Server) snapshotFiles(w http.ResponseWriter, r *http.Request, p string)
 	if !ok {
 		return nil, agentproto.SnapshotFilesRequest{}, false
 	}
-	return t, agentproto.SnapshotFilesRequest{Repo: repo, Resource: t.resource(), SiteID: t.SiteID, Snapshot: snap, Path: p}, true
+	req.Repo = repo
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return nil, agentproto.SnapshotFilesRequest{}, false
+	}
+	return t, req, true
 }
 
-func (s *Server) handleSnapshotFiles(w http.ResponseWriter, r *http.Request, p *principal) {
-	t, req, ok := s.snapshotFiles(w, r, r.URL.Query().Get("path"))
-	if !ok {
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), backupCheckTime)
-	defer cancel()
-	var resp agentproto.BrowseResponse
-	if err := s.agents.Call(ctx, t.ServerID, agentproto.TypeBackupBrowse, req, &resp); err != nil {
-		writeAgentError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"path": resp.Path, "entries": nonNil(resp.Entries)})
+// partDetails describes a part of a backup for the audit log.
+func partDetails(t *backupTarget, req agentproto.SnapshotFilesRequest) map[string]any {
+	return map[string]any{"resource": t.resource(), "part": req.PartOf(), "snapshot": req.Snapshot, "path": "/" + req.Path}
 }
 
-// handleSnapshotDownload has the server write the file (or a zip of the
-// folder) out of the backup, then streams it from there in chunks. Like any
-// download of user content, it is an attachment with a sandboxing CSP.
-func (s *Server) handleSnapshotDownload(w http.ResponseWriter, r *http.Request, p *principal) {
-	t, req, ok := s.snapshotFiles(w, r, r.URL.Query().Get("path"))
-	if !ok {
-		return
+func (s *Server) handleSnapshotFiles(resolve targetResolver) handler {
+	return func(w http.ResponseWriter, r *http.Request, p *principal) {
+		q := r.URL.Query()
+		t, req, ok := s.snapshotFiles(w, r, resolve, q.Get("volume"), "", q.Get("path"))
+		if !ok {
+			return
+		}
+		// Reading a volume's archive takes as long as the volume is large
+		// (once: the agent keeps the listing).
+		ctx, cancel := context.WithTimeout(r.Context(), exportTimeout)
+		defer cancel()
+		var resp agentproto.BrowseResponse
+		if err := s.agents.Stream(ctx, t.ServerID, agentproto.TypeBackupBrowse, req, &resp, func(json.RawMessage) error { return nil }); err != nil {
+			writeAgentError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"path": resp.Path, "entries": nonNil(resp.Entries)})
 	}
+}
+
+func (s *Server) handleSnapshotDownload(resolve targetResolver) handler {
+	return func(w http.ResponseWriter, r *http.Request, p *principal) {
+		q := r.URL.Query()
+		t, req, ok := s.snapshotFiles(w, r, resolve, q.Get("volume"), q.Get("database"), q.Get("path"))
+		if ok {
+			s.snapshotDownload(w, r, p, t, req)
+		}
+	}
+}
+
+func (s *Server) snapshotDownload(w http.ResponseWriter, r *http.Request, p *principal, t *backupTarget, req agentproto.SnapshotFilesRequest) {
 	ctx, cancel := context.WithTimeout(r.Context(), exportTimeout)
 	defer cancel()
 	var exp agentproto.ExportResponse
@@ -88,12 +127,12 @@ func (s *Server) handleSnapshotDownload(w http.ResponseWriter, r *http.Request, 
 		cctx, ccancel := context.WithTimeout(context.Background(), fileOpTimeout)
 		defer ccancel()
 		if err := s.agents.Call(cctx, t.ServerID, agentproto.TypeBackupExportClose, agentproto.ExportClose{ID: exp.ID}, nil); err != nil {
-			s.log.Warn("drop exported backup file", "site_id", t.SiteID, "err", err)
+			s.log.Warn("drop exported backup file", "resource", t.resource(), "err", err)
 		}
 	}()
-	s.audit(r, &p.user.ID, "backup.file_downloaded", map[string]any{
-		"resource": t.resource(), "snapshot": req.Snapshot, "path": "/" + req.Path, "bytes": exp.Size,
-	})
+	details := partDetails(t, req)
+	details["bytes"] = exp.Size
+	s.audit(r, &p.user.ID, "backup.file_downloaded", details)
 
 	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(transferDeadline))
 	h := w.Header()
@@ -111,7 +150,7 @@ func (s *Server) handleSnapshotDownload(w http.ResponseWriter, r *http.Request, 
 		ccancel()
 		if err != nil || len(chunk.Data) == 0 {
 			// Headers are sent; the short body tells the client it failed.
-			s.log.Warn("backup download interrupted", "site_id", t.SiteID, "err", err)
+			s.log.Warn("backup download interrupted", "resource", t.resource(), "err", err)
 			return
 		}
 		if _, err := w.Write(chunk.Data); err != nil {
@@ -122,19 +161,36 @@ func (s *Server) handleSnapshotDownload(w http.ResponseWriter, r *http.Request, 
 }
 
 type restoreCopyRequest struct {
-	Path string `json:"path"`
+	Path   string `json:"path"`
+	Volume string `json:"volume"` // apps: the volume
 }
 
-// handleRestoreCopy restores a file or folder of a backup into a new
-// folder "restored-<time>" of the site; nothing else changes.
-func (s *Server) handleRestoreCopy(w http.ResponseWriter, r *http.Request, p *principal) {
-	var body restoreCopyRequest
-	if !decodeJSON(w, r, &body) {
-		return
+// handleRestoreCopy restores a file or folder of a backup into a new folder
+// "restored-<time>" of the site or volume; nothing else changes.
+func (s *Server) handleRestoreCopy(resolve targetResolver) handler {
+	return func(w http.ResponseWriter, r *http.Request, p *principal) {
+		var body restoreCopyRequest
+		if !decodeJSON(w, r, &body) {
+			return
+		}
+		t, req, ok := s.snapshotFiles(w, r, resolve, body.Volume, "", body.Path)
+		if ok {
+			s.restoreCopy(w, r, p, t, req, body.Volume)
+		}
 	}
-	t, req, ok := s.snapshotFiles(w, r, body.Path)
-	if !ok {
-		return
+}
+
+func (s *Server) restoreCopy(w http.ResponseWriter, r *http.Request, p *principal, t *backupTarget, req agentproto.SnapshotFilesRequest, volume string) {
+	if volume != "" {
+		items, err := s.items(r.Context(), t)
+		if err != nil {
+			s.internalError(w, r, "list backup items", err)
+			return
+		}
+		if !slices.ContainsFunc(items, func(it agentproto.BackupItem) bool { return it.Kind == agentproto.ItemVolume && it.Volume == volume }) {
+			writeError(w, http.StatusUnprocessableEntity, "the app has no volume "+volume+" now")
+			return
+		}
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), restoreCopyTimeout)
 	defer cancel()
@@ -143,8 +199,8 @@ func (s *Server) handleRestoreCopy(w http.ResponseWriter, r *http.Request, p *pr
 		writeAgentError(w, err)
 		return
 	}
-	s.audit(r, &p.user.ID, "backup.copy_restored", map[string]any{
-		"resource": t.resource(), "snapshot": req.Snapshot, "path": "/" + req.Path, "folder": resp.Folder, "files": resp.Files,
-	})
+	details := partDetails(t, req)
+	details["folder"], details["files"] = resp.Folder, resp.Files
+	s.audit(r, &p.user.ID, "backup.copy_restored", details)
 	writeJSON(w, http.StatusCreated, resp)
 }

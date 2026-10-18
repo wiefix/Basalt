@@ -27,17 +27,18 @@ const (
 	// TypeBackupVerify checks a repository's integrity (restic check);
 	// streams LogChunk frames.
 	TypeBackupVerify = "backup_verify"
-	// TypeBackupBrowse lists a folder of a snapshot of a site's files.
+	// TypeBackupBrowse lists a folder of a snapshot of a site's files or of
+	// an app's volume.
 	TypeBackupBrowse = "backup_browse"
 	// TypeBackupExport writes a file, or a folder as a zip archive, of a
-	// snapshot of a site's files to a temporary file on the server, which
+	// snapshot (or a database dump) to a temporary file on the server, which
 	// the panel then reads with TypeBackupExportRead and drops with
 	// TypeBackupExportClose. Streaming (it can take long; no frames).
 	TypeBackupExport      = "backup_export"
 	TypeBackupExportRead  = "backup_export_read"
 	TypeBackupExportClose = "backup_export_close"
-	// TypeBackupRestoreCopy restores a file or folder of a snapshot of a
-	// site's files into a new folder of the site. Streaming (no frames).
+	// TypeBackupRestoreCopy restores a file or folder of a snapshot into a
+	// new folder of the site or volume. Streaming (no frames).
 	TypeBackupRestoreCopy = "backup_restore_copy"
 )
 
@@ -370,27 +371,67 @@ type VerifyResponse struct {
 	Empty bool `json:"empty,omitempty"`
 }
 
-// SnapshotFilesRequest is about a file or folder of a snapshot of a site's
-// files. Path is relative to the site's directory ("" is all of it).
+// SnapshotFilesRequest is about a file or folder of a snapshot: of a site's
+// files (Part "files"), of an app's volume (Part "volume-<name>"), or a
+// database dump of a site ("mariadb-<db>") or a database app ("dump-<db>"),
+// which is one file (Path ""). Path is relative to the site's directory or
+// the volume's top ("" is all of it).
 type SnapshotFilesRequest struct {
 	Repo     BackupRepo `json:"repo"`
 	Resource string     `json:"resource"`
-	SiteID   int64      `json:"site_id"`
+	SiteID   int64      `json:"site_id,omitempty"`
+	AppID    int64      `json:"app_id,omitempty"`
+	Part     string     `json:"part,omitempty"` // "" is "files"
 	Snapshot string     `json:"snapshot"`
 	Path     string     `json:"path"`
+}
+
+// Snapshot parts the files of a backup can be read from.
+const (
+	PartFiles   = "files"
+	PartVolume  = "volume-"
+	PartMariaDB = "mariadb-"
+	PartDump    = "dump-"
+)
+
+// PartOf is the part of the request: Part, "files" when empty.
+func (r *SnapshotFilesRequest) PartOf() string {
+	if r.Part == "" {
+		return PartFiles
+	}
+	return r.Part
+}
+
+// IsDump reports whether the request is about a database dump.
+func (r *SnapshotFilesRequest) IsDump() bool {
+	p := r.PartOf()
+	return strings.HasPrefix(p, PartMariaDB) || strings.HasPrefix(p, PartDump)
 }
 
 func (r *SnapshotFilesRequest) Validate() error {
 	if err := r.Repo.Validate(); err != nil {
 		return err
 	}
-	if r.SiteID <= 0 || r.Resource != fmt.Sprintf("site-%d", r.SiteID) {
+	part := r.PartOf()
+	switch {
+	case r.SiteID > 0 && r.AppID == 0 && r.Resource == fmt.Sprintf("site-%d", r.SiteID):
+		db, isDB := strings.CutPrefix(part, PartMariaDB)
+		if part != PartFiles && !(isDB && dbNameRE.MatchString(db)) {
+			return errors.New("invalid part of a site's backup")
+		}
+	case r.AppID > 0 && r.SiteID == 0 && r.Resource == fmt.Sprintf("app-%d", r.AppID):
+		vol, isVol := strings.CutPrefix(part, PartVolume)
+		db, isDB := strings.CutPrefix(part, PartDump)
+		if !(isVol && ServiceNameRE.MatchString(vol)) && !(isDB && sqlNameRE.MatchString(db)) {
+			return errors.New("invalid part of an app's backup")
+		}
+	default:
 		return errors.New("invalid resource")
 	}
 	if !snapshotRE.MatchString(r.Snapshot) {
 		return errors.New("invalid snapshot id")
 	}
-	if !ValidSnapshotPath(r.Path) {
+	if !ValidSnapshotPath(r.Path) || (r.IsDump() && r.Path != "") {
 		return errors.New("invalid path")
 	}
 	return nil
@@ -469,7 +510,7 @@ func (r *ExportClose) Validate() error {
 }
 
 // RestoreCopyResponse tells where a restored copy went: Folder is relative
-// to the site's directory. Skipped counts entries left out (symbolic
+// to the site's directory or the volume's top. Skipped counts entries left out (symbolic
 // links and other special files).
 type RestoreCopyResponse struct {
 	Folder  string `json:"folder"`

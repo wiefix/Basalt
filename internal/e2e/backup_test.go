@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"archive/zip"
 	"bytes"
 	"fmt"
 	"net/http"
@@ -307,6 +308,42 @@ func TestAppBackupsWithDocker(t *testing.T) {
 		t.Fatalf("volume after restore: %q", got)
 	}
 
+	// Files of the volume's backup: browse, download, restore a copy.
+	var volSnap string
+	for _, sn := range p.call(200, "GET", "/api/v1/apps/"+web+"/snapshots", nil)["snapshots"].([]any) {
+		if it := sn.(map[string]any)["item"].(map[string]any); it["kind"] == "volume" && it["volume"] == "html" {
+			volSnap = sn.(map[string]any)["id"].(string)
+			break
+		}
+	}
+	snapBase := "/api/v1/apps/" + web + "/snapshots/" + volSnap
+	files := p.call(200, "GET", snapBase+"/files?volume=html&path=", nil)["entries"].([]any)
+	if len(files) != 1 || files[0].(map[string]any)["name"] != "index.html" || files[0].(map[string]any)["size"] != float64(12) {
+		t.Fatalf("volume files = %v", files)
+	}
+	p.call(http.StatusUnprocessableEntity, "GET", snapBase+"/files?path=", nil)              // no volume named
+	p.call(http.StatusUnprocessableEntity, "GET", snapBase+"/files?volume=other&path=", nil) // not this snapshot's
+	p.call(http.StatusNotFound, "GET", snapBase+"/files?volume=html&path=nope", nil)
+	if code, hdr, body := p.raw("GET", snapBase+"/download?volume=html&path=index.html", "", nil); code != 200 || string(body) != "version-one\n" ||
+		!strings.Contains(hdr.Get("Content-Disposition"), "index.html") {
+		t.Fatalf("download from the volume: %d %q", code, body)
+	}
+	if code, hdr, body := p.raw("GET", snapBase+"/download?volume=html&path=", "", nil); code != 200 ||
+		!strings.Contains(hdr.Get("Content-Disposition"), "volume-html-") {
+		t.Fatalf("download the volume: %d %v", code, hdr)
+	} else if zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body))); err != nil || len(zr.File) != 1 || zr.File[0].Name != "index.html" {
+		t.Fatalf("volume zip: %v", err)
+	}
+	p.call(http.StatusUnprocessableEntity, "POST", snapBase+"/restore-copy", map[string]any{"path": "index.html", "volume": "gone"})
+	copied := p.call(http.StatusCreated, "POST", snapBase+"/restore-copy", map[string]any{"path": "index.html", "volume": "html"})
+	folder := copied["folder"].(string)
+	if !strings.HasPrefix(folder, "restored-") || copied["files"] != float64(1) {
+		t.Fatalf("restore copy: %v", copied)
+	}
+	if got := inVolume("cat /d/" + folder + "/index.html; stat -c %u /d/" + folder + "/index.html; cat /d/index.html"); got != "version-one\n1234\nversion-one" {
+		t.Fatalf("copy in the volume: %q", got)
+	}
+
 	// PostgreSQL: a logical dump, restored over changed data.
 	pg := jsonID(p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{"server_id": sid, "name": "pg",
 		"source": "database", "engine": "postgres"})["app"].(map[string]any)["id"])
@@ -338,6 +375,14 @@ func TestAppBackupsWithDocker(t *testing.T) {
 	if len(snaps) != 1 || snaps[0].(map[string]any)["item"].(map[string]any)["kind"] != "db_dump" {
 		t.Fatalf("snapshots = %v", snaps)
 	}
+	// The dump downloads as it was made.
+	dumpBase := "/api/v1/apps/" + pg + "/snapshots/" + snaps[0].(map[string]any)["id"].(string)
+	if code, hdr, body := p.raw("GET", dumpBase+"/download?database=pg", "", nil); code != 200 || !strings.Contains(string(body), "kept") ||
+		!strings.Contains(hdr.Get("Content-Disposition"), "pg-") {
+		t.Fatalf("dump download: %d %v %.200s", code, hdr, body)
+	}
+	p.call(http.StatusUnprocessableEntity, "GET", dumpBase+"/files?database=pg", nil)
+	p.call(http.StatusUnprocessableEntity, "GET", dumpBase+"/download?database=pg&path=x", nil)
 }
 
 // TestPanelBackup backs the panel up with restic, then reads the snapshot

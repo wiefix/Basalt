@@ -1104,11 +1104,16 @@ export const api = {
   runBackup: (base: string) => post<{ backup: BackupRun }>(`${base}/backups`),
   snapshots: (base: string) => get<{ snapshots: Snapshot[] }>(`${base}/snapshots`),
   restore: (base: string, snapshots: string[]) => post<{ backup: BackupRun }>(`${base}/restore`, { snapshots }),
-  snapshotFiles: (siteId: number, snap: string, path: string) =>
-    get<{ path: string; entries: SnapshotEntry[] }>(`/api/v1/sites/${siteId}/snapshots/${snap}/files${q(path)}`),
-  snapshotDownloadUrl: (siteId: number, snap: string, path: string) => `/api/v1/sites/${siteId}/snapshots/${snap}/download${q(path)}`,
-  restoreCopy: (siteId: number, snap: string, path: string) =>
-    post<RestoredCopy>(`/api/v1/sites/${siteId}/snapshots/${snap}/restore-copy`, { path }),
+  // Files of a backup; base is "/api/v1/sites/1" or "/api/v1/apps/1", volume
+  // names an app's volume.
+  snapshotFiles: (base: string, snap: string, path: string, volume = "") =>
+    get<{ path: string; entries: SnapshotEntry[] }>(`${base}/snapshots/${snap}/files${q(path)}${volume ? `&volume=${encodeURIComponent(volume)}` : ""}`),
+  snapshotDownloadUrl: (base: string, snap: string, path: string, volume = "") =>
+    `${base}/snapshots/${snap}/download${q(path)}${volume ? `&volume=${encodeURIComponent(volume)}` : ""}`,
+  dumpDownloadUrl: (base: string, snap: string, database: string) =>
+    `${base}/snapshots/${snap}/download?database=${encodeURIComponent(database)}`,
+  restoreCopy: (base: string, snap: string, path: string, volume = "") =>
+    post<RestoredCopy>(`${base}/snapshots/${snap}/restore-copy`, volume ? { path, volume } : { path }),
 
   sftpUsers: (siteId: number) =>
     get<{ users: SFTPUser[]; connection: SFTPConnection | null }>(`/api/v1/sites/${siteId}/sftp-users`),
