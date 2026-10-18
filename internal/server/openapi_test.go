@@ -33,6 +33,10 @@ func TestOpenAPICoversRoutes(t *testing.T) {
 			if o["summary"] == "" {
 				t.Errorf("%s has no description in apiDocs", key)
 			}
+			// A JSON route describes its response.
+			if r := o["responses"].(map[string]any); r["204"] == nil && r["2XX"].(map[string]any)["content"] == nil {
+				t.Errorf("%s has no response in apiDocs", key)
+			}
 			if id := o["operationId"].(string); ids[id] {
 				t.Errorf("duplicate operationId %s", id)
 			} else {

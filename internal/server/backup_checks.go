@@ -90,15 +90,21 @@ func (s *Server) handleBackupChecks(w http.ResponseWriter, r *http.Request, p *p
 		return
 	}
 	now := s.now()
-	out := make([]map[string]any, len(targets))
+	out := make([]checkRepoView, len(targets))
 	for i, t := range targets {
-		v := map[string]any{"storage_id": t.StorageID, "server_id": t.ServerID, "server": t.ServerName, "last": viewCheck(t.Last)}
-		if next := nextCheck(t, now); !next.IsZero() {
-			v["next_at"] = next
-		}
-		out[i] = v
+		out[i] = checkRepoView{StorageID: t.StorageID, ServerID: t.ServerID, Server: t.ServerName, Last: viewCheck(t.Last),
+			NextAt: nextCheck(t, now)}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"repositories": out})
+}
+
+// checkRepoView is a repository holding backups and its latest check.
+type checkRepoView struct {
+	StorageID int64      `json:"storage_id"`
+	ServerID  int64      `json:"server_id"` // 0: the panel's repository
+	Server    string     `json:"server"`
+	Last      *checkView `json:"last"` // null: never checked
+	NextAt    time.Time  `json:"next_at,omitzero"`
 }
 
 type startCheckRequest struct {

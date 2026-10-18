@@ -79,6 +79,9 @@ type Options struct {
 	ReleaseKey          string
 	ReleaseAllowPrivate bool
 	Version             string
+	// CheckResponses (tests) compares every API response with the API
+	// description and reports a difference.
+	CheckResponses func(msg string)
 }
 
 type Server struct {
@@ -121,6 +124,7 @@ type Server struct {
 	rel               releaseOptions
 	usageEvery        time.Duration
 	updates           updater
+	respCheck         func(string)
 
 	setupMu    sync.Mutex
 	setupToken string
@@ -204,6 +208,7 @@ func New(o Options) *Server {
 		certCheckEvery:  o.CertCheckEvery,
 		auditCheckEvery: o.AuditCheckEvery,
 		usageEvery:      usageEvery,
+		respCheck:       o.CheckResponses,
 		rel:             releaseOptions{URL: o.ReleaseURL, Key: o.ReleaseKey, AllowPrivate: o.ReleaseAllowPrivate, Version: o.Version},
 		setupToken:      o.SetupToken,
 		ipLimiter:       auth.NewLimiter(20, 3*time.Second).WithClock(o.Now),
@@ -223,6 +228,9 @@ func New(o Options) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	rt := &router{mux: mux}
+	if s.respCheck != nil {
+		rt.check = responseChecker(rt, s.respCheck)
+	}
 	rt.Handle("GET /api/v1/openapi.json", s.requireRole(store.RoleViewer, func(w http.ResponseWriter, r *http.Request, p *principal) {
 		s.serveOpenAPI(w, rt.routes)
 	}))

@@ -4,12 +4,22 @@ import { Link } from "react-router";
 import { api, type OpenAPISpec } from "../api";
 import { ErrorBox, Loading } from "../components/ui";
 
-type Schema = { type?: string; $ref?: string; oneOf?: Schema[]; items?: Schema; properties?: Record<string, Schema>; additionalProperties?: Schema | boolean; format?: string };
+type Schema = {
+  type?: string | string[];
+  $ref?: string;
+  oneOf?: Schema[];
+  items?: Schema;
+  properties?: Record<string, Schema>;
+  additionalProperties?: Schema | boolean;
+  format?: string;
+  required?: string[];
+};
 
 // typeText shows a schema briefly: string, integer[], Record{…}, object name.
 function typeText(s: Schema | undefined): string {
   if (!s) return "any";
   if (s.oneOf) return s.oneOf.map(typeText).join(" or ");
+  if (Array.isArray(s.type)) return s.type.map((t) => typeText({ ...s, type: t })).join(" or ");
   if (s.$ref) return s.$ref.replace("#/components/schemas/", "");
   if (s.type === "array") return `${typeText(s.items)}[]`;
   if (s.type === "object" && s.additionalProperties && typeof s.additionalProperties === "object")
@@ -21,14 +31,19 @@ function Fields({ schema, spec, depth = 0 }: { schema: Schema; spec: OpenAPISpec
   const resolved: Schema = schema.$ref ? (spec.components.schemas[schema.$ref.replace("#/components/schemas/", "")] as Schema) : schema;
   const props = Object.entries(resolved?.properties ?? {});
   if (props.length === 0) return <span className="faint">{typeText(schema)}</span>;
+  // Responses list the fields always present; request fields are all optional.
+  const required = resolved?.required;
   return (
     <ul className="steps" style={{ listStyle: "none", paddingLeft: depth ? 16 : 0 }}>
       {props.map(([name, s]) => {
         const nested = s.$ref ?? s.items?.$ref ?? s.oneOf?.find((x) => x.$ref)?.$ref;
+        const inline = !nested && (s.properties ? s : s.items?.properties ? s.items : undefined);
         return (
           <li key={name}>
             <code>{name}</code> <span className="faint small">{typeText(s)}</span>
+            {required && !required.includes(name) && <span className="faint small"> · optional</span>}
             {nested && depth < 2 && <Fields schema={{ $ref: nested }} spec={spec} depth={depth + 1} />}
+            {inline && depth < 2 && <Fields schema={inline} spec={spec} depth={depth + 1} />}
           </li>
         );
       })}
@@ -81,6 +96,8 @@ export function APIDocsPage() {
                       const key = `${method} ${path}`;
                       const body = op.requestBody?.content?.["application/json"]?.schema as Schema | undefined;
                       const raw = op.requestBody?.content?.["application/octet-stream"];
+                      const ok = op.responses?.["2XX"];
+                      const respSchema = ok?.content?.["application/json"]?.schema as Schema | undefined;
                       return [
                         <tr key={key} className="clickable" onClick={() => setOpen(open === key ? null : key)}>
                           <td style={{ width: 1 }}>
@@ -120,6 +137,14 @@ export function APIDocsPage() {
                                   </div>
                                 )}
                                 {raw && <div><strong>Body</strong> <span className="faint">the file's bytes</span></div>}
+                                <div>
+                                  <strong>Response</strong>{" "}
+                                  {respSchema ? (
+                                    <Fields schema={respSchema} spec={s} />
+                                  ) : (
+                                    <span className="faint">{op.responses?.["204"] ? "no content (204)" : ok?.description}</span>
+                                  )}
+                                </div>
                               </div>
                             </td>
                           </tr>

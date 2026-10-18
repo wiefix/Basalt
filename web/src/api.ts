@@ -551,11 +551,11 @@ export interface Template {
   revision: number;
   memory_mb: number;
   inputs: TemplateInput[];
-  secrets: { key: string; length: number }[] | null;
+  secrets: { key: string; length: number }[];
   expose: { service: string; port: number };
   notes: string;
   services: { name: string; image: string }[];
-  volumes: string[] | null;
+  volumes: string[];
   compose: string;
   source?: string;
 }
@@ -685,6 +685,7 @@ export interface OpenAPIOperation {
   "x-basalt-role"?: Role;
   parameters?: { name: string; in: "path" | "query"; description?: string }[];
   requestBody?: { content: Record<string, { schema: unknown }> };
+  responses?: Record<string, { description: string; content?: Record<string, { schema: unknown }> }>;
 }
 
 export interface OpenAPISpec {

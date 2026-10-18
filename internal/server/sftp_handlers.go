@@ -55,12 +55,19 @@ func (s *Server) PushSFTP(ctx context.Context, serverID int64) error {
 	return s.agents.Call(ctx, serverID, agentproto.TypeSFTPApply, agentproto.SFTPApply{Revision: rev, Users: users}, nil)
 }
 
-func (s *Server) sftpConnection(ctx context.Context, serverID int64) map[string]any {
+// sftpConnectionView is where SFTP clients connect.
+type sftpConnectionView struct {
+	Port               int    `json:"port"`
+	HostKeyFingerprint string `json:"host_key_fingerprint"`
+}
+
+// sftpConnection is nil while the server has not reported its SFTP server.
+func (s *Server) sftpConnection(ctx context.Context, serverID int64) *sftpConnectionView {
 	port, fp, err := s.db.ServerSFTP(ctx, serverID)
 	if err != nil || port == 0 {
 		return nil
 	}
-	return map[string]any{"port": port, "host_key_fingerprint": fp}
+	return &sftpConnectionView{Port: port, HostKeyFingerprint: fp}
 }
 
 func (s *Server) handleListSFTPUsers(w http.ResponseWriter, r *http.Request, p *principal) {

@@ -80,6 +80,8 @@ func startPanelWith(t *testing.T, o server.Options) *panel {
 	if o.DataDir == "" {
 		o.DataDir = dir
 	}
+	// Every response must match the API description.
+	o.CheckResponses = func(msg string) { t.Errorf("%s", msg) }
 	srv := server.New(o)
 	hub.ServeReleases(filepath.Join(o.DataDir, "releases"))
 	hub.OnACMEChallenge(srv.ACMEChallenge)

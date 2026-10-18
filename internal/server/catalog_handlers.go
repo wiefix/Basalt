@@ -47,7 +47,10 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request, p *princi
 	}
 	out := make([]templateView, len(list))
 	for i, t := range list {
-		out[i] = templateView{Template: t, Compose: t.Compose}
+		// Lists are never null in the API.
+		c := *t
+		c.Inputs, c.Secrets, c.Services, c.Volumes = nonNil(c.Inputs), nonNil(c.Secrets), nonNil(c.Services), nonNil(c.Volumes)
+		out[i] = templateView{Template: &c, Compose: t.Compose}
 	}
 	src, err := s.viewCatalogSource(r.Context())
 	if err != nil {
@@ -266,12 +269,12 @@ func (s *Server) handleAppTemplate(w http.ResponseWriter, r *http.Request, p *pr
 		writeError(w, http.StatusNotFound, "this app was not installed from the catalog")
 		return
 	}
-	out := map[string]any{"installed_revision": app.TemplateRevision, "template": nil, "update_available": false,
+	out := map[string]any{"installed_revision": app.TemplateRevision, "template": (*templateInfoView)(nil), "update_available": false,
 		"update": s.templateUpdate(app.ID)}
 	t := s.appTemplate(app)
 	if t != nil {
-		out["template"] = map[string]any{"id": t.ID, "name": t.Name, "version": t.Version, "revision": t.Revision,
-			"notes": t.Notes, "website": t.Website}
+		out["template"] = &templateInfoView{ID: t.ID, Name: t.Name, Version: t.Version, Revision: t.Revision,
+			Notes: t.Notes, Website: t.Website}
 		if t.Revision > app.TemplateRevision {
 			env, err := s.appEnv(app)
 			if err != nil {
@@ -290,6 +293,16 @@ func (s *Server) handleAppTemplate(w http.ResponseWriter, r *http.Request, p *pr
 	}
 	out["backups"] = err == nil
 	writeJSON(w, http.StatusOK, out)
+}
+
+// templateInfoView is the catalog template of an installed app.
+type templateInfoView struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Version  string `json:"version"`
+	Revision int    `json:"revision"`
+	Notes    string `json:"notes"`
+	Website  string `json:"website"`
 }
 
 type templateUpdateRequest struct {

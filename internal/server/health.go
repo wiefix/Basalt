@@ -477,6 +477,13 @@ func (s *Server) handleDeleteHealthCheck(w http.ResponseWriter, r *http.Request,
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// healthEventView is a status change of a health check.
+type healthEventView struct {
+	Status string    `json:"status"`
+	Detail string    `json:"detail"`
+	At     time.Time `json:"at"`
+}
+
 func (s *Server) handleHealthEvents(w http.ResponseWriter, r *http.Request, p *principal) {
 	c, ok := s.pathHealthCheck(w, r)
 	if !ok {
@@ -487,14 +494,9 @@ func (s *Server) handleHealthEvents(w http.ResponseWriter, r *http.Request, p *p
 		s.internalError(w, r, "list health events", err)
 		return
 	}
-	type eventView struct {
-		Status string    `json:"status"`
-		Detail string    `json:"detail"`
-		At     time.Time `json:"at"`
-	}
-	out := make([]eventView, len(events))
+	out := make([]healthEventView, len(events))
 	for i, e := range events {
-		out[i] = eventView{e.Status, e.Detail, e.At}
+		out[i] = healthEventView{e.Status, e.Detail, e.At}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": out})
 }
