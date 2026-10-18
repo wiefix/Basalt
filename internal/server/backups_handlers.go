@@ -1043,6 +1043,27 @@ func (s *Server) runDueBackups(ctx context.Context) {
 		}
 		if _, err := s.startBackup(ctx, t, p, "schedule", nil); err != nil && !errors.Is(err, store.ErrBackupInProgress) {
 			s.log.Error("start scheduled backup", "err", err, "resource", t.resource())
+			s.recordMissedBackup(ctx, t, p, err)
 		}
 	}
+}
+
+// recordMissedBackup records a scheduled backup that could not start (an
+// app without volumes, say) as failed, and notifies: the slot counts as
+// taken, so it is not retried every 30 seconds.
+func (s *Server) recordMissedBackup(ctx context.Context, t *backupTarget, p *store.BackupPolicy, cause error) {
+	msg := cause.Error()
+	var de *deployError
+	if !errors.As(cause, &de) {
+		msg = "the backup could not start: " + msg
+	}
+	b := &store.Backup{SiteID: t.SiteID, AppID: t.AppID, ServerID: t.ServerID, StorageID: p.StorageID, Kind: "backup", Trigger: "schedule"}
+	if err := s.db.CreateBackup(ctx, b); err != nil {
+		return
+	}
+	if err := s.db.FinishBackup(ctx, b.ID, false, truncate(msg, 2000), "", nil, 0, 0); err != nil {
+		s.log.Error("record backup", "err", err, "backup_id", b.ID)
+	}
+	name, link := s.resourceName(b)
+	s.notify(notify.Message{Event: EventBackupFailed, Title: "Backup of " + name + " failed", Text: truncate(msg, 1000), Link: link})
 }

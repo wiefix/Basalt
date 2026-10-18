@@ -344,10 +344,13 @@ func (s *Server) handleDatabasePassword(w http.ResponseWriter, r *http.Request, 
 			continue
 		}
 		b, _ := json.Marshal(tenv)
-		if err := s.db.SetAppEnv(r.Context(), target.ID, s.box.Seal(b, envAD(target.ID))); err != nil {
+		sealed := s.box.Seal(b, envAD(target.ID))
+		if err := s.db.SetAppEnv(r.Context(), target.ID, sealed); err != nil {
 			s.internalError(w, r, "set app env", err)
 			return
 		}
+		// The deployment below reads the environment from target.
+		target.EnvSealed = sealed
 		updated = append(updated, target.Name)
 		if req.RedeployApps == nil || *req.RedeployApps {
 			if deps, err := s.db.Deployments(r.Context(), target.ID, 1); err == nil && len(deps) > 0 {
