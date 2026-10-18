@@ -260,12 +260,13 @@ func apiTag(path string) string {
 	return first
 }
 
-// operationID names a route: GET /api/v1/apps/{id}/logs → getAppsIdLogs.
+// operationID names a route: GET /api/v1/apps/{id}/logs → getAppsIdLogs
+// (an identifier in any language: no dots or dashes).
 func operationID(method, path string) string {
 	var b strings.Builder
 	b.WriteString(strings.ToLower(method))
 	for _, part := range strings.FieldsFunc(strings.TrimPrefix(path, "/api/v1/"), func(r rune) bool {
-		return r == '/' || r == '-' || r == '{' || r == '}'
+		return r == '/' || r == '-' || r == '.' || r == '{' || r == '}'
 	}) {
 		r := []rune(part)
 		r[0] = unicode.ToUpper(r[0])
@@ -280,9 +281,11 @@ var (
 )
 
 // schemaHints are the types fields tagged openapi:"<name>" hold when their
-// Go type (json.RawMessage, decoded later) does not say.
+// Go type (json.RawMessage, decoded later or stored as it is) does not say;
+// a typed nil pointer may be null.
 var schemaHints = map[string]any{
-	"mailRelayRequest": mailRelayRequest{},
+	"mailRelayRequest": (*mailRelayRequest)(nil),
+	"backupParts":      []backupPartView{},
 }
 
 // schemaGen describes Go types as JSON Schema, named structs as
@@ -429,14 +432,17 @@ func (g *schemaGen) addFields(t reflect.Type, props map[string]any, required *[]
 			name = f.Name
 		}
 		omit := strings.Contains(","+opts+",", ",omitempty,") || strings.Contains(","+opts+",", ",omitzero,")
+		ft := f.Type
 		if hint, ok := schemaHints[f.Tag.Get("openapi")]; ok {
-			props[name] = map[string]any{"oneOf": []any{g.of(reflect.TypeOf(hint)), map[string]any{"type": "null"}}}
-			continue
+			ft = reflect.TypeOf(hint)
 		}
-		s := g.of(f.Type)
+		s := g.of(ft)
+		if ft != f.Type && ft.Kind() == reflect.Pointer {
+			s = nullable(s)
+		}
 		if g.resp && !omit {
 			*required = append(*required, name)
-			if f.Type.Kind() == reflect.Pointer || f.Type.Kind() == reflect.Interface {
+			if (ft.Kind() == reflect.Pointer || ft.Kind() == reflect.Interface) && ft == f.Type {
 				s = nullable(s)
 			}
 		}

@@ -1,0 +1,225 @@
+// Checks at compile time (tsc) that what each API route answers, as the
+// server describes it (api.gen.ts), fits what the client in api.ts expects:
+// a field the client relies on that the server may leave out or set to
+// null, or a field of another type, is an error here. String and number
+// unions in the client (statuses, kinds) are compared as plain strings
+// and numbers.
+
+import { api } from "./api";
+import type * as G from "./api.gen";
+
+type Widen<T> = T extends string
+  ? string
+  : T extends number
+    ? number
+    : T extends boolean
+      ? boolean
+      : T extends readonly (infer U)[]
+        ? Widen<U>[]
+        : T extends object
+          ? { [K in keyof T]: Widen<T[K]> }
+          : T;
+
+type Returns<F extends (...args: any[]) => unknown> = Awaited<ReturnType<F>>;
+
+// fits<Client>()<Server>() fails to compile unless Server fits Client.
+const fits =
+  <C>() =>
+  <S extends Widen<C>>(): S | undefined =>
+    undefined;
+
+type A = typeof api;
+
+export const checks = [
+  fits<Returns<A["setupStatus"]>>()<G.GetSetupResponse>(),
+  fits<Returns<A["setup"]>>()<G.PostSetupResponse>(),
+  fits<Returns<A["login"]>>()<G.PostAuthLoginResponse>(),
+  fits<Returns<A["mfa"]>>()<G.PostAuthMfaResponse>(),
+  fits<Returns<A["logout"]>>()<G.PostAuthLogoutResponse>(),
+  fits<Returns<A["me"]>>()<G.GetAuthMeResponse>(),
+  fits<Returns<A["changePassword"]>>()<G.PostAuthPasswordResponse>(),
+  fits<Returns<A["totpSetup"]>>()<G.PostAuthTotpSetupResponse>(),
+  fits<Returns<A["totpEnable"]>>()<G.PostAuthTotpEnableResponse>(),
+  fits<Returns<A["totpDisable"]>>()<G.PostAuthTotpDisableResponse>(),
+
+  fits<Returns<A["users"]>>()<G.GetUsersResponse>(),
+  fits<Returns<A["updateUser"]>>()<G.PutUsersIdResponse>(),
+  fits<Returns<A["deleteUser"]>>()<G.DeleteUsersIdResponse>(),
+  fits<Returns<A["resetPassword"]>>()<G.PutUsersIdPasswordResponse>(),
+  fits<Returns<A["mySessions"]>>()<G.GetAccountSessionsResponse>(),
+  fits<Returns<A["endSession"]>>()<G.DeleteAccountSessionsIdResponse>(),
+  fits<Returns<A["endOtherSessions"]>>()<G.DeleteAccountSessionsResponse>(),
+  fits<Returns<A["myPasskeys"]>>()<G.GetAccountPasskeysResponse>(),
+  fits<Returns<A["passkeyOptions"]>>()<G.PostAccountPasskeysOptionsResponse>(),
+  fits<Returns<A["addPasskey"]>>()<G.PostAccountPasskeysResponse>(),
+  fits<Returns<A["renamePasskey"]>>()<G.PutAccountPasskeysIdResponse>(),
+  fits<Returns<A["deletePasskey"]>>()<G.DeleteAccountPasskeysIdResponse>(),
+  fits<Returns<A["passkeyLoginOptions"]>>()<G.PostAuthPasskeyOptionsResponse>(),
+  fits<Returns<A["passkeyLogin"]>>()<G.PostAuthPasskeyResponse>(),
+  fits<Returns<A["myTokens"]>>()<G.GetAccountTokensResponse>(),
+  fits<Returns<A["createToken"]>>()<G.PostAccountTokensResponse>(),
+  fits<Returns<A["deleteMyToken"]>>()<G.DeleteAccountTokensIdResponse>(),
+  fits<Returns<A["allTokens"]>>()<G.GetTokensResponse>(),
+  fits<Returns<A["revokeToken"]>>()<G.DeleteTokensIdResponse>(),
+  fits<Returns<A["createUser"]>>()<G.PostUsersResponse>(),
+
+  fits<Returns<A["servers"]>>()<G.GetServersResponse>(),
+  fits<Returns<A["server"]>>()<G.GetServersIdResponse>(),
+  fits<Returns<A["createServer"]>>()<G.PostServersResponse>(),
+  fits<Returns<A["resetEnrollToken"]>>()<G.PostServersIdEnrollTokenResponse>(),
+  fits<Returns<A["deleteServer"]>>()<G.DeleteServersIdResponse>(),
+  fits<Returns<A["updates"]>>()<G.GetUpdatesResponse>(),
+  fits<Returns<A["checkUpdates"]>>()<G.PostUpdatesCheckResponse>(),
+  fits<Returns<A["applyUpdate"]>>()<G.PostUpdatesApplyResponse>(),
+  fits<Returns<A["serverMetrics"]>>()<G.GetServersIdMetricsResponse>(),
+  fits<Returns<A["serverCertificates"]>>()<G.GetServersIdCertificatesResponse>(),
+  fits<Returns<A["setPublicIPs"]>>()<G.PutServersIdPublicIpsResponse>(),
+  fits<Returns<A["pingServer"]>>()<G.PostServersIdPingResponse>(),
+  fits<Returns<A["routes"]>>()<G.GetServersIdRoutesResponse>(),
+  fits<Returns<A["createRoute"]>>()<G.PostServersIdRoutesResponse>(),
+  fits<Returns<A["deleteRoute"]>>()<G.DeleteServersIdRoutesRidResponse>(),
+
+  fits<Returns<A["sites"]>>()<G.GetSitesResponse>(),
+  fits<Returns<A["site"]>>()<G.GetSitesIdResponse>(),
+  fits<Returns<A["createSite"]>>()<G.PostSitesResponse>(),
+  fits<Returns<A["setSiteDomains"]>>()<G.PutSitesIdDomainsResponse>(),
+  fits<Returns<A["setSitePHP"]>>()<G.PutSitesIdPhpResponse>(),
+  fits<Returns<A["setSitePHPSettings"]>>()<G.PutSitesIdPhpSettingsResponse>(),
+  fits<Returns<A["installSite"]>>()<G.PostSitesIdInstallResponse>(),
+  fits<Returns<A["measureSite"]>>()<G.PostSitesIdUsageResponse>(),
+  fits<Returns<A["setSiteQuota"]>>()<G.PutSitesIdQuotaResponse>(),
+  fits<Returns<A["phpLog"]>>()<G.GetSitesIdPhpLogResponse>(),
+  fits<Returns<A["deleteSite"]>>()<G.DeleteSitesIdResponse>(),
+  fits<Returns<A["files"]>>()<G.GetSitesIdFilesResponse>(),
+  fits<Returns<A["readText"]>>()<G.GetSitesIdFilesTextResponse>(),
+  fits<Returns<A["fileOp"]>>()<G.PostSitesIdFilesOpResponse>(),
+  fits<Returns<A["databases"]>>()<G.GetSitesIdDatabasesResponse>(),
+  fits<Returns<A["createDatabase"]>>()<G.PostSitesIdDatabasesResponse>(),
+  fits<Returns<A["resetDatabasePassword"]>>()<G.PostSitesIdDatabasesDidPasswordResponse>(),
+  fits<Returns<A["deleteDatabase"]>>()<G.DeleteSitesIdDatabasesDidResponse>(),
+
+  fits<Returns<A["registries"]>>()<G.GetRegistriesResponse>(),
+  fits<Returns<A["createRegistry"]>>()<G.PostRegistriesResponse>(),
+  fits<Returns<A["updateRegistry"]>>()<G.PutRegistriesIdResponse>(),
+  fits<Returns<A["deleteRegistry"]>>()<G.DeleteRegistriesIdResponse>(),
+
+  fits<Returns<A["dns"]>>()<G.GetDnsResponse>(),
+  fits<Returns<A["setNameservers"]>>()<G.PutDnsNameserversResponse>(),
+  fits<Returns<A["createZone"]>>()<G.PostDnsZonesResponse>(),
+  fits<Returns<A["zone"]>>()<G.GetDnsZonesIdResponse>(),
+  fits<Returns<A["deleteZone"]>>()<G.DeleteDnsZonesIdResponse>(),
+  fits<Returns<A["setDNSSEC"]>>()<G.PutDnsZonesIdDnssecResponse>(),
+  fits<Returns<A["createRecord"]>>()<G.PostDnsZonesIdRecordsResponse>(),
+  fits<Returns<A["updateRecord"]>>()<G.PutDnsZonesIdRecordsRidResponse>(),
+  fits<Returns<A["deleteRecord"]>>()<G.DeleteDnsZonesIdRecordsRidResponse>(),
+
+  fits<Returns<A["catalog"]>>()<G.GetCatalogResponse>(),
+  fits<Returns<A["setCatalogSource"]>>()<G.PutCatalogSourceResponse>(),
+  fits<Returns<A["refreshCatalog"]>>()<G.PostCatalogRefreshResponse>(),
+  fits<Returns<A["installTemplate"]>>()<G.PostCatalogIdInstallResponse>(),
+  fits<Returns<A["appTemplate"]>>()<G.GetAppsIdTemplateResponse>(),
+  fits<Returns<A["updateTemplate"]>>()<G.PostAppsIdTemplateUpdateResponse>(),
+  fits<Returns<A["audit"]>>()<G.GetAuditResponse>(),
+  fits<Returns<A["verifyAudit"]>>()<G.GetAuditVerifyResponse>(),
+  fits<Returns<A["healthChecks"]>>()<G.GetHealthChecksResponse>(),
+  fits<Returns<A["createHealthCheck"]>>()<G.PostHealthChecksResponse>(),
+  fits<Returns<A["updateHealthCheck"]>>()<G.PutHealthChecksIdResponse>(),
+  fits<Returns<A["deleteHealthCheck"]>>()<G.DeleteHealthChecksIdResponse>(),
+  fits<Returns<A["healthEvents"]>>()<G.GetHealthChecksIdEventsResponse>(),
+  fits<Returns<A["notifications"]>>()<G.GetNotificationsResponse>(),
+  fits<Returns<A["setPanelURL"]>>()<G.PutNotificationsPanelUrlResponse>(),
+  fits<Returns<A["createChannel"]>>()<G.PostNotificationsResponse>(),
+  fits<Returns<A["updateChannel"]>>()<G.PutNotificationsIdResponse>(),
+  fits<Returns<A["deleteChannel"]>>()<G.DeleteNotificationsIdResponse>(),
+  fits<Returns<A["testChannel"]>>()<G.PostNotificationsIdTestResponse>(),
+
+  fits<Returns<A["mail"]>>()<G.GetMailResponse>(),
+  fits<Returns<A["createMail"]>>()<G.PostMailResponse>(),
+  fits<Returns<A["updateMailSettings"]>>()<G.PutMailSettingsResponse>(),
+  fits<Returns<A["updateMailDomain"]>>()<G.PutMailDomainsIdResponse>(),
+  fits<Returns<A["forwarders"]>>()<G.GetMailDomainsIdForwardersResponse>(),
+  fits<Returns<A["createForwarder"]>>()<G.PostMailDomainsIdForwardersResponse>(),
+  fits<Returns<A["updateForwarder"]>>()<G.PutMailDomainsIdForwardersFidResponse>(),
+  fits<Returns<A["deleteForwarder"]>>()<G.DeleteMailDomainsIdForwardersFidResponse>(),
+  fits<Returns<A["mailChecks"]>>()<G.PostMailChecksResponse>(),
+  fits<Returns<A["createMailDomain"]>>()<G.PostMailDomainsResponse>(),
+  fits<Returns<A["deleteMailDomain"]>>()<G.DeleteMailDomainsIdResponse>(),
+  fits<Returns<A["mailboxes"]>>()<G.GetMailDomainsIdMailboxesResponse>(),
+  fits<Returns<A["createMailbox"]>>()<G.PostMailDomainsIdMailboxesResponse>(),
+  fits<Returns<A["updateMailbox"]>>()<G.PutMailDomainsIdMailboxesMidResponse>(),
+  fits<Returns<A["deleteMailbox"]>>()<G.DeleteMailDomainsIdMailboxesMidResponse>(),
+
+  fits<Returns<A["apps"]>>()<G.GetAppsResponse>(),
+  fits<Returns<A["app"]>>()<G.GetAppsIdResponse>(),
+  fits<Returns<A["addReplica"]>>()<G.PostAppsIdReplicasResponse>(),
+  fits<Returns<A["removeReplica"]>>()<G.DeleteAppsIdReplicasSidResponse>(),
+  fits<Returns<A["createApp"]>>()<G.PostAppsResponse>(),
+  fits<Returns<A["databaseEngines"]>>()<G.GetDatabaseEnginesResponse>(),
+  fits<Returns<A["databaseConnection"]>>()<G.GetAppsIdConnectionResponse>(),
+  fits<Returns<A["databasePassword"]>>()<G.PostAppsIdPasswordResponse>(),
+  fits<Returns<A["linkApp"]>>()<G.PostAppsIdLinksResponse>(),
+  fits<Returns<A["unlinkApp"]>>()<G.DeleteAppsIdLinksAppResponse>(),
+  fits<Returns<A["appCompose"]>>()<G.GetAppsIdComposeResponse>(),
+  fits<Returns<A["setAppCompose"]>>()<G.PutAppsIdComposeResponse>(),
+  fits<Returns<A["updateApp"]>>()<G.PutAppsIdResponse>(),
+  fits<Returns<A["deleteApp"]>>()<G.DeleteAppsIdResponse>(),
+  fits<Returns<A["setAppDomains"]>>()<G.PutAppsIdDomainsResponse>(),
+  fits<Returns<A["regenerateDeployKey"]>>()<G.PostAppsIdDeployKeyResponse>(),
+  fits<Returns<A["appWebhook"]>>()<G.GetAppsIdWebhookResponse>(),
+  fits<Returns<A["setAppWebhook"]>>()<G.PutAppsIdWebhookResponse>(),
+  fits<Returns<A["appEnv"]>>()<G.GetAppsIdEnvResponse>(),
+  fits<Returns<A["setAppEnv"]>>()<G.PutAppsIdEnvResponse>(),
+  fits<Returns<A["deployApp"]>>()<G.PostAppsIdDeployResponse>(),
+  fits<Returns<A["cancelDeployment"]>>()<G.PostAppsIdDeploymentsDidCancelResponse>(),
+  fits<Returns<A["deployments"]>>()<G.GetAppsIdDeploymentsResponse>(),
+  fits<Returns<A["deployment"]>>()<G.GetAppsIdDeploymentsDidResponse>(),
+  fits<Returns<A["appMetrics"]>>()<G.GetAppsIdMetricsResponse>(),
+  fits<Returns<A["appStatus"]>>()<G.GetAppsIdStatusResponse>(),
+  fits<Returns<A["appLogs"]>>()<G.GetAppsIdLogsResponse>(),
+
+  fits<Returns<A["backupStorages"]>>()<G.GetBackupStoragesResponse>(),
+  fits<Returns<A["createBackupStorage"]>>()<G.PostBackupStoragesResponse>(),
+  fits<Returns<A["updateBackupStorage"]>>()<G.PutBackupStoragesIdResponse>(),
+  fits<Returns<A["deleteBackupStorage"]>>()<G.DeleteBackupStoragesIdResponse>(),
+  fits<Returns<A["backupChecks"]>>()<G.GetBackupChecksResponse>(),
+  fits<Returns<A["startBackupCheck"]>>()<G.PostBackupChecksResponse>(),
+  fits<Returns<A["backupCheck"]>>()<G.GetBackupChecksCidResponse>(),
+  fits<Returns<A["backupStoragePassword"]>>()<G.GetBackupStoragesIdPasswordResponse>(),
+  fits<Returns<A["checkBackupStorage"]>>()<G.PostBackupStoragesIdCheckResponse>(),
+  // Backups take the site's or the app's API path: both must fit.
+  fits<Returns<A["backups"]>>()<G.GetSitesIdBackupsResponse>(),
+  fits<Returns<A["backups"]>>()<G.GetAppsIdBackupsResponse>(),
+  fits<Returns<A["backup"]>>()<G.GetSitesIdBackupsBidResponse>(),
+  fits<Returns<A["backup"]>>()<G.GetAppsIdBackupsBidResponse>(),
+  fits<Returns<A["setBackupPolicy"]>>()<G.PutSitesIdBackupPolicyResponse>(),
+  fits<Returns<A["setBackupPolicy"]>>()<G.PutAppsIdBackupPolicyResponse>(),
+  fits<Returns<A["setBackupPolicy"]>>()<G.PutPanelBackupPolicyResponse>(),
+  fits<Returns<A["deleteBackupPolicy"]>>()<G.DeleteSitesIdBackupPolicyResponse>(),
+  fits<Returns<A["deleteBackupPolicy"]>>()<G.DeleteAppsIdBackupPolicyResponse>(),
+  fits<Returns<A["deleteBackupPolicy"]>>()<G.DeletePanelBackupPolicyResponse>(),
+  fits<Returns<A["panelBackup"]>>()<G.GetPanelBackupResponse>(),
+  fits<Returns<A["setRecoveryPassphrase"]>>()<G.PutPanelBackupRecoveryResponse>(),
+  fits<Returns<A["runPanelBackup"]>>()<G.PostPanelBackupRunResponse>(),
+  fits<Returns<A["panelBackupRun"]>>()<G.GetPanelBackupRunsBidResponse>(),
+  fits<Returns<A["runBackup"]>>()<G.PostSitesIdBackupsResponse>(),
+  fits<Returns<A["runBackup"]>>()<G.PostAppsIdBackupsResponse>(),
+  fits<Returns<A["snapshots"]>>()<G.GetSitesIdSnapshotsResponse>(),
+  fits<Returns<A["snapshots"]>>()<G.GetAppsIdSnapshotsResponse>(),
+  fits<Returns<A["restore"]>>()<G.PostSitesIdRestoreResponse>(),
+  fits<Returns<A["restore"]>>()<G.PostAppsIdRestoreResponse>(),
+  fits<Returns<A["snapshotFiles"]>>()<G.GetSitesIdSnapshotsSidFilesResponse>(),
+  fits<Returns<A["snapshotFiles"]>>()<G.GetAppsIdSnapshotsSidFilesResponse>(),
+  fits<Returns<A["restoreCopy"]>>()<G.PostSitesIdSnapshotsSidRestoreCopyResponse>(),
+  fits<Returns<A["restoreCopy"]>>()<G.PostAppsIdSnapshotsSidRestoreCopyResponse>(),
+
+  fits<Returns<A["sftpUsers"]>>()<G.GetSitesIdSftpUsersResponse>(),
+  fits<Returns<A["createSFTPUser"]>>()<G.PostSitesIdSftpUsersResponse>(),
+  fits<Returns<A["updateSFTPUser"]>>()<G.PutSitesIdSftpUsersUidResponse>(),
+  fits<Returns<A["deleteSFTPUser"]>>()<G.DeleteSitesIdSftpUsersUidResponse>(),
+  fits<Returns<A["accessLog"]>>()<G.GetSitesIdAccessLogResponse>(),
+  fits<Returns<A["accessLog"]>>()<G.GetAppsIdAccessLogResponse>(),
+  fits<Returns<A["trash"]>>()<G.GetServersIdTrashResponse>(),
+  fits<Returns<A["removeTrash"]>>()<G.DeleteServersIdTrashNameResponse>(),
+  fits<Returns<A["sftpBans"]>>()<G.GetServersIdSftpBansResponse>(),
+  fits<Returns<A["sftpUnban"]>>()<G.DeleteServersIdSftpBansIpResponse>(),
+];

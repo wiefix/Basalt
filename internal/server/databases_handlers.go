@@ -26,10 +26,18 @@ func viewDatabase(d *store.Database) databaseView {
 	return databaseView{ID: d.ID, Name: d.Name, Username: d.Username, CreatedAt: d.CreatedAt}
 }
 
+// dbCredentialsView is how a site connects to its database (shown once).
+type dbCredentialsView struct {
+	Host     string `json:"host"`
+	Database string `json:"database"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
 // Connection details shown with credentials. PHP on the same host connects
 // over the local socket; "localhost" makes PHP drivers use it.
-func dbConnection(name, user string) map[string]string {
-	return map[string]string{"host": "localhost", "database": name, "username": user}
+func dbConnection(name, user, password string) dbCredentialsView {
+	return dbCredentialsView{Host: "localhost", Database: name, Username: user, Password: password}
 }
 
 func (s *Server) dbCall(ctx context.Context, serverID int64, req agentproto.DatabaseRequest) error {
@@ -104,9 +112,8 @@ func (s *Server) handleCreateDatabase(w http.ResponseWriter, r *http.Request, p 
 		return
 	}
 	s.audit(r, &p.user.ID, "database.created", map[string]any{"site_id": site.ID, "database": name})
-	conn := dbConnection(name, name)
-	conn["password"] = password // shown once, never stored
-	writeJSON(w, http.StatusCreated, map[string]any{"database": viewDatabase(d), "credentials": conn})
+	// The password is shown once, never stored.
+	writeJSON(w, http.StatusCreated, map[string]any{"database": viewDatabase(d), "credentials": dbConnection(name, name, password)})
 }
 
 func (s *Server) pathDatabase(w http.ResponseWriter, r *http.Request) (*store.Site, *store.Database, bool) {
@@ -137,9 +144,7 @@ func (s *Server) handleResetDatabasePassword(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.audit(r, &p.user.ID, "database.password_reset", map[string]any{"site_id": site.ID, "database": d.Name})
-	conn := dbConnection(d.Name, d.Username)
-	conn["password"] = password
-	writeJSON(w, http.StatusOK, map[string]any{"credentials": conn})
+	writeJSON(w, http.StatusOK, map[string]any{"credentials": dbConnection(d.Name, d.Username, password)})
 }
 
 func (s *Server) handleDeleteDatabase(w http.ResponseWriter, r *http.Request, p *principal) {

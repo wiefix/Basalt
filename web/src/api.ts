@@ -963,7 +963,7 @@ export const api = {
   catalog: () => get<{ templates: Template[]; source: CatalogSource | null }>("/api/v1/catalog"),
   setCatalogSource: (b: { url: string; key: string; allow_private: boolean }) =>
     put<{ source: CatalogSource | null }>("/api/v1/catalog/source", b),
-  refreshCatalog: () => post<{ source: CatalogSource }>("/api/v1/catalog/refresh"),
+  refreshCatalog: () => post<{ source: CatalogSource | null }>("/api/v1/catalog/refresh"),
   installTemplate: (id: string, b: { server_id: number; name: string; inputs: Record<string, string> }) =>
     post<{ app: App; notes: string; deploy_error?: string }>(`/api/v1/catalog/${id}/install`, b),
   appTemplate: (id: number) => get<AppTemplateInfo>(`/api/v1/apps/${id}/template`),

@@ -142,8 +142,8 @@ var apiDocs = map[string]apiDoc{
 	"DELETE /api/v1/sites/{id}/sftp-users/{uid}": {summary: "Delete an SFTP account", resp: obj("ok", true, "sync_error?", "")},
 	"GET /api/v1/sites/{id}/databases":           {summary: "A site's MariaDB databases", resp: obj("databases", []databaseView{}, "mariadb", "")},
 	"POST /api/v1/sites/{id}/databases": {summary: "Create a MariaDB database and user (the password is returned once)", body: createDatabaseRequest{},
-		resp: obj("database", databaseView{}, "credentials", map[string]string{})},
-	"POST /api/v1/sites/{id}/databases/{did}/password": {summary: "New password for a database's user", resp: obj("credentials", map[string]string{})},
+		resp: obj("database", databaseView{}, "credentials", dbCredentialsView{})},
+	"POST /api/v1/sites/{id}/databases/{did}/password": {summary: "New password for a database's user", resp: obj("credentials", dbCredentialsView{})},
 	"DELETE /api/v1/sites/{id}/databases/{did}":        {summary: "Drop a database and its user", resp: noContent},
 
 	// Backups of sites and apps ({target} is /api/v1/sites/{id} or /api/v1/apps/{id}).

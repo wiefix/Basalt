@@ -7,7 +7,7 @@ LDFLAGS := -s -w -X $(PKG).Version=$(VERSION) -X $(PKG).Commit=$(COMMIT) -X $(PK
 GOFLAGS := -trimpath
 export CGO_ENABLED := 0
 
-.PHONY: build build-linux test test-docker test-linux test-install lint run clean web web-dev
+.PHONY: build build-linux test test-docker test-linux test-install lint run clean web web-dev api-types
 
 build:
 	go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o bin/basalt ./cmd/basalt
@@ -40,6 +40,11 @@ run: build
 
 web:
 	cd web && npm ci && npm run build
+
+# TypeScript types of the API (web/src/api.gen.ts) from its description; the
+# tests fail while they are out of date.
+api-types:
+	BASALT_UPDATE=1 go test -count=1 -run TestTypeScriptTypes ./internal/server
 
 # Vite dev server with hot reload; proxies /api to `make run` on :8080.
 web-dev:

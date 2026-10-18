@@ -414,7 +414,7 @@ type backupView struct {
 	Status     string          `json:"status"`
 	Error      string          `json:"error,omitempty"`
 	StorageID  int64           `json:"storage_id,omitempty"`
-	Snapshots  json.RawMessage `json:"snapshots"`
+	Snapshots  json.RawMessage `json:"snapshots" openapi:"backupParts"`
 	Bytes      uint64          `json:"bytes"`
 	DataAdded  uint64          `json:"data_added"`
 	CreatedAt  time.Time       `json:"created_at"`
@@ -422,9 +422,22 @@ type backupView struct {
 	Log        *string         `json:"log,omitempty"`
 }
 
+// backupPartView describes (for the API description) a part of a run's
+// snapshots: a backup's snapshot (id, sizes) or a restore's (snapshot).
+type backupPartView struct {
+	Item      agentproto.BackupItem `json:"item"`
+	ID        string                `json:"id,omitempty"`
+	Snapshot  string                `json:"snapshot,omitempty"`
+	Bytes     uint64                `json:"bytes,omitempty"`
+	DataAdded uint64                `json:"data_added,omitempty"`
+}
+
 func viewBackup(b *store.Backup, withLog bool) backupView {
 	v := backupView{ID: b.ID, Kind: b.Kind, Trigger: b.Trigger, Status: b.Status, Error: b.Error, StorageID: b.StorageID,
 		Snapshots: b.Snapshots, Bytes: b.Bytes, DataAdded: b.DataAdded, CreatedAt: b.CreatedAt, FinishedAt: b.FinishedAt}
+	if len(v.Snapshots) == 0 {
+		v.Snapshots = json.RawMessage("[]") // a run just started
+	}
 	if withLog {
 		v.Log = &b.Log
 	}
