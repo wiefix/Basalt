@@ -21,10 +21,11 @@ const (
 )
 
 type DNSZone struct {
-	ID      int64
-	Name    string
-	Serial  uint32
-	Records int
+	ID        int64
+	ProjectID int64
+	Name      string
+	Serial    uint32
+	Records   int
 	// DNSKEY is the zone's public signing key ("" when not signed).
 	DNSKEY    string
 	CreatedAt time.Time
@@ -56,20 +57,24 @@ func bumpDNSRevision(ctx context.Context, tx *sql.Tx) error {
 	return err
 }
 
-func (db *DB) CreateDNSZone(ctx context.Context, name string, records []dns.Record, check DNSCheck, now time.Time) (*DNSZone, error) {
+func (db *DB) CreateDNSZone(ctx context.Context, projectID int64, name string, records []dns.Record, check DNSCheck, now time.Time) (*DNSZone, error) {
 	tx, err := db.W.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	z := &DNSZone{Name: name, Serial: nextSerial(0, now), Records: len(records)}
+	projectID = projectOrDefault(projectID)
+	if err := projectExists(ctx, tx, projectID); err != nil {
+		return nil, err
+	}
+	z := &DNSZone{ProjectID: projectID, Name: name, Serial: nextSerial(0, now), Records: len(records)}
 	if err := check(&dns.Zone{Name: name, Serial: z.Serial, Records: records}); err != nil {
 		return nil, err
 	}
 	var created int64
 	err = tx.QueryRowContext(ctx,
-		`INSERT INTO dns_zones (name, serial, created_at, updated_at) VALUES (?, ?, ?, ?) RETURNING id, created_at`,
-		name, z.Serial, now.Unix(), now.Unix()).Scan(&z.ID, &created)
+		`INSERT INTO dns_zones (project_id, name, serial, created_at, updated_at) VALUES (?, ?, ?, ?, ?) RETURNING id, created_at`,
+		projectID, name, z.Serial, now.Unix(), now.Unix()).Scan(&z.ID, &created)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: dns_zones.name") {
 			return nil, ErrNameTaken
@@ -97,13 +102,13 @@ func insertDNSRecord(ctx context.Context, tx *sql.Tx, zoneID int64, r *dns.Recor
 	return id, err
 }
 
-const dnsZoneColumns = `z.id, z.name, z.serial, z.created_at, z.updated_at,
+const dnsZoneColumns = `z.id, z.project_id, z.name, z.serial, z.created_at, z.updated_at,
 	(SELECT COUNT(*) FROM dns_records r WHERE r.zone_id = z.id), z.dnssec_dnskey`
 
 func scanDNSZone(row interface{ Scan(...any) error }) (*DNSZone, error) {
 	var z DNSZone
 	var created, updated int64
-	if err := row.Scan(&z.ID, &z.Name, &z.Serial, &created, &updated, &z.Records, &z.DNSKEY); err != nil {
+	if err := row.Scan(&z.ID, &z.ProjectID, &z.Name, &z.Serial, &created, &updated, &z.Records, &z.DNSKEY); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

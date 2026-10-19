@@ -24,6 +24,7 @@ const (
 // HealthCheck is a probe run from every server (see agentproto.HealthCheck).
 type HealthCheck struct {
 	ID          int64
+	ProjectID   int64
 	Name        string
 	Kind        string
 	Host        string
@@ -45,13 +46,13 @@ type HealthEvent struct {
 	At     time.Time
 }
 
-const healthColumns = `id, name, kind, host, port, path, host_header, insecure, interval_s, timeout_s, status, status_since, created_at`
+const healthColumns = `id, project_id, name, kind, host, port, path, host_header, insecure, interval_s, timeout_s, status, status_since, created_at`
 
 func scanHealthCheck(row interface{ Scan(...any) error }) (*HealthCheck, error) {
 	var c HealthCheck
 	var since sql.NullInt64
 	var created int64
-	err := row.Scan(&c.ID, &c.Name, &c.Kind, &c.Host, &c.Port, &c.Path, &c.HostHeader, &c.Insecure,
+	err := row.Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.Host, &c.Port, &c.Path, &c.HostHeader, &c.Insecure,
 		&c.Interval, &c.Timeout, &c.Status, &since, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -139,11 +140,15 @@ func (db *DB) CreateHealthCheck(ctx context.Context, c *HealthCheck) error {
 }
 
 func insertHealthCheck(ctx context.Context, tx *sql.Tx, c *HealthCheck) error {
+	c.ProjectID = projectOrDefault(c.ProjectID)
+	if err := projectExists(ctx, tx, c.ProjectID); err != nil {
+		return err
+	}
 	var created int64
 	err := tx.QueryRowContext(ctx,
-		`INSERT INTO health_checks (name, kind, host, port, path, host_header, insecure, interval_s, timeout_s)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at`,
-		c.Name, c.Kind, c.Host, c.Port, c.Path, c.HostHeader, c.Insecure, c.Interval, c.Timeout).Scan(&c.ID, &created)
+		`INSERT INTO health_checks (project_id, name, kind, host, port, path, host_header, insecure, interval_s, timeout_s)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id, created_at`,
+		c.ProjectID, c.Name, c.Kind, c.Host, c.Port, c.Path, c.HostHeader, c.Insecure, c.Interval, c.Timeout).Scan(&c.ID, &created)
 	if err != nil {
 		return nameTaken(err)
 	}

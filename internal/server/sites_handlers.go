@@ -18,6 +18,7 @@ import (
 type siteView struct {
 	ID         int64         `json:"id"`
 	ServerID   int64         `json:"server_id"`
+	ProjectID  int64         `json:"project_id"`
 	Name       string        `json:"name"`
 	Kind       string        `json:"kind"`
 	Domains    []string      `json:"domains"`
@@ -31,7 +32,7 @@ type siteView struct {
 }
 
 func viewSite(s *store.Site) siteView {
-	return siteView{ID: s.ID, ServerID: s.ServerID, Name: s.Name, Kind: s.Kind,
+	return siteView{ID: s.ID, ServerID: s.ServerID, ProjectID: s.ProjectID, Name: s.Name, Kind: s.Kind,
 		Domains: s.Domains, TLS: s.TLS, PHPVersion: s.PHPVersion, PHP: s.PHP, CreatedAt: s.CreatedAt,
 		Usage:   siteUsageView{DiskBytes: s.Usage.DiskBytes, DiskFiles: s.Usage.DiskFiles, DBBytes: s.Usage.DBBytes, At: s.Usage.At},
 		QuotaMB: s.QuotaMB, OverQuota: s.QuotaMB > 0 && s.Usage.Total() > int64(s.QuotaMB)<<20}
@@ -97,6 +98,7 @@ func (s *Server) ensureSite(ctx context.Context, site *store.Site) error {
 }
 
 type createSiteRequest struct {
+	ProjectID  int64         `json:"project_id"` // 0: the default project
 	ServerID   int64         `json:"server_id"`
 	Name       string        `json:"name"`
 	Domains    []string      `json:"domains"`
@@ -135,7 +137,7 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, p *pri
 		return
 	}
 
-	site, err := s.db.CreateSite(r.Context(), req.ServerID, name, domains, tls, req.PHPVersion)
+	site, err := s.db.CreateSite(r.Context(), req.ProjectID, req.ServerID, name, domains, tls, req.PHPVersion)
 	var taken *store.ErrDomainTaken
 	switch {
 	case errors.As(err, &taken):
@@ -143,6 +145,8 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, p *pri
 		return
 	case errors.Is(err, store.ErrNameTaken):
 		writeError(w, http.StatusConflict, "a site with this name already exists")
+		return
+	case projectError(w, err):
 		return
 	case err != nil:
 		s.internalError(w, r, "create site", err)

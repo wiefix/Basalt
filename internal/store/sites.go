@@ -15,6 +15,7 @@ import (
 type Site struct {
 	ID         int64
 	ServerID   int64
+	ProjectID  int64
 	Name       string
 	Kind       string
 	RouteID    int64
@@ -42,18 +43,22 @@ type SiteUsage struct {
 func (u SiteUsage) Total() int64 { return u.DiskBytes + u.DBBytes }
 
 // CreateSite creates a site and the route that serves it, in one transaction.
-func (db *DB) CreateSite(ctx context.Context, serverID int64, name string, domains []string, tls proxy.TLSMode, phpVersion string) (*Site, error) {
+func (db *DB) CreateSite(ctx context.Context, projectID, serverID int64, name string, domains []string, tls proxy.TLSMode, phpVersion string) (*Site, error) {
 	tx, err := db.W.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
-	site := &Site{ServerID: serverID, Name: name, Kind: "static", Domains: domains, TLS: tls, PHPVersion: phpVersion}
+	projectID = projectOrDefault(projectID)
+	if err := projectExists(ctx, tx, projectID); err != nil {
+		return nil, err
+	}
+	site := &Site{ServerID: serverID, ProjectID: projectID, Name: name, Kind: "static", Domains: domains, TLS: tls, PHPVersion: phpVersion}
 	var created int64
 	err = tx.QueryRowContext(ctx,
-		`INSERT INTO sites (server_id, name, kind, php_version) VALUES (?, ?, 'static', ?) RETURNING id, created_at`,
-		serverID, name, phpVersion).Scan(&site.ID, &created)
+		`INSERT INTO sites (project_id, server_id, name, kind, php_version) VALUES (?, ?, ?, 'static', ?) RETURNING id, created_at`,
+		projectID, serverID, name, phpVersion).Scan(&site.ID, &created)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: sites.name") {
 			return nil, ErrNameTaken
@@ -120,7 +125,7 @@ func (db *DB) SetSiteDomains(ctx context.Context, siteID int64, domains []string
 	return tx.Commit()
 }
 
-const siteQuery = `SELECT s.id, s.server_id, s.name, s.kind, s.php_version, s.php_settings,
+const siteQuery = `SELECT s.id, s.server_id, s.project_id, s.name, s.kind, s.php_version, s.php_settings,
 	s.disk_bytes, s.disk_files, s.db_bytes, s.usage_at, s.quota_mb, s.quota_alerted,
 	s.created_at, r.id, r.tls, COALESCE(d.domain, '')
 	FROM sites s JOIN proxy_routes r ON r.site_id = s.id
@@ -134,7 +139,7 @@ func (db *DB) scanSites(rows *sql.Rows) ([]*Site, error) {
 		var created int64
 		var domain, settings string
 		var usageAt sql.NullInt64
-		if err := rows.Scan(&s.ID, &s.ServerID, &s.Name, &s.Kind, &s.PHPVersion, &settings,
+		if err := rows.Scan(&s.ID, &s.ServerID, &s.ProjectID, &s.Name, &s.Kind, &s.PHPVersion, &settings,
 			&s.Usage.DiskBytes, &s.Usage.DiskFiles, &s.Usage.DBBytes, &usageAt, &s.QuotaMB, &s.QuotaAlerted,
 			&created, &s.RouteID, &s.TLS, &domain); err != nil {
 			return nil, err
@@ -216,7 +221,6 @@ func (db *DB) DeleteSite(ctx context.Context, id int64) error {
 	return tx.Commit()
 }
 
-// SetSitePHP switches a site between static ("") and a PHP version.
 // SetSiteUsage records a measurement of a site's disk space.
 func (db *DB) SetSiteUsage(ctx context.Context, siteID int64, u SiteUsage) error {
 	var at any
@@ -244,6 +248,7 @@ func (db *DB) SetSitePHPSettings(ctx context.Context, siteID int64, st php.Setti
 	return db.execOne(ctx, `UPDATE sites SET php_settings = ? WHERE id = ?`, string(b), siteID)
 }
 
+// SetSitePHP switches a site between static ("") and a PHP version.
 func (db *DB) SetSitePHP(ctx context.Context, siteID int64, version string) error {
 	tx, err := db.W.BeginTx(ctx, nil)
 	if err != nil {

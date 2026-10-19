@@ -17,14 +17,14 @@ func TestDNSZones(t *testing.T) {
 	check := func(z *dns.Zone) error { return z.Validate() }
 	ns := dns.Record{Name: "@", Type: dns.TypeNS, Value: "ns1.example.net"}
 	ns.Normalize()
-	z, err := db.CreateDNSZone(ctx, "example.com", []dns.Record{ns}, check, now)
+	z, err := db.CreateDNSZone(ctx, 0, "example.com", []dns.Record{ns}, check, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if z.Serial != 2026101100 || z.Records != 1 {
 		t.Fatalf("%+v", z)
 	}
-	if _, err := db.CreateDNSZone(ctx, "example.com", nil, check, now); !errors.Is(err, ErrNameTaken) {
+	if _, err := db.CreateDNSZone(ctx, 0, "example.com", nil, check, now); !errors.Is(err, ErrNameTaken) {
 		t.Fatalf("duplicate zone: %v", err)
 	}
 	rev0, _, _ := db.DesiredDNS(ctx, nil)
@@ -46,7 +46,7 @@ func TestDNSZones(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Records of another zone are not reachable.
-	other, err := db.CreateDNSZone(ctx, "example.org", nil, check, now)
+	other, err := db.CreateDNSZone(ctx, 0, "example.org", nil, check, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestZoneDNSSEC(t *testing.T) {
 	ctx := context.Background()
 	db, _ := openTemp(t)
 	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
-	z, err := db.CreateDNSZone(ctx, "example.com", nil, func(*dns.Zone) error { return nil }, now)
+	z, err := db.CreateDNSZone(ctx, 0, "example.com", nil, func(*dns.Zone) error { return nil }, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestDNSFailover(t *testing.T) {
 	db, _ := openTemp(t)
 	now := time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC)
 	check := func(z *dns.Zone) error { return z.Validate() }
-	z, err := db.CreateDNSZone(ctx, "example.com", nil, check, now)
+	z, err := db.CreateDNSZone(ctx, 0, "example.com", nil, check, now)
 	if err != nil {
 		t.Fatal(err)
 	}

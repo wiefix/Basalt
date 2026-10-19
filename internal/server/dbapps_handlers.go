@@ -160,6 +160,9 @@ func (s *Server) handleLinkApp(w http.ResponseWriter, r *http.Request, p *princi
 	case target.Source == store.SourceDatabase:
 		writeError(w, http.StatusUnprocessableEntity, "a database cannot be linked to another database")
 		return
+	case target.ProjectID != dbApp.ProjectID:
+		writeError(w, http.StatusUnprocessableEntity, "the app is in another project")
+		return
 	case target.ServerID != dbApp.ServerID:
 		writeError(w, http.StatusUnprocessableEntity, "the app runs on another server")
 		return

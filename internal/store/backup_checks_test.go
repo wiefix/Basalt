@@ -21,7 +21,7 @@ func TestBackupChecks(t *testing.T) {
 	s1, _ := db.CreateServer(ctx, "s1", []byte("t1"), time.Now().Add(time.Hour))
 	s2, _ := db.CreateServer(ctx, "s2", []byte("t2"), time.Now().Add(time.Hour))
 	site := func(srv *Server, name string) int64 {
-		x, err := db.CreateSite(ctx, srv.ID, name, []string{name + ".example.com"}, "auto", "")
+		x, err := db.CreateSite(ctx, 0, srv.ID, name, []string{name + ".example.com"}, "auto", "")
 		if err != nil {
 			t.Fatal(err)
 		}

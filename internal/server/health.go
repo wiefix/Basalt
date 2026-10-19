@@ -271,6 +271,7 @@ type healthResultView struct {
 
 type healthCheckView struct {
 	ID          int64              `json:"id"`
+	ProjectID   int64              `json:"project_id"`
 	Name        string             `json:"name"`
 	Kind        string             `json:"kind"`
 	Host        string             `json:"host"`
@@ -300,7 +301,7 @@ func (s *Server) viewHealth(ctx context.Context) ([]healthCheckView, error) {
 	out := []healthCheckView{}
 	for _, st := range s.health.states {
 		c := st.check
-		v := healthCheckView{ID: c.ID, Name: c.Name, Kind: c.Kind, Host: c.Host, Port: c.Port, Path: c.Path,
+		v := healthCheckView{ID: c.ID, ProjectID: c.ProjectID, Name: c.Name, Kind: c.Kind, Host: c.Host, Port: c.Port, Path: c.Path,
 			HostHeader: c.HostHeader, Insecure: c.Insecure, Interval: c.Interval, Timeout: c.Timeout, Status: c.Status,
 			StatusSince: c.StatusSince, Results: []healthResultView{}}
 		for id, vote := range st.votes {
@@ -329,6 +330,9 @@ func (s *Server) handleHealthChecks(w http.ResponseWriter, r *http.Request, p *p
 }
 
 type healthCheckRequest struct {
+	// ProjectID: the project of a new check (0: the default one); a change
+	// keeps the project (move it with PUT …/project).
+	ProjectID  int64  `json:"project_id"`
 	Name       string `json:"name"`
 	Kind       string `json:"kind"`
 	Host       string `json:"host"`
@@ -343,7 +347,7 @@ type healthCheckRequest struct {
 // check validates a request into a check (defaults: port by kind, path
 // /, every 30 s, 5 s timeout).
 func (req *healthCheckRequest) check() (*store.HealthCheck, error) {
-	c := &store.HealthCheck{Name: strings.TrimSpace(req.Name), Kind: req.Kind,
+	c := &store.HealthCheck{ProjectID: req.ProjectID, Name: strings.TrimSpace(req.Name), Kind: req.Kind,
 		Host: strings.TrimSuffix(strings.ToLower(strings.TrimSpace(req.Host)), "."), Port: req.Port,
 		Path: strings.TrimSpace(req.Path), HostHeader: strings.TrimSuffix(strings.ToLower(strings.TrimSpace(req.HostHeader)), "."),
 		Insecure: req.Insecure, Interval: req.Interval, Timeout: req.Timeout}
@@ -386,6 +390,8 @@ func (s *Server) handleCreateHealthCheck(w http.ResponseWriter, r *http.Request,
 	}
 	if err := s.db.CreateHealthCheck(r.Context(), c); errors.Is(err, store.ErrNameTaken) {
 		writeError(w, http.StatusConflict, "a health check with this name exists")
+		return
+	} else if projectError(w, err) {
 		return
 	} else if err != nil {
 		s.internalError(w, r, "create health check", err)
@@ -442,7 +448,11 @@ func (s *Server) handleUpdateHealthCheck(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	c.ID = old.ID
+	if req.ProjectID != 0 && req.ProjectID != old.ProjectID {
+		writeError(w, http.StatusUnprocessableEntity, "move a check to another project with PUT /api/v1/health-checks/{id}/project")
+		return
+	}
+	c.ID, c.ProjectID = old.ID, old.ProjectID
 	dns, err := s.db.UpdateHealthCheck(r.Context(), c)
 	if errors.Is(err, store.ErrNameTaken) {
 		writeError(w, http.StatusConflict, "a health check with this name exists")

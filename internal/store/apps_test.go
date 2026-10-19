@@ -124,7 +124,7 @@ func TestAppReplicas(t *testing.T) {
 		db.W.Exec(`UPDATE servers SET enrolled_at = 1, public_ips = ? WHERE id = ?`, `["`+ip+`"]`, srv.ID)
 		servers = append(servers, srv.ID)
 	}
-	if _, err := db.CreateDNSZone(ctx, "example.com", nil, check, time.Now()); err != nil {
+	if _, err := db.CreateDNSZone(ctx, 0, "example.com", nil, check, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	app, err := db.CreateApp(ctx, servers[0], "web", AppSettings{Image: "nginx:1.27", Port: 80}, []string{"app.example.com"}, proxy.TLSAuto)

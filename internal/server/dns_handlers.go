@@ -18,6 +18,7 @@ import (
 
 type dnsZoneView struct {
 	ID        int64       `json:"id"`
+	ProjectID int64       `json:"project_id"`
 	Name      string      `json:"name"`
 	Serial    uint32      `json:"serial"`
 	Records   int         `json:"records"`
@@ -35,7 +36,7 @@ type dnssecView struct {
 }
 
 func viewDNSZone(z *store.DNSZone) dnsZoneView {
-	v := dnsZoneView{ID: z.ID, Name: z.Name, Serial: z.Serial, Records: z.Records, CreatedAt: z.CreatedAt, UpdatedAt: z.UpdatedAt}
+	v := dnsZoneView{ID: z.ID, ProjectID: z.ProjectID, Name: z.Name, Serial: z.Serial, Records: z.Records, CreatedAt: z.CreatedAt, UpdatedAt: z.UpdatedAt}
 	if z.DNSKEY != "" {
 		tag, ds, rdata, err := dns.PublicKeyInfo(z.Name, z.DNSKEY)
 		if err == nil {
@@ -333,7 +334,8 @@ func (s *Server) handleSetNameservers(w http.ResponseWriter, r *http.Request, p 
 }
 
 type createZoneRequest struct {
-	Name string `json:"name"`
+	ProjectID int64  `json:"project_id"` // 0: the default project
+	Name      string `json:"name"`
 }
 
 func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -357,11 +359,13 @@ func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request, p *pri
 		rec.Normalize()
 		records = append(records, rec)
 	}
-	z, err := s.db.CreateDNSZone(r.Context(), name, records, checkZone, s.now())
+	z, err := s.db.CreateDNSZone(r.Context(), req.ProjectID, name, records, checkZone, s.now())
 	var invalid invalidZone
 	switch {
 	case errors.Is(err, store.ErrNameTaken):
 		writeError(w, http.StatusConflict, "this zone already exists")
+		return
+	case projectError(w, err):
 		return
 	case errors.As(err, &invalid):
 		writeError(w, http.StatusUnprocessableEntity, err.Error())

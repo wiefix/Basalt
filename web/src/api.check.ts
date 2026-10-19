@@ -63,6 +63,18 @@ export const checks = [
   fits<Returns<A["revokeToken"]>>()<G.DeleteTokensIdResponse>(),
   fits<Returns<A["createUser"]>>()<G.PostUsersResponse>(),
 
+  fits<Returns<A["projects"]>>()<G.GetProjectsResponse>(),
+  fits<Returns<A["project"]>>()<G.GetProjectsIdResponse>(),
+  fits<Returns<A["createProject"]>>()<G.PostProjectsResponse>(),
+  fits<Returns<A["updateProject"]>>()<G.PutProjectsIdResponse>(),
+  fits<Returns<A["deleteProject"]>>()<G.DeleteProjectsIdResponse>(),
+  fits<Returns<A["setProjectMember"]>>()<G.PutProjectsIdMembersUidResponse>(),
+  fits<Returns<A["removeProjectMember"]>>()<G.DeleteProjectsIdMembersUidResponse>(),
+  fits<Returns<A["moveToProject"]>>()<G.PutSitesIdProjectResponse>(),
+  fits<Returns<A["moveToProject"]>>()<G.PutAppsIdProjectResponse>(),
+  fits<Returns<A["moveToProject"]>>()<G.PutDnsZonesIdProjectResponse>(),
+  fits<Returns<A["moveToProject"]>>()<G.PutHealthChecksIdProjectResponse>(),
+
   fits<Returns<A["servers"]>>()<G.GetServersResponse>(),
   fits<Returns<A["server"]>>()<G.GetServersIdResponse>(),
   fits<Returns<A["createServer"]>>()<G.PostServersResponse>(),

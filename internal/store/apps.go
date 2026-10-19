@@ -13,12 +13,13 @@ import (
 )
 
 type App struct {
-	ID       int64
-	ServerID int64
-	Name     string
-	Source   string // "image", "git", "compose", "database" or "mail"
-	Image    string // for source "image"
-	Git      GitSettings
+	ID        int64
+	ServerID  int64
+	ProjectID int64
+	Name      string
+	Source    string // "image", "git", "compose", "database" or "mail"
+	Image     string // for source "image"
+	Git       GitSettings
 	// Deploy key (encrypted OpenSSH private key and its public line) and
 	// webhook secret (encrypted) of a git app; nil until generated.
 	DeployKey       []byte
@@ -99,6 +100,9 @@ type ComposeService struct {
 // AppSettings are the fields an app is deployed with, other than env.
 // Source is fixed when the app is created.
 type AppSettings struct {
+	// ProjectID is the project of a new app (0: the default one); updates
+	// leave it alone.
+	ProjectID     int64
 	Source        string
 	Engine        string // databases
 	EngineVersion string
@@ -136,17 +140,21 @@ func (db *DB) CreateApp(ctx context.Context, serverID int64, name string, st App
 	if st.Source == "" {
 		st.Source = SourceImage
 	}
-	a := &App{ServerID: serverID, Name: name, Source: st.Source, Image: st.Image, Git: st.Git, Port: st.Port,
+	st.ProjectID = projectOrDefault(st.ProjectID)
+	if err := projectExists(ctx, tx, st.ProjectID); err != nil {
+		return nil, err
+	}
+	a := &App{ServerID: serverID, ProjectID: st.ProjectID, Name: name, Source: st.Source, Image: st.Image, Git: st.Git, Port: st.Port,
 		Volumes: st.Volumes, MemoryMB: st.MemoryMB, CPUs: st.CPUs, Domains: domains, TLS: tls,
 		Engine: st.Engine, EngineVersion: st.EngineVersion, Links: []int64{}, ReadOnly: st.ReadOnly, Hostname: st.Hostname,
 		Template: st.Template, TemplateRevision: st.TemplateRevision}
 	var created int64
 	err = tx.QueryRowContext(ctx,
-		`INSERT INTO apps (server_id, name, source, image, git_url, git_branch, git_dockerfile, git_context,
+		`INSERT INTO apps (project_id, server_id, name, source, image, git_url, git_branch, git_dockerfile, git_context,
 		 port, volumes, memory_mb, cpus, engine, engine_version, read_only, hostname, template, template_revision)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id, created_at`,
-		serverID, name, st.Source, st.Image, st.Git.URL, st.Git.Branch, st.Git.Dockerfile, st.Git.Context,
+		st.ProjectID, serverID, name, st.Source, st.Image, st.Git.URL, st.Git.Branch, st.Git.Dockerfile, st.Git.Context,
 		st.Port, vols, st.MemoryMB, st.CPUs, st.Engine, st.EngineVersion, st.ReadOnly, st.Hostname, st.Template, st.TemplateRevision).Scan(&a.ID, &created)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: apps.name") {
@@ -181,7 +189,7 @@ func marshalVolumes(v []agentproto.AppVolume) (string, error) {
 	return string(b), err
 }
 
-const appQuery = `SELECT a.id, a.server_id, a.name, a.source, a.image, a.git_url, a.git_branch, a.git_dockerfile,
+const appQuery = `SELECT a.id, a.server_id, a.project_id, a.name, a.source, a.image, a.git_url, a.git_branch, a.git_dockerfile,
 	a.git_context, a.deploy_key, a.deploy_key_public, a.webhook_secret, a.auto_deploy,
 	a.compose, a.compose_summary, a.service, a.engine, a.engine_version, a.hostname, a.template, a.template_revision,
 	(SELECT COALESCE(json_group_array(l.app_id), '[]') FROM (SELECT app_id FROM app_links WHERE database_id = a.id ORDER BY app_id) l),
@@ -198,7 +206,7 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 		var a App
 		var created int64
 		var vols, domain, summary, links, replicas string
-		if err := rows.Scan(&a.ID, &a.ServerID, &a.Name, &a.Source, &a.Image, &a.Git.URL, &a.Git.Branch,
+		if err := rows.Scan(&a.ID, &a.ServerID, &a.ProjectID, &a.Name, &a.Source, &a.Image, &a.Git.URL, &a.Git.Branch,
 			&a.Git.Dockerfile, &a.Git.Context, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
 			&a.ComposeSealed, &summary, &a.Service, &a.Engine, &a.EngineVersion, &a.Hostname, &a.Template, &a.TemplateRevision, &links, &replicas, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
 			return nil, err
@@ -459,21 +467,24 @@ func (db *DB) AddAppReplica(ctx context.Context, appID, serverID int64, check, p
 		return err
 	}
 	defer tx.Rollback()
-	var primaryRoute int64
+	var primaryRoute, projectID int64
 	var tls string
 	err = tx.QueryRowContext(ctx,
-		`SELECT r.id, r.tls FROM apps a JOIN proxy_routes r ON r.app_id = a.id AND r.server_id = a.server_id WHERE a.id = ?`,
-		appID).Scan(&primaryRoute, &tls)
+		`SELECT r.id, r.tls, a.project_id FROM apps a JOIN proxy_routes r ON r.app_id = a.id AND r.server_id = a.server_id WHERE a.id = ?`,
+		appID).Scan(&primaryRoute, &tls, &projectID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
 	}
+	// The checks of its placements belong to the app's project.
+	check.ProjectID = projectID
 	if err := insertHealthCheck(ctx, tx, check); err != nil {
 		return err
 	}
 	if primaryCheck != nil {
+		primaryCheck.ProjectID = projectID
 		if err := insertHealthCheck(ctx, tx, primaryCheck); err != nil {
 			return err
 		}

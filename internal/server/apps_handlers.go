@@ -24,12 +24,13 @@ const (
 )
 
 type appView struct {
-	ID       int64    `json:"id"`
-	ServerID int64    `json:"server_id"`
-	Name     string   `json:"name"`
-	Source   string   `json:"source"` // image or git
-	Image    string   `json:"image"`
-	Git      *gitView `json:"git,omitempty"`
+	ID        int64    `json:"id"`
+	ServerID  int64    `json:"server_id"`
+	ProjectID int64    `json:"project_id"`
+	Name      string   `json:"name"`
+	Source    string   `json:"source"` // image or git
+	Image     string   `json:"image"`
+	Git       *gitView `json:"git,omitempty"`
 	// DeployKey is the public key to grant read access to the repository.
 	DeployKey  string `json:"deploy_key,omitempty"`
 	AutoDeploy bool   `json:"auto_deploy"`
@@ -64,7 +65,7 @@ func viewApp(a *store.App) appView {
 	if vols == nil {
 		vols = []agentproto.AppVolume{}
 	}
-	v := appView{ID: a.ID, ServerID: a.ServerID, Name: a.Name, Source: a.Source, Image: a.Image, Port: a.Port,
+	v := appView{ID: a.ID, ServerID: a.ServerID, ProjectID: a.ProjectID, Name: a.Name, Source: a.Source, Image: a.Image, Port: a.Port,
 		Domains: a.Domains, TLS: a.TLS, Volumes: vols, MemoryMB: a.MemoryMB, CPUs: a.CPUs, ReadOnly: a.ReadOnly, CreatedAt: a.CreatedAt,
 		Template: a.Template, TemplateRevision: a.TemplateRevision, Replicas: nonNil(a.Replicas)}
 	switch a.Source {
@@ -223,13 +224,14 @@ type createAppRequest struct {
 	Service string `json:"service"`
 	// Databases: the engine (postgres, mysql, mariadb, redis) and its
 	// version (by default the newest offered).
-	Engine   string        `json:"engine"`
-	Version  string        `json:"version"`
-	Source   string        `json:"source"`
-	ServerID int64         `json:"server_id"`
-	Name     string        `json:"name"`
-	Domains  []string      `json:"domains"`
-	TLS      proxy.TLSMode `json:"tls"`
+	Engine    string        `json:"engine"`
+	Version   string        `json:"version"`
+	Source    string        `json:"source"`
+	ProjectID int64         `json:"project_id"` // 0: the default project
+	ServerID  int64         `json:"server_id"`
+	Name      string        `json:"name"`
+	Domains   []string      `json:"domains"`
+	TLS       proxy.TLSMode `json:"tls"`
 }
 
 // normalizeAppDomains validates domains for an app route; none is allowed.
@@ -318,9 +320,12 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 		writeError(w, http.StatusUnprocessableEntity, "Docker is not installed on this server")
 		return
 	}
+	st.ProjectID = req.ProjectID
 	app, err := s.db.CreateApp(r.Context(), srv.ID, name, st, domains, tls)
 	var taken *store.ErrDomainTaken
 	switch {
+	case projectError(w, err):
+		return
 	case errors.As(err, &taken):
 		writeError(w, http.StatusConflict, taken.Error())
 		return

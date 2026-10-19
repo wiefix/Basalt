@@ -270,6 +270,18 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("DELETE /api/v1/tokens/{id}", s.requireSession(store.RoleAdmin, s.handleRevokeToken))
 	rt.Handle("POST /api/v1/users", s.requireSession(store.RoleAdmin, s.handleCreateUser))
 
+	rt.Handle("GET /api/v1/projects", s.requireRole(store.RoleViewer, s.handleProjects))
+	rt.Handle("POST /api/v1/projects", s.requireRole(store.RoleAdmin, s.handleCreateProject))
+	rt.Handle("GET /api/v1/projects/{id}", s.requireRole(store.RoleViewer, s.handleGetProject))
+	rt.Handle("PUT /api/v1/projects/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateProject))
+	rt.Handle("DELETE /api/v1/projects/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteProject))
+	rt.Handle("PUT /api/v1/projects/{id}/members/{uid}", s.requireRole(store.RoleAdmin, s.handleSetProjectMember))
+	rt.Handle("DELETE /api/v1/projects/{id}/members/{uid}", s.requireRole(store.RoleAdmin, s.handleRemoveProjectMember))
+	rt.Handle("PUT /api/v1/sites/{id}/project", s.requireRole(store.RoleAdmin, s.handleMove(store.ResourceSite)))
+	rt.Handle("PUT /api/v1/apps/{id}/project", s.requireRole(store.RoleAdmin, s.handleMove(store.ResourceApp)))
+	rt.Handle("PUT /api/v1/dns/zones/{id}/project", s.requireRole(store.RoleAdmin, s.handleMove(store.ResourceDNSZone)))
+	rt.Handle("PUT /api/v1/health-checks/{id}/project", s.requireRole(store.RoleAdmin, s.handleMove(store.ResourceHealthCheck)))
+
 	rt.Handle("GET /api/v1/servers", s.requireRole(store.RoleViewer, s.handleListServers))
 	rt.Handle("POST /api/v1/servers", s.requireRole(store.RoleAdmin, s.handleCreateServer))
 	rt.Handle("GET /api/v1/servers/{id}", s.requireRole(store.RoleViewer, s.handleGetServer))

@@ -98,6 +98,7 @@ export interface Route {
 export interface Site {
   id: number;
   server_id: number;
+  project_id: number;
   name: string;
   kind: "static";
   domains: string[];
@@ -192,6 +193,7 @@ export interface ComposeSummary {
 export interface App {
   id: number;
   server_id: number;
+  project_id: number;
   name: string;
   source: "image" | "git" | "compose" | "database" | "mail";
   image: string;
@@ -483,6 +485,7 @@ export interface Registry {
 
 export interface DNSZone {
   id: number;
+  project_id: number;
   name: string;
   serial: number;
   records: number;
@@ -584,6 +587,7 @@ export interface AppTemplateInfo {
 
 export interface HealthCheck {
   id: number;
+  project_id: number;
   name: string;
   kind: "http" | "https" | "tcp";
   host: string;
@@ -653,6 +657,28 @@ export type ChannelInput = {
   from?: string;
   to?: string[];
 };
+
+export interface Project {
+  id: number;
+  name: string;
+  description: string;
+  resources: number; // sites, apps, DNS zones and health checks it holds
+  members: number;
+  default: boolean;
+  created_at: string;
+}
+
+export type ProjectRole = "admin" | "member" | "viewer";
+
+export interface ProjectMember {
+  user_id: number;
+  email: string;
+  name: string;
+  role: ProjectRole;
+  created_at: string;
+}
+
+export type ProjectResource = "sites" | "apps" | "dns/zones" | "health-checks";
 
 export interface SessionInfo {
   id: string;
@@ -877,6 +903,16 @@ export const api = {
   revokeToken: (id: number) => del<void>(`/api/v1/tokens/${id}`),
   createUser: (b: { email: string; name: string; password: string; role: Role }) =>
     post<{ user: User }>("/api/v1/users", b),
+
+  projects: () => get<{ projects: Project[] }>("/api/v1/projects"),
+  project: (id: number) => get<{ project: Project; members: ProjectMember[] }>(`/api/v1/projects/${id}`),
+  createProject: (b: { name: string; description: string }) => post<{ project: Project }>("/api/v1/projects", b),
+  updateProject: (id: number, b: { name: string; description: string }) => put<{ project: Project }>(`/api/v1/projects/${id}`, b),
+  deleteProject: (id: number) => del<void>(`/api/v1/projects/${id}`),
+  setProjectMember: (id: number, userId: number, role: ProjectRole) => put<void>(`/api/v1/projects/${id}/members/${userId}`, { role }),
+  removeProjectMember: (id: number, userId: number) => del<void>(`/api/v1/projects/${id}/members/${userId}`),
+  moveToProject: (kind: ProjectResource, id: number, projectId: number) =>
+    put<void>(`/api/v1/${kind}/${id}/project`, { project_id: projectId }),
 
   servers: () => get<{ servers: Server[] }>("/api/v1/servers"),
   server: (id: number) => get<{ server: Server; metrics?: Metrics }>(`/api/v1/servers/${id}`),

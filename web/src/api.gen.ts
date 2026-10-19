@@ -148,6 +148,7 @@ export interface AppView {
   memory_mb: number;
   name: string;
   port: number;
+  project_id: number;
   read_only: boolean;
   replicas: number[];
   server_id: number;
@@ -359,6 +360,7 @@ export interface CreateAppRequest {
   memory_mb?: number;
   name?: string;
   port?: number;
+  project_id?: number;
   read_only?: boolean;
   server_id?: number;
   service?: string;
@@ -401,6 +403,7 @@ export interface CreateSiteRequest {
   domains?: string[];
   name?: string;
   php_version?: string;
+  project_id?: number;
   server_id?: number;
   tls?: string;
 }
@@ -421,6 +424,7 @@ export interface CreateUserRequest {
 
 export interface CreateZoneRequest {
   name?: string;
+  project_id?: number;
 }
 
 export interface DatabaseView {
@@ -550,6 +554,7 @@ export interface DnsZoneView {
   dnssec?: DnssecView;
   id: number;
   name: string;
+  project_id: number;
   records: number;
   serial: number;
   updated_at: string;
@@ -639,6 +644,7 @@ export interface HealthCheckRequest {
   name?: string;
   path?: string;
   port?: number;
+  project_id?: number;
   timeout?: number;
 }
 
@@ -652,6 +658,7 @@ export interface HealthCheckView {
   name: string;
   path: string;
   port: number;
+  project_id: number;
   results: HealthResultView[];
   status: string;
   status_since: string | null;
@@ -683,6 +690,7 @@ export interface ImageChange {
 export interface InstallRequest {
   inputs?: Record<string, string>;
   name?: string;
+  project_id?: number;
   server_id?: number;
 }
 
@@ -785,6 +793,10 @@ export interface MetricsView {
   uptime: number;
 }
 
+export interface MoveRequest {
+  project_id?: number;
+}
+
 export interface NameserversRequest {
   nameservers?: string[];
 }
@@ -878,6 +890,33 @@ export interface PolicyView {
   next_run?: string;
   schedule: string;
   storage_id: number;
+}
+
+export interface ProjectMemberRequest {
+  role?: string;
+}
+
+export interface ProjectMemberView {
+  created_at: string;
+  email: string;
+  name: string;
+  role: string;
+  user_id: number;
+}
+
+export interface ProjectRequest {
+  description?: string;
+  name?: string;
+}
+
+export interface ProjectView {
+  created_at: string;
+  default: boolean;
+  description: string;
+  id: number;
+  members: number;
+  name: string;
+  resources: number;
 }
 
 export interface ProxySyncView {
@@ -1044,6 +1083,7 @@ export interface SiteView {
   over_quota: boolean;
   php_settings: PhpSettingsOut;
   php_version: string;
+  project_id: number;
   quota_mb: number;
   server_id: number;
   tls: string;
@@ -1266,6 +1306,10 @@ export type DeleteNotificationsIdResponse = void;
 export type DeletePanelBackupPolicyResponse = {
   ok: boolean;
 };
+
+export type DeleteProjectsIdResponse = void;
+
+export type DeleteProjectsIdMembersUidResponse = void;
 
 export type DeleteRegistriesIdResponse = void;
 
@@ -1503,6 +1547,15 @@ export type GetPanelBackupResponse = {
 
 export type GetPanelBackupRunsBidResponse = {
   backup: PanelBackupView;
+};
+
+export type GetProjectsResponse = {
+  projects: ProjectView[];
+};
+
+export type GetProjectsIdResponse = {
+  members: ProjectMemberView[];
+  project: ProjectView;
 };
 
 export type GetRegistriesResponse = {
@@ -1866,6 +1919,12 @@ export type PostPanelBackupRunResponse = {
   backup: PanelBackupView;
 };
 
+export type PostProjectsResponse = {
+  project: ProjectView;
+};
+
+export type PostProjectsBody = ProjectRequest;
+
 export type PostRegistriesResponse = {
   registry: RegistryView;
 };
@@ -2027,6 +2086,10 @@ export type PutAppsIdEnvResponse = {
 
 export type PutAppsIdEnvBody = AppEnvRequest;
 
+export type PutAppsIdProjectResponse = void;
+
+export type PutAppsIdProjectBody = MoveRequest;
+
 export type PutAppsIdWebhookResponse = {
   webhook: WebhookView;
 };
@@ -2057,6 +2120,10 @@ export type PutDnsZonesIdDnssecResponse = {
 
 export type PutDnsZonesIdDnssecBody = DnssecRequest;
 
+export type PutDnsZonesIdProjectResponse = void;
+
+export type PutDnsZonesIdProjectBody = MoveRequest;
+
 export type PutDnsZonesIdRecordsRidResponse = {
   record: DnsRecordView;
 };
@@ -2066,6 +2133,10 @@ export type PutDnsZonesIdRecordsRidBody = DnsRecord;
 export type PutHealthChecksIdResponse = void;
 
 export type PutHealthChecksIdBody = HealthCheckRequest;
+
+export type PutHealthChecksIdProjectResponse = void;
+
+export type PutHealthChecksIdProjectBody = MoveRequest;
 
 export type PutMailDomainsIdResponse = void;
 
@@ -2113,6 +2184,16 @@ export type PutPanelBackupRecoveryResponse = {
 
 export type PutPanelBackupRecoveryBody = RecoveryRequest;
 
+export type PutProjectsIdResponse = {
+  project: ProjectView;
+};
+
+export type PutProjectsIdBody = ProjectRequest;
+
+export type PutProjectsIdMembersUidResponse = void;
+
+export type PutProjectsIdMembersUidBody = ProjectMemberRequest;
+
 export type PutRegistriesIdResponse = {
   registry: RegistryView;
 };
@@ -2155,6 +2236,10 @@ export type PutSitesIdPhpSettingsResponse = {
 };
 
 export type PutSitesIdPhpSettingsBody = PhpSettings;
+
+export type PutSitesIdProjectResponse = void;
+
+export type PutSitesIdProjectBody = MoveRequest;
 
 export type PutSitesIdQuotaResponse = {
   site: SiteView;

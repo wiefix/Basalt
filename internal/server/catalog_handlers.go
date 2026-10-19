@@ -61,9 +61,10 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request, p *princi
 }
 
 type installRequest struct {
-	ServerID int64             `json:"server_id"`
-	Name     string            `json:"name"`
-	Inputs   map[string]string `json:"inputs"`
+	ProjectID int64             `json:"project_id"` // 0: the default project
+	ServerID  int64             `json:"server_id"`
+	Name      string            `json:"name"`
+	Inputs    map[string]string `json:"inputs"`
 }
 
 // handleInstall installs a template as a compose app and deploys it.
@@ -132,10 +133,12 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request, p *princi
 		writeError(w, http.StatusUnprocessableEntity, "Docker is not installed on this server")
 		return
 	}
-	st := store.AppSettings{Source: store.SourceCompose, Port: cf.port, Template: t.ID, TemplateRevision: t.Revision}
+	st := store.AppSettings{ProjectID: req.ProjectID, Source: store.SourceCompose, Port: cf.port, Template: t.ID, TemplateRevision: t.Revision}
 	app, err := s.db.CreateApp(r.Context(), srv.ID, name, st, domains, tls)
 	var taken *store.ErrDomainTaken
 	switch {
+	case projectError(w, err):
+		return
 	case errors.As(err, &taken):
 		writeError(w, http.StatusConflict, taken.Error())
 		return

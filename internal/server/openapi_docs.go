@@ -88,6 +88,20 @@ var apiDocs = map[string]apiDoc{
 		resp: obj("entries", []auditView{}, "actions", []string{}, "more", false)},
 	"GET /api/v1/audit/verify": {summary: "Verify the audit log's hash chain", resp: auditCheckView{}},
 
+	// Projects.
+	"GET /api/v1/projects":                       {summary: "Projects (the default one first)", resp: obj("projects", []projectView{})},
+	"POST /api/v1/projects":                      {summary: "Create a project", body: projectRequest{}, resp: obj("project", projectView{})},
+	"GET /api/v1/projects/{id}":                  {summary: "A project with its members", resp: obj("project", projectView{}, "members", []projectMemberView{})},
+	"PUT /api/v1/projects/{id}":                  {summary: "Rename a project or change its description", body: projectRequest{}, resp: obj("project", projectView{})},
+	"DELETE /api/v1/projects/{id}":               {summary: "Delete an empty project (not the default one)", resp: noContent},
+	"PUT /api/v1/projects/{id}/members/{uid}":    {summary: "Add a user to a project or change their role there", body: projectMemberRequest{}, resp: noContent},
+	"DELETE /api/v1/projects/{id}/members/{uid}": {summary: "Remove a user from a project", resp: noContent},
+	"PUT /api/v1/sites/{id}/project":             {summary: "Move a site to another project", body: moveRequest{}, resp: noContent},
+	"PUT /api/v1/apps/{id}/project": {summary: "Move an app or database (with its placements' health checks) to another project",
+		body: moveRequest{}, resp: noContent},
+	"PUT /api/v1/dns/zones/{id}/project":     {summary: "Move a DNS zone to another project", body: moveRequest{}, resp: noContent},
+	"PUT /api/v1/health-checks/{id}/project": {summary: "Move a health check to another project", body: moveRequest{}, resp: noContent},
+
 	// Servers and proxy routes.
 	"GET /api/v1/servers":                      {summary: "List servers", resp: obj("servers", []serverView{})},
 	"POST /api/v1/servers":                     {summary: "Add a server; returns its one-time install command", body: createServerRequest{}, resp: obj("server", serverView{}, "enrollment", enrollmentView{})},
