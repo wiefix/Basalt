@@ -1,15 +1,18 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router";
-import { api, appPath, can, sourceLabel, type User } from "../api";
+import { api, appPath, sourceLabel, type User } from "../api";
 import { ErrorBox, Field, Icon, Loading, Modal, formatDate } from "../components/ui";
+import { ProjectBadge, ProjectFilter, ProjectSelect, ServerLink, useCanCreate, useNewProject, useProjectFilter } from "../components/projects";
 
 export function DatabasesPage({ user }: { user: User }) {
   const apps = useQuery({ queryKey: ["apps"], queryFn: api.apps });
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
   const [adding, setAdding] = useState(false);
   const serverName = (id: number) => servers.data?.servers.find((s) => s.id === id)?.name ?? `#${id}`;
-  const list = apps.data?.apps.filter((a) => a.source === "database") ?? [];
+  const [project, setProject] = useProjectFilter();
+  const canCreate = useCanCreate(user);
+  const list = apps.data?.apps.filter((a) => a.source === "database" && (!project || a.project_id === project)) ?? [];
   const appName = (id: number) => apps.data?.apps.find((a) => a.id === id)?.name ?? `#${id}`;
 
   return (
@@ -19,11 +22,14 @@ export function DatabasesPage({ user }: { user: User }) {
           <h1>Databases</h1>
           <div className="sub">PostgreSQL, MySQL, MariaDB and Redis in containers, reachable only from the apps you link.</div>
         </div>
-        {can(user, "admin") && (
-          <button className="btn primary" onClick={() => setAdding(true)}>
-            <Icon name="plus" /> New database
-          </button>
-        )}
+        <div className="row">
+          <ProjectFilter value={project} onChange={setProject} />
+          {canCreate && (
+            <button className="btn primary" onClick={() => setAdding(true)}>
+              <Icon name="plus" /> New database
+            </button>
+          )}
+        </div>
       </div>
       {apps.isPending ? (
         <Loading />
@@ -33,7 +39,7 @@ export function DatabasesPage({ user }: { user: User }) {
         <div className="card empty">
           <h3>No databases yet</h3>
           <p>Create one, then link it to the apps that use it.</p>
-          {can(user, "admin") && (
+          {canCreate && (
             <button className="btn primary" onClick={() => setAdding(true)}>
               <Icon name="plus" /> Create a database
             </button>
@@ -58,6 +64,7 @@ export function DatabasesPage({ user }: { user: User }) {
                     <Link to={appPath(a)}>
                       <strong>{a.name}</strong>
                     </Link>
+                    <ProjectBadge id={a.project_id} />
                   </td>
                   <td className="muted">{sourceLabel(a)}</td>
                   <td>
@@ -72,9 +79,7 @@ export function DatabasesPage({ user }: { user: User }) {
                     )}
                   </td>
                   <td>
-                    <Link to={`/servers/${a.server_id}`} className="muted">
-                      {serverName(a.server_id)}
-                    </Link>
+                    <ServerLink id={a.server_id} name={serverName(a.server_id)} user={user} className="muted" />
                   </td>
                   <td className="muted">{formatDate(a.created_at)}</td>
                 </tr>
@@ -99,6 +104,7 @@ function NewDatabaseModal({ onClose }: { onClose: () => void }) {
   const [version, setVersion] = useState("");
   const [name, setName] = useState("");
   const [memory, setMemory] = useState("");
+  const [projectId, setProjectId] = useNewProject();
   const current = engines.data?.engines.find((e) => e.id === engine);
   const create = useMutation({
     mutationFn: async () => {
@@ -115,6 +121,7 @@ function NewDatabaseModal({ onClose }: { onClose: () => void }) {
         volumes: [],
         memory_mb: Number(memory) || 0,
         cpus: 0,
+        project_id: projectId,
       });
       await api.deployApp(r.app.id).catch(() => {});
       return r;
@@ -159,6 +166,7 @@ function NewDatabaseModal({ onClose }: { onClose: () => void }) {
           }}
         >
           <ErrorBox error={create.error} />
+          <ProjectSelect value={projectId} onChange={setProjectId} />
           <div className="segmented">
             {engines.data.engines.map((e) => (
               <button

@@ -603,6 +603,7 @@ export interface HealthCheck {
 }
 
 export interface HealthCheckInput {
+  project_id?: number; // a new check's project
   name: string;
   kind: string;
   host: string;
@@ -665,6 +666,7 @@ export interface Project {
   resources: number; // sites, apps, DNS zones and health checks it holds
   members: number;
   default: boolean;
+  role: Role; // what you may do in it (a role on the panel counts everywhere)
   created_at: string;
 }
 
@@ -910,6 +912,8 @@ export const api = {
   createProject: (b: { name: string; description: string }) => post<{ project: Project }>("/api/v1/projects", b),
   updateProject: (id: number, b: { name: string; description: string }) => put<{ project: Project }>(`/api/v1/projects/${id}`, b),
   deleteProject: (id: number) => del<void>(`/api/v1/projects/${id}`),
+  addProjectMember: (id: number, email: string, role: ProjectRole) =>
+    post<{ member: ProjectMember }>(`/api/v1/projects/${id}/members`, { email, role }),
   setProjectMember: (id: number, userId: number, role: ProjectRole) => put<void>(`/api/v1/projects/${id}/members/${userId}`, { role }),
   removeProjectMember: (id: number, userId: number) => del<void>(`/api/v1/projects/${id}/members/${userId}`),
   moveToProject: (kind: ProjectResource, id: number, projectId: number) =>
@@ -950,7 +954,7 @@ export const api = {
 
   sites: () => get<{ sites: Site[] }>("/api/v1/sites"),
   site: (id: number) => get<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}`),
-  createSite: (b: { server_id: number; name: string; domains: string[]; tls: string; php_version: string }) =>
+  createSite: (b: { server_id: number; name: string; domains: string[]; tls: string; php_version: string; project_id?: number }) =>
     post<{ site: Site; sync: Sync; provision_error?: string }>("/api/v1/sites", b),
   setSiteDomains: (id: number, domains: string[]) =>
     put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/domains`, { domains }),
@@ -987,7 +991,7 @@ export const api = {
 
   dns: () => get<{ zones: DNSZone[]; nameservers: string[]; servers: DNSServer[] }>("/api/v1/dns"),
   setNameservers: (nameservers: string[]) => put<{ nameservers: string[] }>("/api/v1/dns/nameservers", { nameservers }),
-  createZone: (name: string) => post<{ zone: DNSZone }>("/api/v1/dns/zones", { name }),
+  createZone: (name: string, projectId?: number) => post<{ zone: DNSZone }>("/api/v1/dns/zones", { name, project_id: projectId }),
   zone: (id: number) =>
     get<{ zone: DNSZone; records: DNSRecord[]; auto: DNSAutoRecord[]; types: string[] }>(`/api/v1/dns/zones/${id}`),
   deleteZone: (id: number) => del<void>(`/api/v1/dns/zones/${id}`),
@@ -1001,7 +1005,7 @@ export const api = {
   setCatalogSource: (b: { url: string; key: string; allow_private: boolean }) =>
     put<{ source: CatalogSource | null }>("/api/v1/catalog/source", b),
   refreshCatalog: () => post<{ source: CatalogSource | null }>("/api/v1/catalog/refresh"),
-  installTemplate: (id: string, b: { server_id: number; name: string; inputs: Record<string, string> }) =>
+  installTemplate: (id: string, b: { server_id: number; name: string; inputs: Record<string, string>; project_id?: number }) =>
     post<{ app: App; notes: string; deploy_error?: string }>(`/api/v1/catalog/${id}/install`, b),
   appTemplate: (id: number) => get<AppTemplateInfo>(`/api/v1/apps/${id}/template`),
   updateTemplate: (id: number, b: { inputs: Record<string, string>; backup: boolean }) =>
@@ -1069,6 +1073,7 @@ export const api = {
       service?: string;
       engine?: string;
       version?: string;
+      project_id?: number;
     },
   ) => post<{ app: App; sync: Sync; warnings: string[] }>("/api/v1/apps", b),
   databaseEngines: () => get<{ engines: Engine[] }>("/api/v1/database-engines"),

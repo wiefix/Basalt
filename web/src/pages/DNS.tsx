@@ -3,11 +3,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router";
 import { api, can, type DNSRecord, type DNSRecordInput, type DNSServer, type DNSZone, type HealthCheck, type User } from "../api";
 import { CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useConfirm, useToast } from "../components/ui";
+import { MoveProjectCard, ProjectBadge, ProjectFilter, ProjectSelect, useAs, useCanCreate, useNewProject, useProjectFilter } from "../components/projects";
 
 export function DNSPage({ user }: { user: User }) {
   const dns = useQuery({ queryKey: ["dns"], queryFn: api.dns });
   const [adding, setAdding] = useState(false);
   const [editingNS, setEditingNS] = useState(false);
+  const canCreate = useCanCreate(user);
+  const [project, setProject] = useProjectFilter();
+  const zones = (dns.data?.zones ?? []).filter((z) => !project || z.project_id === project);
 
   return (
     <>
@@ -16,11 +20,14 @@ export function DNSPage({ user }: { user: User }) {
           <h1>DNS</h1>
           <div className="sub">Authoritative DNS for your domains, served by your own servers.</div>
         </div>
-        {can(user, "admin") && (
-          <button className="btn primary" onClick={() => setAdding(true)}>
-            <Icon name="plus" /> Add zone
-          </button>
-        )}
+        <div className="row">
+          <ProjectFilter value={project} onChange={setProject} />
+          {canCreate && (
+            <button className="btn primary" onClick={() => setAdding(true)}>
+              <Icon name="plus" /> Add zone
+            </button>
+          )}
+        </div>
       </div>
       {dns.isPending ? (
         <Loading />
@@ -28,7 +35,7 @@ export function DNSPage({ user }: { user: User }) {
         <ErrorBox error={dns.error} />
       ) : (
         <div className="stack">
-          {dns.data.zones.length === 0 ? (
+          {zones.length === 0 ? (
             <div className="card empty">
               <h3>No zones yet</h3>
               <p>Add a domain, create its records here, then point the domain to your nameservers at the registrar.</p>
@@ -45,7 +52,7 @@ export function DNSPage({ user }: { user: User }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {dns.data.zones.map((z) => (
+                  {zones.map((z) => (
                     <tr key={z.id}>
                       <td>
                         <Link to={`/dns/${z.id}`}>
@@ -56,6 +63,7 @@ export function DNSPage({ user }: { user: User }) {
                             DNSSEC
                           </span>
                         )}
+                        <ProjectBadge id={z.project_id} />
                       </td>
                       <td className="num">{z.records}</td>
                       <td className="mono muted">{z.serial}</td>
@@ -66,7 +74,7 @@ export function DNSPage({ user }: { user: User }) {
               </table>
             </div>
           )}
-          <div className="grid-2">
+          {can(user, "viewer") && <div className="grid-2">
             <div className="card card-body stack">
               <div className="row" style={{ justifyContent: "space-between" }}>
                 <h2>Nameservers</h2>
@@ -96,7 +104,7 @@ export function DNSPage({ user }: { user: User }) {
               )}
             </div>
             <ServersCard servers={dns.data.servers} />
-          </div>
+          </div>}
         </div>
       )}
       {adding && <NewZoneModal onClose={() => setAdding(false)} />}
@@ -151,8 +159,9 @@ function NewZoneModal({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [name, setName] = useState("");
+  const [projectId, setProjectId] = useNewProject();
   const create = useMutation({
-    mutationFn: () => api.createZone(name.trim()),
+    mutationFn: () => api.createZone(name.trim(), projectId),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["dns"] });
       navigate(`/dns/${r.zone.id}`);
@@ -182,6 +191,7 @@ function NewZoneModal({ onClose }: { onClose: () => void }) {
         }}
       >
         <ErrorBox error={create.error} />
+        <ProjectSelect value={projectId} onChange={setProjectId} />
         <Field label="Domain" help="The zone answers for this domain and everything below it. Use punycode (xn--…) for international names.">
           <input className="input mono" value={name} onChange={(e) => setName(e.target.value)} placeholder="example.com" required autoFocus />
         </Field>
@@ -263,7 +273,8 @@ export function ZonePage({ user }: { user: User }) {
   const checks = useQuery({ queryKey: ["health-checks"], queryFn: api.healthChecks, refetchInterval: 15_000 });
   const [editing, setEditing] = useState<DNSRecord | "new" | null>(null);
   const [filter, setFilter] = useState("");
-  const admin = can(user, "admin");
+  const as = useAs(user, zone.data?.zone.project_id);
+  const admin = can(as, "admin");
 
   if (zone.isPending) return <Loading />;
   if (zone.error) return <ErrorBox error={zone.error} />;
@@ -416,6 +427,11 @@ export function ZonePage({ user }: { user: User }) {
         </div>
       </div>
       <DNSSECCard zone={z} admin={admin} onChanged={refresh} />
+      {can(user, "admin") && (
+        <div style={{ marginTop: 16 }}>
+          <MoveProjectCard kind="dns/zones" id={z.id} current={z.project_id} what="this zone" />
+        </div>
+      )}
       <p className="faint small">
         Sites and apps whose domains are in this zone get A/AAAA records for their server automatically (TTL 5
         minutes). A record of your own at the same name replaces them. An A or AAAA record can follow a health check
@@ -427,7 +443,7 @@ export function ZonePage({ user }: { user: User }) {
           zone={z.name}
           zoneId={id}
           types={zone.data.types}
-          checks={checks.data?.checks ?? []}
+          checks={(checks.data?.checks ?? []).filter((c) => c.project_id === z.project_id)}
           record={editing === "new" ? null : editing}
           onClose={() => setEditing(null)}
           onSaved={refresh}

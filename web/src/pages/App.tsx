@@ -34,11 +34,16 @@ import { BackupsTab } from "./BackupsTab";
 import { LogView } from "../components/LogView";
 import { AccessLogCard } from "../components/AccessLog";
 import { TemplateCard } from "./AppTemplate";
+import { MoveProjectCard, ProjectBadge, ServerLink, useAs } from "../components/projects";
 
-export function AppPage({ user }: { user: User }) {
+export function AppPage({ user: me }: { user: User }) {
   const id = Number(useParams().id);
   const app = useQuery({ queryKey: ["app", id], queryFn: () => api.app(id) });
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
+  // What the user may do here: their role in the app's project (the mail
+  // server is the panel's).
+  const asProject = useAs(me, app.data?.app.project_id);
+  const user = app.data?.app.source === "mail" ? me : asProject;
 
   if (app.isPending) return <Loading />;
   if (app.error) return <ErrorBox error={app.error} />;
@@ -59,6 +64,7 @@ export function AppPage({ user }: { user: User }) {
         <div>
           <div className="row">
             <h1>{a.name}</h1>
+            {!isMail && <ProjectBadge id={a.project_id} />}
             {!isDB && <SyncBadge sync={app.data.sync} />}
           </div>
           <div className="sub row wrap">
@@ -69,7 +75,7 @@ export function AppPage({ user }: { user: User }) {
               </a>
             ))}
             <span className="faint">
-              on <Link to={`/servers/${a.server_id}`}>{server?.name ?? `server #${a.server_id}`}</Link>
+              on <ServerLink id={a.server_id} name={server?.name ?? `server #${a.server_id}`} user={me} />
             </span>
           </div>
         </div>
@@ -92,7 +98,7 @@ export function AppPage({ user }: { user: User }) {
         {can(user, "admin") && tab(`${base}/settings`, "Settings")}
       </div>
       <Routes>
-        <Route index element={<Overview app={a} user={user} placements={app.data.placements ?? []} />} />
+        <Route index element={<Overview app={a} user={user} me={me} placements={app.data.placements ?? []} />} />
         <Route path="connection" element={<ConnectionTab app={a} />} />
         <Route path="backups" element={<BackupsTab target={{ base: `/api/v1/apps/${a.id}`, name: a.name }} user={user} />} />
         <Route path="logs" element={<LogsTab app={a} />} />
@@ -100,7 +106,7 @@ export function AppPage({ user }: { user: User }) {
         <Route path="domains" element={<DomainsTab app={a} user={user} />} />
         <Route path="source" element={<SourceTab app={a} />} />
         <Route path="compose" element={<ComposeTab app={a} />} />
-        <Route path="settings" element={<SettingsTab app={a} />} />
+        <Route path="settings" element={<SettingsTab app={a} panelAdmin={can(me, "admin")} />} />
       </Routes>
     </>
   );
@@ -111,7 +117,7 @@ function DeployBadge({ status }: { status: Deployment["status"] }) {
   return <span className={`badge ${cls}`}>{status === "running" ? "deploying" : status}</span>;
 }
 
-function Overview({ app, user, placements }: { app: App; user: User; placements: AppPlacement[] }) {
+function Overview({ app, user, me, placements }: { app: App; user: User; me: User; placements: AppPlacement[] }) {
   const qc = useQueryClient();
   const toast = useToast();
   const confirm = useConfirm();
@@ -215,7 +221,7 @@ function Overview({ app, user, placements }: { app: App; user: User; placements:
 
       {app.template && <TemplateCard app={app} user={user} />}
       {(app.source === "image" || app.source === "git" || app.source === "compose") && (
-        <ServersCard app={app} user={user} placements={placements} />
+        <ServersCard app={app} user={user} me={me} placements={placements} />
       )}
       {app.source === "compose" && <ServicesCard app={app} services={st?.services} />}
       <ResourcesCard app={app} running={st?.state === "running"} />
@@ -659,7 +665,10 @@ function parseVolumes(text: string): AppVolume[] {
     });
 }
 
-function SettingsTab({ app }: { app: App }) {
+function SettingsTab({ app, panelAdmin }: { app: App; panelAdmin: boolean }) {
+  const move = panelAdmin && app.source !== "mail" && (
+    <MoveProjectCard kind="apps" id={app.id} current={app.project_id} what={app.source === "database" ? "the database" : "the app"} />
+  );
   const qc = useQueryClient();
   const toast = useToast();
   const [image, setImage] = useState(app.image);
@@ -715,6 +724,7 @@ function SettingsTab({ app }: { app: App }) {
             </button>
           </div>
         </form>
+        {move}
         <DeleteCard app={app} />
       </div>
     );
@@ -722,6 +732,7 @@ function SettingsTab({ app }: { app: App }) {
   if (app.source === "compose") {
     return (
       <div className="stack" style={{ maxWidth: 680 }}>
+        {move}
         <DeleteCard app={app} />
       </div>
     );
@@ -770,6 +781,7 @@ function SettingsTab({ app }: { app: App }) {
           </button>
         </div>
       </form>
+      {move}
       <DeleteCard app={app} />
     </div>
   );
@@ -1211,7 +1223,7 @@ const checkBadge: Record<string, string> = { up: "badge ok", down: "badge err", 
 
 // ServersCard lists the servers an app runs on and lets admins add or
 // remove replicas.
-function ServersCard({ app, user, placements }: { app: App; user: User; placements: AppPlacement[] }) {
+function ServersCard({ app, user, me, placements }: { app: App; user: User; me: User; placements: AppPlacement[] }) {
   const qc = useQueryClient();
   const toast = useToast();
   const confirm = useConfirm();
@@ -1270,9 +1282,9 @@ function ServersCard({ app, user, placements }: { app: App; user: User; placemen
             {list.map((p) => (
               <tr key={p.server_id}>
                 <td>
-                  <Link to={`/servers/${p.server_id}`}>
-                    <strong>{name(p.server_id)}</strong>
-                  </Link>
+                  <strong>
+                    <ServerLink id={p.server_id} name={name(p.server_id)} user={me} />
+                  </strong>
                   {p.primary && list.length > 1 && <span className="faint small"> · primary</span>}
                 </td>
                 <td>

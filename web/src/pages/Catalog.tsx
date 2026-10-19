@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router";
 import { api, can, type App, type CatalogSource, type Template, type User } from "../api";
 import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useConfirm, useToast } from "../components/ui";
+import { ProjectSelect, useCanCreate, useNewProject } from "../components/projects";
 
 export function CatalogPage({ user }: { user: User }) {
   const catalog = useQuery({ queryKey: ["catalog"], queryFn: api.catalog });
@@ -10,6 +11,7 @@ export function CatalogPage({ user }: { user: User }) {
   const [category, setCategory] = useState("");
   const [installing, setInstalling] = useState<Template | null>(null);
   const admin = can(user, "admin");
+  const canInstall = useCanCreate(user);
   const templates = catalog.data?.templates ?? [];
   const categories = useMemo(() => [...new Set(templates.map((t) => t.category))].sort(), [templates]);
   const shown = templates.filter(
@@ -70,7 +72,7 @@ export function CatalogPage({ user }: { user: User }) {
                   {t.services.length > 1 ? `${t.services.length} services` : "1 service"}
                   {t.memory_mb ? ` · ${t.memory_mb >= 1024 ? `${t.memory_mb / 1024} GB` : `${t.memory_mb} MB`} RAM` : ""}
                 </span>
-                {admin && (
+                {canInstall && (
                   <button className="btn sm primary" onClick={() => setInstalling(t)}>
                     Install
                   </button>
@@ -96,10 +98,11 @@ function InstallModal({ template: t, onClose }: { template: Template; onClose: (
     Object.fromEntries(t.inputs.map((i) => [i.key, i.default ?? ""])),
   );
   const [showCompose, setShowCompose] = useState(false);
+  const [projectId, setProjectId] = useNewProject();
   const [done, setDone] = useState<{ app: App; notes: string; deploy_error?: string } | null>(null);
   const install = useMutation({
     mutationFn: () =>
-      api.installTemplate(t.id, { server_id: Number(serverId || withDocker[0]?.id), name: name.trim(), inputs }),
+      api.installTemplate(t.id, { server_id: Number(serverId || withDocker[0]?.id), name: name.trim(), inputs, project_id: projectId }),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["apps"] });
       setDone(r);
@@ -162,6 +165,7 @@ function InstallModal({ template: t, onClose }: { template: Template; onClose: (
         {servers.data && withDocker.length === 0 && (
           <div className="alert warn">No server has Docker yet: install it on one first (installer option --with-docker).</div>
         )}
+        <ProjectSelect value={projectId} onChange={setProjectId} />
         <Field label="Server">
           <select className="input" value={serverId} onChange={(e) => setServerId(Number(e.target.value) || "")}>
             {withDocker.map((s) => (

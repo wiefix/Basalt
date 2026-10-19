@@ -1,13 +1,16 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router";
-import { api, can, sourceLabel, type User } from "../api";
+import { api, sourceLabel, type User } from "../api";
 import { ErrorBox, Field, Icon, Loading, Modal, formatDate } from "../components/ui";
+import { ProjectBadge, ProjectFilter, ProjectSelect, ServerLink, useCanCreate, useNewProject, useProjectFilter } from "../components/projects";
 
 export function AppsPage({ user }: { user: User }) {
   const apps = useQuery({ queryKey: ["apps"], queryFn: api.apps });
   // Databases have their own page.
-  const list = apps.data?.apps.filter((a) => a.source !== "database" && a.source !== "mail") ?? [];
+  const [project, setProject] = useProjectFilter();
+  const canCreate = useCanCreate(user);
+  const list = apps.data?.apps.filter((a) => a.source !== "database" && a.source !== "mail" && (!project || a.project_id === project)) ?? [];
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
   const [adding, setAdding] = useState(false);
   const serverName = (id: number) => servers.data?.servers.find((s) => s.id === id)?.name ?? `#${id}`;
@@ -19,11 +22,14 @@ export function AppsPage({ user }: { user: User }) {
           <h1>Apps</h1>
           <div className="sub">Containers from images, git repositories or compose files, with zero-downtime updates.</div>
         </div>
-        {can(user, "admin") && (
-          <button className="btn primary" onClick={() => setAdding(true)}>
-            <Icon name="plus" /> New app
-          </button>
-        )}
+        <div className="row">
+          <ProjectFilter value={project} onChange={setProject} />
+          {canCreate && (
+            <button className="btn primary" onClick={() => setAdding(true)}>
+              <Icon name="plus" /> New app
+            </button>
+          )}
+        </div>
       </div>
       {apps.isPending ? (
         <Loading />
@@ -33,7 +39,7 @@ export function AppsPage({ user }: { user: User }) {
         <div className="card empty">
           <h3>No apps yet</h3>
           <p>Run any Docker image on one of your servers and put it behind HTTPS.</p>
-          {can(user, "admin") && (
+          {canCreate && (
             <button className="btn primary" onClick={() => setAdding(true)}>
               <Icon name="plus" /> Create an app
             </button>
@@ -58,6 +64,7 @@ export function AppsPage({ user }: { user: User }) {
                     <Link to={`/apps/${a.id}`}>
                       <strong>{a.name}</strong>
                     </Link>
+                    <ProjectBadge id={a.project_id} />
                   </td>
                   <td className="mono muted">
                     {sourceLabel(a)}
@@ -77,9 +84,7 @@ export function AppsPage({ user }: { user: User }) {
                     )}
                   </td>
                   <td>
-                    <Link to={`/servers/${a.server_id}`} className="muted">
-                      {serverName(a.server_id)}
-                    </Link>
+                    <ServerLink id={a.server_id} name={serverName(a.server_id)} user={user} className="muted" />
                   </td>
                   <td className="muted">{formatDate(a.created_at)}</td>
                 </tr>
@@ -115,6 +120,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
   const [createdId, setCreatedId] = useState<number | null>(null);
   const [domains, setDomains] = useState("");
   const [tls, setTls] = useState("auto");
+  const [projectId, setProjectId] = useNewProject();
   const create = useMutation({
     mutationFn: async () => {
       const r = await api.createApp({
@@ -132,6 +138,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
         volumes: [],
         memory_mb: 0,
         cpus: 0,
+        project_id: projectId,
       });
       const waitForKey = source === "git" && isSSH(repo);
       // Compose files usually need variables first: they are deployed from the app page.
@@ -209,6 +216,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
           }}
         >
           <ErrorBox error={create.error} />
+          <ProjectSelect value={projectId} onChange={setProjectId} />
           <Field label="Name">
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-api" required autoFocus />
           </Field>

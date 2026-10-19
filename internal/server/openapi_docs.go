@@ -94,6 +94,7 @@ var apiDocs = map[string]apiDoc{
 	"GET /api/v1/projects/{id}":                  {summary: "A project with its members", resp: obj("project", projectView{}, "members", []projectMemberView{})},
 	"PUT /api/v1/projects/{id}":                  {summary: "Rename a project or change its description", body: projectRequest{}, resp: obj("project", projectView{})},
 	"DELETE /api/v1/projects/{id}":               {summary: "Delete an empty project (not the default one)", resp: noContent},
+	"POST /api/v1/projects/{id}/members":         {summary: "Add a user, by email, to a project (or change their role)", body: addMemberRequest{}, resp: obj("member", projectMemberView{})},
 	"PUT /api/v1/projects/{id}/members/{uid}":    {summary: "Add a user to a project or change their role there", body: projectMemberRequest{}, resp: noContent},
 	"DELETE /api/v1/projects/{id}/members/{uid}": {summary: "Remove a user from a project", resp: noContent},
 	"PUT /api/v1/sites/{id}/project":             {summary: "Move a site to another project", body: moveRequest{}, resp: noContent},

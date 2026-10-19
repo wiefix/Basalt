@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, can, type HealthCheck, type HealthCheckInput, type User } from "../api";
 import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
+import { MoveProjectCard, ProjectBadge, ProjectFilter, ProjectSelect, roleIn, useCanCreate, useNewProject, useProjectFilter, useProjects } from "../components/projects";
 
 const statusBadge: Record<HealthCheck["status"], string> = { up: "badge ok", down: "badge err", unknown: "badge plain" };
 
@@ -12,10 +13,15 @@ export function MonitoringPage({ user }: { user: User }) {
   const checks = useQuery({ queryKey: ["health-checks"], queryFn: api.healthChecks, refetchInterval: 5_000 });
   const [editing, setEditing] = useState<HealthCheck | "new" | null>(null);
   const [open, setOpen] = useState<number | null>(null);
-  const admin = can(user, "admin");
+  const canCreate = useCanCreate(user);
+  const projects = useProjects();
+  const [project, setProject] = useProjectFilter();
+  // Who may change a check: an admin of its project.
+  const admin = (c: HealthCheck) => can({ ...user, role: roleIn(user, projects.data?.projects, c.project_id) }, "admin");
   if (checks.isPending) return <Loading />;
   if (checks.error) return <ErrorBox error={checks.error} />;
-  const list = checks.data.checks;
+  const list = checks.data.checks.filter((c) => !project || c.project_id === project);
+  const anyAdmin = list.some(admin);
   const down = list.filter((c) => c.status === "down").length;
   return (
     <>
@@ -26,11 +32,14 @@ export function MonitoringPage({ user }: { user: User }) {
             Every server checks each target; a target is down when most of them fail it twice in a row.
           </div>
         </div>
-        {admin && (
-          <button className="btn primary" onClick={() => setEditing("new")}>
-            <Icon name="plus" /> Add check
-          </button>
-        )}
+        <div className="row">
+          <ProjectFilter value={project} onChange={setProject} />
+          {canCreate && (
+            <button className="btn primary" onClick={() => setEditing("new")}>
+              <Icon name="plus" /> Add check
+            </button>
+          )}
+        </div>
       </div>
       {list.length === 0 ? (
         <div className="card empty">
@@ -53,7 +62,7 @@ export function MonitoringPage({ user }: { user: User }) {
                   <th>Status</th>
                   <th>Check</th>
                   <th className="hide-sm">Servers</th>
-                  {admin && <th />}
+                  {anyAdmin && <th />}
                 </tr>
               </thead>
               <tbody>
@@ -64,7 +73,10 @@ export function MonitoringPage({ user }: { user: User }) {
                       {c.status_since && <div className="faint small">{timeAgo(c.status_since)}</div>}
                     </td>
                     <td>
-                      <div>{c.name}</div>
+                      <div>
+                        {c.name}
+                        <ProjectBadge id={c.project_id} />
+                      </div>
                       <div className="mono faint small" style={{ overflowWrap: "anywhere" }}>
                         {target(c)} · every {c.interval}s
                       </div>
@@ -82,17 +94,19 @@ export function MonitoringPage({ user }: { user: User }) {
                         ))}
                       </div>
                     </td>
-                    {admin && (
+                    {anyAdmin && (
                       <td className="num" onClick={(e) => e.stopPropagation()}>
-                        <button className="btn sm icon ghost" title="Edit" onClick={() => setEditing(c)}>
-                          <Icon name="edit" size={14} />
-                        </button>
+                        {admin(c) && (
+                          <button className="btn sm icon ghost" title="Edit" onClick={() => setEditing(c)}>
+                            <Icon name="edit" size={14} />
+                          </button>
+                        )}
                       </td>
                     )}
                   </tr>,
                   open === c.id && (
                     <tr key={`${c.id}-detail`}>
-                      <td colSpan={admin ? 4 : 3}>
+                      <td colSpan={anyAdmin ? 4 : 3}>
                         <CheckDetail check={c} />
                       </td>
                     </tr>
@@ -103,7 +117,7 @@ export function MonitoringPage({ user }: { user: User }) {
           </div>
         </div>
       )}
-      {editing && <CheckModal check={editing === "new" ? null : editing} onClose={() => setEditing(null)} />}
+      {editing && <CheckModal check={editing === "new" ? null : editing} panelAdmin={can(user, "admin")} onClose={() => setEditing(null)} />}
     </>
   );
 }
@@ -162,7 +176,7 @@ function CheckDetail({ check: c }: { check: HealthCheck }) {
   );
 }
 
-function CheckModal({ check, onClose }: { check: HealthCheck | null; onClose: () => void }) {
+function CheckModal({ check, panelAdmin, onClose }: { check: HealthCheck | null; panelAdmin: boolean; onClose: () => void }) {
   const qc = useQueryClient();
   const toast = useToast();
   const confirm = useConfirm();
@@ -173,12 +187,13 @@ function CheckModal({ check, onClose }: { check: HealthCheck | null; onClose: ()
       : { name: "", kind: "https", host: "", port: 0, path: "/", host_header: "", insecure: false, interval: 30, timeout: 5 },
   );
   const set = (k: keyof HealthCheckInput, v: unknown) => setF({ ...f, [k]: v });
+  const [projectId, setProjectId] = useNewProject();
   const save = useMutation({
     mutationFn: async () => {
       const b = { ...f, port: Number(f.port) || 0, interval: Number(f.interval) || 0, timeout: Number(f.timeout) || 0 };
       if (b.kind === "tcp") Object.assign(b, { path: "", host_header: "", insecure: false });
       if (check) await api.updateHealthCheck(check.id, b);
-      else await api.createHealthCheck(b);
+      else await api.createHealthCheck({ ...b, project_id: projectId });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["health-checks"] });
@@ -227,6 +242,7 @@ function CheckModal({ check, onClose }: { check: HealthCheck | null; onClose: ()
         }}
       >
         <ErrorBox error={save.error} />
+        {!check && <ProjectSelect value={projectId} onChange={setProjectId} />}
         <Field label="Name">
           <input className="input" value={f.name} onChange={(e) => set("name", e.target.value)} placeholder="shop" required />
         </Field>
@@ -280,6 +296,11 @@ function CheckModal({ check, onClose }: { check: HealthCheck | null; onClose: ()
           </Field>
         </div>
       </form>
+      {check && panelAdmin && (
+        <div style={{ marginTop: 16 }}>
+          <MoveProjectCard kind="health-checks" id={check.id} current={check.project_id} what="this check" />
+        </div>
+      )}
     </Modal>
   );
 }

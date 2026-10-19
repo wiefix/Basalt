@@ -18,18 +18,27 @@ import (
 // and move resources between them; project admins manage the members.
 
 type projectView struct {
-	ID          int64     `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	Resources   int       `json:"resources"`
-	Members     int       `json:"members"`
-	Default     bool      `json:"default"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Resources   int    `json:"resources"`
+	Members     int    `json:"members"`
+	Default     bool   `json:"default"`
+	// Role is what the caller may do in the project (their global role
+	// counts in every project).
+	Role      store.Role `json:"role"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
-func viewProject(p *store.Project) projectView {
+func viewProject(p *store.Project, role store.Role) projectView {
 	return projectView{ID: p.ID, Name: p.Name, Description: p.Description, Resources: p.Resources, Members: p.Members,
-		Default: p.ID == store.DefaultProject, CreatedAt: p.CreatedAt}
+		Default: p.ID == store.DefaultProject, Role: role, CreatedAt: p.CreatedAt}
+}
+
+// viewProjectFor describes a project with the principal's role in it.
+func (s *Server) viewProjectFor(r *http.Request, p *principal, pr *store.Project) projectView {
+	role, _ := s.roleIn(r.Context(), p, pr.ID)
+	return viewProject(pr, role)
 }
 
 type projectMemberView struct {
@@ -49,11 +58,13 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request, p *princ
 	out := []projectView{}
 	for _, x := range list {
 		// Users see the projects they belong to; global roles see all.
-		if ok, err := s.canIn(r.Context(), p, x.ID, store.RoleViewer); err != nil {
+		role, err := s.roleIn(r.Context(), p, x.ID)
+		if err != nil {
 			s.internalError(w, r, "load project roles", err)
 			return
-		} else if ok {
-			out = append(out, viewProject(x))
+		}
+		if role.AtLeast(store.RoleViewer) {
+			out = append(out, viewProject(x, role))
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": out})
@@ -99,7 +110,7 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request, p *pri
 	for i, m := range members {
 		out[i] = projectMemberView{UserID: m.UserID, Email: m.Email, Name: m.Name, Role: m.Role, CreatedAt: m.CreatedAt}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"project": viewProject(pr), "members": out})
+	writeJSON(w, http.StatusOK, map[string]any{"project": s.viewProjectFor(r, p, pr), "members": out})
 }
 
 type projectRequest struct {
@@ -146,7 +157,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request, p *
 		return
 	}
 	s.audit(r, &p.user.ID, "project.created", map[string]any{"project_id": pr.ID, "name": pr.Name})
-	writeJSON(w, http.StatusCreated, map[string]any{"project": viewProject(pr)})
+	writeJSON(w, http.StatusCreated, map[string]any{"project": s.viewProjectFor(r, p, pr)})
 }
 
 func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -172,7 +183,7 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request, p *
 	}
 	s.audit(r, &p.user.ID, "project.updated", map[string]any{"project_id": pr.ID, "name": req.Name})
 	pr, _ = s.db.Project(r.Context(), pr.ID)
-	writeJSON(w, http.StatusOK, map[string]any{"project": viewProject(pr)})
+	writeJSON(w, http.StatusOK, map[string]any{"project": s.viewProjectFor(r, p, pr)})
 }
 
 func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -226,6 +237,47 @@ func (s *Server) handleSetProjectMember(w http.ResponseWriter, r *http.Request, 
 	}
 	s.audit(r, &p.user.ID, "project.member_set", map[string]any{"project_id": pr.ID, "user_id": u.ID, "email": u.Email, "role": req.Role})
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type addMemberRequest struct {
+	Email string     `json:"email"`
+	Role  store.Role `json:"role"`
+}
+
+// handleAddProjectMember adds a user, found by email, to a project (or
+// changes their role): the project's admins cannot list the panel's users.
+func (s *Server) handleAddProjectMember(w http.ResponseWriter, r *http.Request, p *principal) {
+	pr, ok := s.pathProject(w, r, p, store.RoleAdmin)
+	if !ok {
+		return
+	}
+	var req addMemberRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !store.ValidProjectRole(req.Role) {
+		writeError(w, http.StatusUnprocessableEntity, "a project role is admin, member or viewer")
+		return
+	}
+	email, err := normalizeEmail(req.Email)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	u, err := s.db.UserByEmail(r.Context(), email)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusUnprocessableEntity, "no user with this email: an administrator of the panel adds users first")
+		return
+	} else if err != nil {
+		s.internalError(w, r, "load user", err)
+		return
+	}
+	if err := s.db.SetProjectMember(r.Context(), pr.ID, u.ID, req.Role); err != nil {
+		s.internalError(w, r, "set project member", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "project.member_set", map[string]any{"project_id": pr.ID, "user_id": u.ID, "email": u.Email, "role": req.Role})
+	writeJSON(w, http.StatusCreated, map[string]any{"member": projectMemberView{UserID: u.ID, Email: u.Email, Name: u.Name, Role: req.Role, CreatedAt: s.now()}})
 }
 
 func (s *Server) handleRemoveProjectMember(w http.ResponseWriter, r *http.Request, p *principal) {

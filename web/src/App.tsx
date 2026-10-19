@@ -22,6 +22,7 @@ import { NotificationsPage } from "./pages/Notifications";
 import { AccountPage } from "./pages/Account";
 import { AuditPage } from "./pages/Audit";
 import { APIDocsPage } from "./pages/APIDocs";
+import { ProjectPage, ProjectsPage } from "./pages/Projects";
 
 // The signed-in user, or null when signed out. A 401 is a normal answer
 // here, not an error: as an error, every refetch (e.g. on window focus) would
@@ -90,6 +91,9 @@ function Shell({ user }: { user: User }) {
             <Icon name="server" /> Servers
           </NavLink>
         )}
+        <NavLink className="nav-link" to="/projects">
+          <Icon name="layers" /> Projects
+        </NavLink>
         <NavLink className="nav-link" to="/sites">
           <Icon name="globe" /> Sites
         </NavLink>
@@ -159,6 +163,8 @@ function Shell({ user }: { user: User }) {
           <Route path="/" element={<Navigate to={can(user, "viewer") ? "/servers" : "/sites"} replace />} />
           <Route path="/servers" element={<ServersPage user={user} />} />
           <Route path="/servers/:id" element={<ServerPage user={user} />} />
+          <Route path="/projects" element={<ProjectsPage user={user} />} />
+          <Route path="/projects/:id" element={<ProjectPage user={user} />} />
           <Route path="/sites" element={<SitesPage user={user} />} />
           <Route path="/sites/:id/*" element={<SitePage user={user} />} />
           <Route path="/apps" element={<AppsPage user={user} />} />

@@ -4,6 +4,11 @@
 // <Operation>Response is what a route answers, <Operation>Body what it reads;
 // api.check.ts checks the client in api.ts against them.
 
+export interface AddMemberRequest {
+  email?: string;
+  role?: string;
+}
+
 export interface AddPasskeyRequest {
   attestation_object?: string;
   client_data_json?: string;
@@ -917,6 +922,7 @@ export interface ProjectView {
   members: number;
   name: string;
   resources: number;
+  role: string;
 }
 
 export interface ProxySyncView {
@@ -1924,6 +1930,12 @@ export type PostProjectsResponse = {
 };
 
 export type PostProjectsBody = ProjectRequest;
+
+export type PostProjectsIdMembersResponse = {
+  member: ProjectMemberView;
+};
+
+export type PostProjectsIdMembersBody = AddMemberRequest;
 
 export type PostRegistriesResponse = {
   registry: RegistryView;

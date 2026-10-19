@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+
+	"github.com/wiefix/basalt/internal/store"
 )
 
 // TestProjectsAPI: global admins manage projects and their members; new
@@ -93,4 +95,28 @@ func TestProjectsAPI(t *testing.T) {
 	}
 	owner.want(http.StatusNoContent, "DELETE", "/api/v1/projects/"+sid, nil)
 	owner.want(http.StatusNotFound, "GET", "/api/v1/projects/"+sid, nil)
+}
+
+// TestProjectMembersByEmail: project admins add members by email and see
+// their own role in each project.
+func TestProjectMembersByEmail(t *testing.T) {
+	e := newProjectEnv(t)
+	adm := e.user("adm@example.com", store.RoleUser, map[float64]store.Role{e.a: store.RoleAdmin})
+	e.user("bob@example.com", store.RoleUser, nil)
+	path := "/api/v1/projects/" + num(e.a) + "/members"
+	adm.want(http.StatusUnprocessableEntity, "POST", path, map[string]any{"email": "nobody@example.com", "role": "viewer"})
+	adm.want(http.StatusUnprocessableEntity, "POST", path, map[string]any{"email": "bob@example.com", "role": "owner"})
+	m := adm.want(http.StatusCreated, "POST", path, map[string]any{"email": "BOB@example.com", "role": "member"}).body["member"].(map[string]any)
+	if m["email"] != "bob@example.com" || m["role"] != "member" {
+		t.Fatalf("member: %v", m)
+	}
+	list := adm.want(http.StatusOK, "GET", "/api/v1/projects", nil).body["projects"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["role"] != "admin" {
+		t.Fatalf("projects of a project admin: %v", list)
+	}
+	if p := e.owner.want(http.StatusOK, "GET", "/api/v1/projects/"+num(e.a), nil).body["project"].(map[string]any); p["role"] != "owner" {
+		t.Fatalf("owner's role in a project: %v", p["role"])
+	}
+	viewer := e.user("v@example.com", store.RoleUser, map[float64]store.Role{e.a: store.RoleViewer})
+	viewer.want(http.StatusForbidden, "POST", path, map[string]any{"email": "bob@example.com", "role": "admin"})
 }

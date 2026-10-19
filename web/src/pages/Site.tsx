@@ -1,18 +1,21 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
+import { NavLink, Route, Routes, useNavigate, useParams } from "react-router";
 import { api, can, type DatabaseCredentials, type SFTPUser, type Site, type User } from "../api";
 import { FileManager } from "../components/FileManager";
 import { CodeBox, CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useConfirm, useToast } from "../components/ui";
 import { LogView } from "../components/LogView";
 import { AccessLogCard } from "../components/AccessLog";
 import { SyncBadge } from "./Server";
+import { MoveProjectCard, ProjectBadge, ServerLink, useAs } from "../components/projects";
 import { BackupsTab } from "./BackupsTab";
 
-export function SitePage({ user }: { user: User }) {
+export function SitePage({ user: me }: { user: User }) {
   const id = Number(useParams().id);
   const site = useQuery({ queryKey: ["site", id], queryFn: () => api.site(id) });
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
+  // What the user may do here: their role in the site's project.
+  const user = useAs(me, site.data?.site.project_id);
 
   if (site.isPending) return <Loading />;
   if (site.error) return <ErrorBox error={site.error} />;
@@ -31,6 +34,7 @@ export function SitePage({ user }: { user: User }) {
           <div className="row">
             <h1>{s.name}</h1>
             <span className="badge plain">{s.php_version ? `PHP ${s.php_version}` : "static"}</span>
+            <ProjectBadge id={s.project_id} />
             <SyncBadge sync={site.data.sync} />
           </div>
           <div className="sub row wrap">
@@ -40,7 +44,7 @@ export function SitePage({ user }: { user: User }) {
               </a>
             ))}
             <span className="faint">
-              on <Link to={`/servers/${s.server_id}`}>{server?.name ?? `server #${s.server_id}`}</Link>
+              on <ServerLink id={s.server_id} name={server?.name ?? `server #${s.server_id}`} user={me} />
             </span>
           </div>
         </div>
@@ -66,7 +70,10 @@ export function SitePage({ user }: { user: User }) {
         <Route path="databases" element={<DatabasesTab site={s} user={user} />} />
         <Route path="backups" element={<BackupsTab target={{ base: `/api/v1/sites/${s.id}`, name: s.name, siteId: s.id }} user={user} />} />
         <Route path="logs" element={<LogsTab site={s} user={user} />} />
-        <Route path="settings" element={<SettingsTab site={s} phpVersions={server?.isolated ? server.php_versions : []} phpLimits={!!server?.php_limits} />} />
+        <Route
+          path="settings"
+          element={<SettingsTab site={s} phpVersions={server?.isolated ? server.php_versions : []} phpLimits={!!server?.php_limits} panelAdmin={can(me, "admin")} />}
+        />
       </Routes>
     </>
   );
@@ -426,12 +433,13 @@ function EditSFTPModal({
   );
 }
 
-function SettingsTab({ site, phpVersions, phpLimits }: { site: Site; phpVersions: string[]; phpLimits: boolean }) {
+function SettingsTab({ site, phpVersions, phpLimits, panelAdmin }: { site: Site; phpVersions: string[]; phpLimits: boolean; panelAdmin: boolean }) {
   return (
     <div className="stack" style={{ maxWidth: 640 }}>
       <UsageCard site={site} />
       <RuntimeCard site={site} phpVersions={phpVersions} />
       {site.php_version && <PHPOptionsCard site={site} limits={phpLimits} />}
+      {panelAdmin && <MoveProjectCard kind="sites" id={site.id} current={site.project_id} what="the site" />}
       <DeleteCard site={site} />
     </div>
   );

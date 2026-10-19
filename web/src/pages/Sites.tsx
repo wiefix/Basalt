@@ -1,37 +1,44 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router";
-import { api, can, type User } from "../api";
+import { api, type User } from "../api";
 import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useToast } from "../components/ui";
+import { ProjectBadge, ProjectFilter, ProjectSelect, ServerLink, useCanCreate, useNewProject, useProjectFilter } from "../components/projects";
 
 export function SitesPage({ user }: { user: User }) {
   const sites = useQuery({ queryKey: ["sites"], queryFn: api.sites });
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
   const [adding, setAdding] = useState(false);
   const serverName = (id: number) => servers.data?.servers.find((s) => s.id === id)?.name ?? `#${id}`;
+  const canCreate = useCanCreate(user);
+  const [project, setProject] = useProjectFilter();
+  const list = (sites.data?.sites ?? []).filter((s) => !project || s.project_id === project);
 
   return (
     <>
       <div className="page-head">
         <div>
           <h1>Sites</h1>
-          <div className="sub">Static websites. Upload files and they are live over HTTPS.</div>
+          <div className="sub">Static and PHP websites. Upload files and they are live over HTTPS.</div>
         </div>
-        {can(user, "admin") && (
+        <div className="row">
+        <ProjectFilter value={project} onChange={setProject} />
+        {canCreate && (
           <button className="btn primary" onClick={() => setAdding(true)}>
             <Icon name="plus" /> New site
           </button>
         )}
+        </div>
       </div>
       {sites.isPending ? (
         <Loading />
       ) : sites.error ? (
         <ErrorBox error={sites.error} />
-      ) : sites.data.sites.length === 0 ? (
+      ) : list.length === 0 ? (
         <div className="card empty">
           <h3>No sites yet</h3>
           <p>Create a site, point its domain at your server, and upload your files.</p>
-          {can(user, "admin") && (
+          {canCreate && (
             <button className="btn primary" onClick={() => setAdding(true)}>
               <Icon name="plus" /> Create a site
             </button>
@@ -50,13 +57,14 @@ export function SitesPage({ user }: { user: User }) {
               </tr>
             </thead>
             <tbody>
-              {sites.data.sites.map((s) => (
+              {list.map((s) => (
                 <tr key={s.id}>
                   <td>
                     <Link to={`/sites/${s.id}`}>
                       <strong>{s.name}</strong>
                     </Link>{" "}
                     <span className="badge plain">{s.php_version ? `PHP ${s.php_version}` : "static"}</span>
+                    <ProjectBadge id={s.project_id} />
                   </td>
                   <td>
                     {s.domains.map((d) => (
@@ -68,9 +76,7 @@ export function SitesPage({ user }: { user: User }) {
                     ))}
                   </td>
                   <td>
-                    <Link to={`/servers/${s.server_id}`} className="muted">
-                      {serverName(s.server_id)}
-                    </Link>
+                    <ServerLink id={s.server_id} name={serverName(s.server_id)} user={user} className="muted" />
                   </td>
                   <td className="num muted hide-sm">
                     {s.usage?.at ? formatBytes(s.usage.disk_bytes + s.usage.db_bytes) : "—"}
@@ -102,6 +108,7 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
   const [domains, setDomains] = useState("");
   const [tls, setTls] = useState("auto");
   const [php, setPhp] = useState("");
+  const [projectId, setProjectId] = useNewProject();
   const server = enrolled.find((s) => s.id === Number(serverId || enrolled[0]?.id));
   const phpVersions = server?.isolated ? server.php_versions : [];
   const canWordPress = phpVersions.length > 0 && !!server?.mariadb;
@@ -115,6 +122,7 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
         domains: domains.split(/[\s,]+/).filter(Boolean),
         tls,
         php_version: wordpress ? phpVersions[0] : php,
+        project_id: projectId,
       });
       if (wordpress) {
         try {
@@ -161,6 +169,7 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
           }}
         >
           <ErrorBox error={create.error} />
+          <ProjectSelect value={projectId} onChange={setProjectId} />
           <Field label="Name" help="Used in the panel and as a default SFTP username.">
             <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-blog" required autoFocus />
           </Field>
