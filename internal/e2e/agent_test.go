@@ -82,6 +82,9 @@ func startPanelWith(t *testing.T, o server.Options) *panel {
 	}
 	// Every response must match the API description.
 	o.CheckResponses = func(msg string) { t.Errorf("%s", msg) }
+	if o.NotifyWindow == 0 {
+		o.NotifyWindow = 20 * time.Millisecond // tests do not wait 10 s per notification
+	}
 	srv := server.New(o)
 	hub.ServeReleases(filepath.Join(o.DataDir, "releases"))
 	hub.OnACMEChallenge(srv.ACMEChallenge)

@@ -77,6 +77,7 @@ const (
 	notifyWait = time.Minute
 	// notifyQueued messages may wait per channel; more are dropped.
 	notifyQueued = 1000
+	notifyWindow = 10 * time.Second
 	telegramAPI  = "https://api.telegram.org"
 )
 
@@ -527,41 +528,96 @@ func (s *Server) notify(m notify.Message) {
 	if m.At.IsZero() {
 		m.At = s.now()
 	}
-	go func() {
-		ctx := context.Background()
-		// m.Link is a page of the panel: a link only once its address is known.
-		if base := s.panelURL(ctx); base != "" && strings.HasPrefix(m.Link, "/") {
-			m.Link = base + m.Link
-		} else {
-			m.Link = ""
+	if s.notifyWindow <= 0 {
+		go s.enqueue(m)
+		return
+	}
+	// Messages of one event within notifyWindow go out together: one down
+	// server fails many health checks at once.
+	s.batchMu.Lock()
+	defer s.batchMu.Unlock()
+	if s.batches[m.Event] == nil {
+		event := m.Event
+		time.AfterFunc(s.notifyWindow, func() { s.flushBatch(event) })
+	}
+	s.batches[m.Event] = append(s.batches[m.Event], m)
+}
+
+func (s *Server) flushBatch(event string) {
+	s.batchMu.Lock()
+	msgs := s.batches[event]
+	delete(s.batches, event)
+	s.batchMu.Unlock()
+	for _, m := range summarize(msgs) {
+		s.enqueue(m)
+	}
+}
+
+// notifySummaryFrom: this many messages of one event at once become one.
+const notifySummaryFrom = 3
+
+// summarize merges a burst of messages of one event into one that lists
+// them all; fewer than notifySummaryFrom stay as they are.
+func summarize(msgs []notify.Message) []notify.Message {
+	if len(msgs) < notifySummaryFrom {
+		return msgs
+	}
+	first := msgs[0]
+	sum := notify.Message{Event: first.Event, At: first.At, Link: first.Link,
+		Title: fmt.Sprintf("%s and %d more", first.Title, len(msgs)-1)}
+	var b strings.Builder
+	const listed = 20
+	for i, m := range msgs {
+		if m.Link != sum.Link {
+			sum.Link = "" // no one page is about them all
 		}
-		list, err := s.db.NotificationChannels(ctx)
-		if err != nil {
-			s.log.Error("list notification channels", "err", err)
-			return
+		if i < listed {
+			b.WriteString("• " + m.Title + "\n")
 		}
-		var ids []int64
-		for _, c := range list {
-			if slices.Contains(c.Events, m.Event) {
-				ids = append(ids, c.ID)
-			}
+	}
+	if len(msgs) > listed {
+		fmt.Fprintf(&b, "… and %d more\n", len(msgs)-listed)
+	}
+	sum.Text = strings.TrimSuffix(b.String(), "\n")
+	return []notify.Message{sum}
+}
+
+// enqueue stores m for every channel subscribed to its event and starts
+// delivering it.
+func (s *Server) enqueue(m notify.Message) {
+	ctx := context.Background()
+	// m.Link is a page of the panel: a link only once its address is known.
+	if base := s.panelURL(ctx); base != "" && strings.HasPrefix(m.Link, "/") {
+		m.Link = base + m.Link
+	} else {
+		m.Link = ""
+	}
+	list, err := s.db.NotificationChannels(ctx)
+	if err != nil {
+		s.log.Error("list notification channels", "err", err)
+		return
+	}
+	var ids []int64
+	for _, c := range list {
+		if slices.Contains(c.Events, m.Event) {
+			ids = append(ids, c.ID)
 		}
-		if len(ids) == 0 {
-			return
-		}
-		body, _ := json.Marshal(m)
-		queued, err := s.db.QueueNotification(ctx, ids, body, s.now().Add(notifyLease), notifyQueued)
-		if err != nil {
-			s.log.Error("queue notification", "event", m.Event, "err", err)
-			return
-		}
-		if len(queued) < len(ids) {
-			s.log.Warn("notification dropped: too many waiting for a channel", "event", m.Event, "channels", len(ids)-len(queued))
-		}
-		for _, q := range queued {
-			go s.runQueued(q)
-		}
-	}()
+	}
+	if len(ids) == 0 {
+		return
+	}
+	body, _ := json.Marshal(m)
+	queued, err := s.db.QueueNotification(ctx, ids, body, s.now().Add(notifyLease), notifyQueued)
+	if err != nil {
+		s.log.Error("queue notification", "event", m.Event, "err", err)
+		return
+	}
+	if len(queued) < len(ids) {
+		s.log.Warn("notification dropped: too many waiting for a channel", "event", m.Event, "channels", len(ids)-len(queued))
+	}
+	for _, q := range queued {
+		go s.runQueued(q)
+	}
 }
 
 // runQueued delivers a queued message, retrying after the pauses of

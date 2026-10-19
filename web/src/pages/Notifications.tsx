@@ -143,7 +143,7 @@ export function NotificationsPage({ user }: { user: User }) {
       )}
       <PanelURLCard url={panel_url} />
       <p className="faint small">
-        A failed delivery is tried again after 10 seconds, a minute, 5 and 30 minutes and 2 hours, also after a restart of the panel. A health check notifies when it goes down
+        A failed delivery is tried again after 10 seconds, a minute, 5 and 30 minutes and 2 hours, also after a restart of the panel. Three or more messages of one kind within 10 seconds (a server down fails many health checks) arrive as one. A health check notifies when it goes down
         and when it comes back.
       </p>
       {editing && (

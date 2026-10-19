@@ -40,6 +40,9 @@ func newTestServerWith(t *testing.T, o Options) *Server {
 	o.DB = db
 	o.Box = box
 	o.Hasher = auth.NewHasher(auth.Argon2Params{Memory: 1024, Time: 1, Threads: 1}, 4)
+	if o.NotifyWindow == 0 {
+		o.NotifyWindow = 20 * time.Millisecond // tests do not wait 10 s per notification
+	}
 	// Every response must match the API description.
 	o.CheckResponses = func(msg string) { t.Errorf("%s", msg) }
 	return New(o)

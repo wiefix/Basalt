@@ -15,6 +15,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/auth"
 	"github.com/wiefix/basalt/internal/catalog"
+	"github.com/wiefix/basalt/internal/notify"
 	"github.com/wiefix/basalt/internal/secrets"
 	"github.com/wiefix/basalt/internal/store"
 )
@@ -64,6 +65,10 @@ type Options struct {
 	// Discord and Telegram deliveries may reach private addresses.
 	TelegramAPI   string
 	NotifyRetries []time.Duration
+	// NotifyWindow is how long messages of one event are gathered before
+	// they go out, merged into one when there are several (default 10
+	// seconds; negative: each goes out at once).
+	NotifyWindow time.Duration
 	// OfflineAfter is how long a server's agent stays away before a
 	// notification (default 5 minutes).
 	OfflineAfter time.Duration
@@ -118,6 +123,9 @@ type Server struct {
 	notifyPrivate     bool            // tests: chat services on private addresses
 	notifyRetries     []time.Duration // pauses before delivery attempts
 	notifySem         chan struct{}   // deliveries running at once
+	notifyWindow      time.Duration   // messages of one event gathered this long
+	batchMu           sync.Mutex
+	batches           map[string][]notify.Message // by event, until sent
 	offlineAfter      time.Duration
 	certCheckEvery    time.Duration
 	auditCheckEvery   time.Duration
@@ -167,6 +175,9 @@ func New(o Options) *Server {
 	if o.TelegramAPI == "" {
 		o.TelegramAPI = telegramAPI
 	}
+	if o.NotifyWindow == 0 {
+		o.NotifyWindow = notifyWindow
+	}
 	if len(o.NotifyRetries) == 0 {
 		o.NotifyRetries = notifyRetries
 	}
@@ -205,6 +216,8 @@ func New(o Options) *Server {
 		telegramAPI:     o.TelegramAPI,
 		notifyPrivate:   notifyPrivate,
 		notifyRetries:   o.NotifyRetries,
+		notifyWindow:    o.NotifyWindow,
+		batches:         map[string][]notify.Message{},
 		notifySem:       make(chan struct{}, notifyWorkers),
 		offlineAfter:    o.OfflineAfter,
 		certCheckEvery:  o.CertCheckEvery,
