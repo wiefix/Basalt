@@ -33,7 +33,10 @@ sleep 3
 
 PANELIP=$(docker inspect -f '{{(index .NetworkSettings.Networks "basalt-net").IPAddress}}' basalt-panel)
 echo "### install panel (agents connect to its IP, as with a domain behind a proxy)"
-docker exec basalt-panel sh /deploy/install.sh panel --binary /dist/basalt-linux-$ARCH --agent-host "$PANELIP"
+OUT=$(docker exec basalt-panel sh /deploy/install.sh panel --binary /dist/basalt-linux-$ARCH --agent-host "$PANELIP" 2>&1) || { echo "$OUT"; exit 1; }
+echo "$OUT"
+# The installer's service starts the agent: no advice to start it by hand.
+case "$OUT" in *"start the agent with"*) echo "the installer tells to start the agent by hand"; exit 6 ;; esac
 echo "### a second run without --agent-host keeps it"
 docker exec basalt-panel sh /deploy/install.sh panel --binary /dist/basalt-linux-$ARCH >/dev/null
 docker exec basalt-panel grep -q -- "--agent-url https://$PANELIP:8443 " /etc/systemd/system/basalt-server.service

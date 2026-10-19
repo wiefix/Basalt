@@ -59,6 +59,10 @@ func newUpdater(cfg Config, log *slog.Logger) *updater {
 	return u
 }
 
+// InstalledAsService tells whether the installer set this host up: its
+// basalt-agent service runs the agent.
+func InstalledAsService() bool { return systemdUnits() != nil }
+
 // systemdUnits lists the installed Basalt units; nil without systemd or
 // without the agent's unit (not installed by the installer).
 func systemdUnits() []string {

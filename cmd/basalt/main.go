@@ -337,8 +337,11 @@ func runAgentEnroll(ctx context.Context, args []string, stderr io.Writer) error 
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stderr, "enrolled as server %d; credentials saved in %s\nstart the agent with: basalt agent --data-dir %s\n",
-		id, cfg.DataDir, cfg.DataDir)
+	fmt.Fprintf(stderr, "enrolled as server %d; credentials saved in %s\n", id, cfg.DataDir)
+	// Installed by install.sh, whose service starts the agent next.
+	if !agent.InstalledAsService() {
+		fmt.Fprintf(stderr, "start the agent with: basalt agent --data-dir %s\n", cfg.DataDir)
+	}
 	return nil
 }
 
