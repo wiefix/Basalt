@@ -143,13 +143,8 @@ func (s *Server) handleSetRecovery(w http.ResponseWriter, r *http.Request, p *pr
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	ok, _, err := s.hasher.Verify(r.Context(), p.user.PasswordHash, req.Password)
-	if err != nil {
-		s.internalError(w, r, "verify password", err)
-		return
-	}
-	if !ok {
-		writeError(w, http.StatusForbidden, "wrong password")
+	// Rate-limited like every other password check of a signed-in user.
+	if !s.checkPassword(w, r, p, req.Password) {
 		return
 	}
 	if len(req.Passphrase) < secrets.MinPassphrase || len(req.Passphrase) > 1024 {

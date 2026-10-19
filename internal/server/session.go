@@ -70,7 +70,8 @@ func (s *Server) clearSessionCookie(w http.ResponseWriter) {
 // startSession creates a new session with a fresh token and sets the cookie.
 // Any session the request arrived with is deleted (prevents session fixation).
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID int64, mfaPending bool) error {
-	if p := principalFrom(r.Context()); p != nil {
+	// A request with an API token has no session to replace.
+	if p := principalFrom(r.Context()); p != nil && p.session != nil {
 		if err := s.db.DeleteSession(r.Context(), p.session.TokenHash); err != nil {
 			return err
 		}

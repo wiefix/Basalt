@@ -447,3 +447,44 @@ func mustURL(s string) *url.URL {
 	}
 	return u
 }
+
+// TestSignInWithAPITokenHeader: a sign-in request that also carries an API
+// token (a script reusing its headers) starts a session; it must not fail
+// on the token having no session to replace.
+func TestSignInWithAPITokenHeader(t *testing.T) {
+	e := newEnv(t)
+	c := e.setupOwner()
+	secret := c.want(http.StatusCreated, "POST", "/api/v1/account/tokens", map[string]any{
+		"name": "ci", "role": "viewer", "expires_days": 0, "password": ownerPass}).body["secret"].(string)
+	req, _ := http.NewRequest("POST", e.ts.URL+"/api/v1/auth/login",
+		strings.NewReader(`{"email":"`+ownerEmail+`","password":"`+ownerPass+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+secret)
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Body.Close()
+	if r.StatusCode != http.StatusOK || len(r.Cookies()) == 0 {
+		t.Fatalf("login with a token header: %d, cookies %v", r.StatusCode, r.Cookies())
+	}
+}
+
+// TestRecoveryPassphraseRateLimited: guessing the owner's password through
+// the recovery passphrase form is limited like any password check.
+func TestRecoveryPassphraseRateLimited(t *testing.T) {
+	e := newEnv(t)
+	c := e.setupOwner()
+	body := map[string]string{"password": "wrong password!!", "passphrase": "violet tractor sings at dawn"}
+	for i := range 5 {
+		if r := c.do("PUT", "/api/v1/panel-backup/recovery", body); r.status != http.StatusForbidden {
+			t.Fatalf("attempt %d: %d", i, r.status)
+		}
+	}
+	body["password"] = ownerPass
+	if r := c.do("PUT", "/api/v1/panel-backup/recovery", body); r.status != http.StatusTooManyRequests {
+		t.Fatalf("after 5 wrong passwords: %d; want 429", r.status)
+	}
+	e.clock.Advance(time.Minute)
+	c.want(http.StatusOK, "PUT", "/api/v1/panel-backup/recovery", body)
+}
