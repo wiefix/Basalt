@@ -31,7 +31,9 @@ import (
 )
 
 const (
-	metricsRetention = 48 * time.Hour
+	// metricsRetention: metrics older than store.RawMetricsKept are kept
+	// as 5-minute averages (store.RollUpMetrics) for this long.
+	metricsRetention = store.MetricsKept
 	maxAppMetrics    = 1000 // apps per sample
 	writeTimeout     = 15 * time.Second
 	maxEnrollBody    = 64 << 10
@@ -160,6 +162,9 @@ func (h *Hub) pruneLoop(ctx context.Context) {
 	t := time.NewTicker(time.Hour)
 	defer t.Stop()
 	for {
+		if _, err := h.db.RollUpMetrics(ctx, h.now()); err != nil && ctx.Err() == nil {
+			h.log.Error("roll up metrics", "err", err)
+		}
 		if _, err := h.db.DeleteMetricsBefore(ctx, h.now().Add(-metricsRetention)); err != nil && ctx.Err() == nil {
 			h.log.Error("prune metrics", "err", err)
 		}

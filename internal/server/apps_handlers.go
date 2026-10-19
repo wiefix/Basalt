@@ -984,7 +984,7 @@ type appMetricsView struct {
 }
 
 // handleAppMetrics returns the resource usage of an app's containers over
-// the last ?minutes= (default 60, at most 48 hours).
+// the last ?minutes= (default 60, at most maxMetricsMinutes).
 func (s *Server) handleAppMetrics(w http.ResponseWriter, r *http.Request, p *principal) {
 	app, ok := s.pathApp(w, r)
 	if !ok {
@@ -993,8 +993,8 @@ func (s *Server) handleAppMetrics(w http.ResponseWriter, r *http.Request, p *pri
 	minutes := 60
 	if v := r.URL.Query().Get("minutes"); v != "" {
 		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > 48*60 {
-			writeError(w, http.StatusUnprocessableEntity, "minutes must be between 1 and 2880")
+		if err != nil || n < 1 || n > maxMetricsMinutes {
+			writeError(w, http.StatusUnprocessableEntity, "minutes must be between 1 and 43200 (30 days)")
 			return
 		}
 		minutes = n

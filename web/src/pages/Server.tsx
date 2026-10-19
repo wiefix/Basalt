@@ -2,7 +2,7 @@ import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router";
 import { api, can, type Enrollment, type Route, type Server, type Sync, type User } from "../api";
-import { Chart } from "../components/Chart";
+import { Chart, RangePicker, rangeRefresh, rangeTitle } from "../components/Chart";
 import {
   ErrorBox,
   Field,
@@ -31,10 +31,12 @@ export function ServerPage({ user }: { user: User }) {
   const [enrollment, setEnrollment] = useState<Enrollment | null>(null);
 
   const server = useQuery({ queryKey: ["server", id], queryFn: () => api.server(id), refetchInterval: 10_000 });
+  const [period, setPeriod] = useState(60);
   const metrics = useQuery({
-    queryKey: ["metrics", id],
-    queryFn: () => api.serverMetrics(id, 60),
-    refetchInterval: 10_000,
+    queryKey: ["metrics", id, period],
+    queryFn: () => api.serverMetrics(id, period),
+    placeholderData: (prev) => prev,
+    refetchInterval: rangeRefresh(period),
     enabled: server.data?.server.status !== "pending",
   });
 
@@ -156,13 +158,16 @@ export function ServerPage({ user }: { user: User }) {
             <Stat label="Uptime" value={m && m.uptime ? formatUptime(m.uptime) : "—"} hint={s.kernel ? `kernel ${s.kernel}` : ""} />
           </div>
 
+          <div className="row" style={{ justifyContent: "flex-end" }}>
+            <RangePicker value={period} onChange={setPeriod} />
+          </div>
           <div className="grid-2">
             <div className="card card-body">
-              <h3>CPU · last hour</h3>
+              <h3>CPU · {rangeTitle(period)}</h3>
               <Chart points={series((x) => x.cpu_pct)} max={100} format={(v) => `${v.toFixed(0)}%`} />
             </div>
             <div className="card card-body">
-              <h3>Memory · last hour</h3>
+              <h3>Memory · {rangeTitle(period)}</h3>
               <Chart
                 points={series((x) => x.mem_used)}
                 max={m?.mem_total || undefined}

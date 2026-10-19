@@ -29,7 +29,7 @@ import {
 } from "../components/ui";
 import { useEventStream, type StreamState } from "../components/stream";
 import { Stat, SyncBadge } from "./Server";
-import { Chart } from "../components/Chart";
+import { Chart, RangePicker, rangeRefresh, rangeTitle } from "../components/Chart";
 import { BackupsTab } from "./BackupsTab";
 import { LogView } from "../components/LogView";
 import { AccessLogCard } from "../components/AccessLog";
@@ -1171,10 +1171,12 @@ const rate = (a: { at: string; v: number }, b: { at: string; v: number }) => {
 };
 
 function ResourcesCard({ app, running }: { app: App; running: boolean }) {
+  const [period, setPeriod] = useState(60);
   const metrics = useQuery({
-    queryKey: ["app-metrics", app.id],
-    queryFn: () => api.appMetrics(app.id, 60),
-    refetchInterval: 10_000,
+    queryKey: ["app-metrics", app.id, period],
+    queryFn: () => api.appMetrics(app.id, period),
+    placeholderData: (prev) => prev,
+    refetchInterval: rangeRefresh(period),
   });
   const list = metrics.data?.metrics ?? [];
   if (list.length === 0) return null;
@@ -1201,18 +1203,21 @@ function ResourcesCard({ app, running }: { app: App; running: boolean }) {
         <Stat label="Network in" value={stale ? "—" : `${formatBytes(rx)}/s`} hint={`${formatBytes(last.net_rx)} since start`} />
         <Stat label="Network out" value={stale ? "—" : `${formatBytes(tx)}/s`} hint={`${formatBytes(last.net_tx)} since start`} />
       </div>
+      <div className="row" style={{ justifyContent: "flex-end" }}>
+        <RangePicker value={period} onChange={setPeriod} />
+      </div>
       <div className="grid-2">
         <div className="card card-body">
-          <h3>CPU · last hour</h3>
+          <h3>CPU · {rangeTitle(period)}</h3>
           <Chart points={series((x) => x.cpu_pct)} format={(v) => `${v.toFixed(v < 10 ? 1 : 0)}%`} />
         </div>
         <div className="card card-body">
-          <h3>Memory · last hour</h3>
+          <h3>Memory · {rangeTitle(period)}</h3>
           <Chart points={series((x) => x.mem_used)} format={(v) => formatBytes(v)} />
         </div>
       </div>
       <div className="card card-body">
-        <h3>Network traffic · last hour</h3>
+        <h3>Network traffic · {rangeTitle(period)}</h3>
         <Chart points={traffic} format={(v) => `${formatBytes(v)}/s`} />
       </div>
     </div>

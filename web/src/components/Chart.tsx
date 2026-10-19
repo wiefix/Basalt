@@ -1,5 +1,43 @@
 // Minimal dependency-free line chart for metric time series.
 
+// The periods metric charts can show. Samples older than 6 hours are
+// 5-minute averages on the server; 30 days is as far back as they go.
+export const RANGES: { minutes: number; label: string; title: string }[] = [
+  { minutes: 60, label: "1h", title: "last hour" },
+  { minutes: 360, label: "6h", title: "last 6 hours" },
+  { minutes: 1440, label: "24h", title: "last 24 hours" },
+  { minutes: 10080, label: "7d", title: "last 7 days" },
+  { minutes: 43200, label: "30d", title: "last 30 days" },
+];
+
+export const rangeTitle = (minutes: number) => RANGES.find((r) => r.minutes === minutes)?.title ?? "";
+
+// How often a chart over this period is refreshed: a new sample matters
+// less the longer the period.
+export const rangeRefresh = (minutes: number) => (minutes <= 360 ? 10_000 : 60_000);
+
+export function RangePicker({ value, onChange }: { value: number; onChange: (minutes: number) => void }) {
+  return (
+    <div className="segmented" role="group" aria-label="Period">
+      {RANGES.map((r) => (
+        <button
+          key={r.minutes}
+          type="button"
+          className={value === r.minutes ? "active" : ""}
+          title={r.title}
+          onClick={() => onChange(r.minutes)}
+        >
+          {r.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// GAP: samples further apart than this are not joined (raw samples are
+// 10 seconds apart, averaged ones 5 minutes).
+const GAP = 15 * 60_000;
+
 export function Chart({
   points,
   max,
@@ -20,10 +58,25 @@ export function Chart({
   const top = max ?? (Math.max(...points.map((p) => p.v)) * 1.15 || 1);
   const x = (t: number) => pad.l + ((t - t0) / Math.max(1, t1 - t0)) * (W - pad.l - pad.r);
   const y = (v: number) => pad.t + (1 - Math.min(v, top) / top) * (H - pad.t - pad.b);
-  const line = points.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join("");
-  const area = `${line}L${x(t1).toFixed(1)},${y(0)}L${x(t0).toFixed(1)},${y(0)}Z`;
+  // A gap in the samples (the server or the panel was down) breaks the
+  // line instead of bridging it.
+  const runs: { t: number; v: number }[][] = [];
+  points.forEach((p, i) => {
+    if (i === 0 || p.t - points[i - 1].t > GAP) runs.push([]);
+    runs[runs.length - 1].push(p);
+  });
+  const path = (run: { t: number; v: number }[]) =>
+    run.map((p, i) => `${i ? "L" : "M"}${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join("");
+  const line = runs.map(path).join("");
+  const area = runs
+    .map((run) => `${path(run)}L${x(run[run.length - 1].t).toFixed(1)},${y(0)}L${x(run[0].t).toFixed(1)},${y(0)}Z`)
+    .join("");
   const ticks = [0, top / 2, top];
-  const time = (t: number) => new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  // Over more than a day, the axis shows dates.
+  const time = (t: number) =>
+    t1 - t0 > 20 * 3600_000
+      ? new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+      : new Date(t).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
   return (
     <svg className="chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img">

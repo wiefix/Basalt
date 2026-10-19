@@ -112,7 +112,7 @@ var apiDocs = map[string]apiDoc{
 	"POST /api/v1/servers":                     {summary: "Add a server; returns its one-time install command", body: createServerRequest{}, resp: obj("server", serverView{}, "enrollment", enrollmentView{})},
 	"GET /api/v1/servers/{id}":                 {summary: "A server with its latest metrics", resp: obj("server", serverView{}, "metrics?", metricsView{})},
 	"DELETE /api/v1/servers/{id}":              {summary: "Remove a server (its agent loses access)", resp: noContent},
-	"GET /api/v1/servers/{id}/metrics":         {summary: "A server's metrics", query: []queryParam{q("minutes", "how far back, default 60")}, resp: obj("metrics", []metricsView{})},
+	"GET /api/v1/servers/{id}/metrics":         {summary: "A server's metrics", query: []queryParam{q("minutes", "how far back, default 60, at most 43200 (30 days); samples older than 6 hours are 5-minute averages")}, resp: obj("metrics", []metricsView{})},
 	"GET /api/v1/servers/{id}/certificates":    {summary: "Public certificates of the server's domains and their expiry", resp: obj("certificates", []certView{})},
 	"POST /api/v1/servers/{id}/ping":           {summary: "Round trip to the server's agent", resp: obj("rtt_ms", 0.0, "agent_time", time.Time{})},
 	"PUT /api/v1/servers/{id}/public-ips":      {summary: "Set the addresses automatic DNS records use (empty: detected)", body: publicIPsRequest{}, resp: obj("server", serverView{})},
@@ -285,7 +285,7 @@ var apiDocs = map[string]apiDoc{
 	"GET /api/v1/apps/{id}/deployments/{did}":         {summary: "A deployment with its log", resp: deployResp},
 	"POST /api/v1/apps/{id}/deployments/{did}/cancel": {summary: "Stop a running deployment (the previous one keeps running)", resp: obj()},
 	"GET /api/v1/apps/{id}/deployments/{did}/stream":  {summary: "Follow a deployment's log", content: "stream"},
-	"GET /api/v1/apps/{id}/metrics":                   {summary: "An app's container metrics", query: []queryParam{q("minutes", "how far back, default 60")}, resp: obj("metrics", []appMetricsView{})},
+	"GET /api/v1/apps/{id}/metrics":                   {summary: "An app's container metrics", query: []queryParam{q("minutes", "how far back, default 60, at most 43200 (30 days); samples older than 6 hours are 5-minute averages")}, resp: obj("metrics", []appMetricsView{})},
 	"GET /api/v1/apps/{id}/status": {summary: "State of an app's containers", query: []queryParam{
 		q("service", "compose service"), q("server", "server ID (apps on several servers)")}, resp: obj("status", agentproto.AppStatus{})},
 	"GET /api/v1/apps/{id}/logs": {summary: "Last lines of an app's container output", query: []queryParam{

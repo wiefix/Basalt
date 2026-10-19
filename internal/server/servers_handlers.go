@@ -214,6 +214,10 @@ type metricsView struct {
 
 func viewMetrics(m store.ServerMetrics) metricsView { return metricsView(m) }
 
+// maxMetricsMinutes is how far back metrics go (store.MetricsKept); samples
+// older than store.RawMetricsKept are 5-minute averages.
+const maxMetricsMinutes = int(store.MetricsKept / time.Minute)
+
 func (s *Server) handleServerMetrics(w http.ResponseWriter, r *http.Request, p *principal) {
 	srv, ok := s.pathServer(w, r)
 	if !ok {
@@ -222,8 +226,8 @@ func (s *Server) handleServerMetrics(w http.ResponseWriter, r *http.Request, p *
 	minutes := 60
 	if v := r.URL.Query().Get("minutes"); v != "" {
 		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > 48*60 {
-			writeError(w, http.StatusUnprocessableEntity, "minutes must be between 1 and 2880")
+		if err != nil || n < 1 || n > maxMetricsMinutes {
+			writeError(w, http.StatusUnprocessableEntity, "minutes must be between 1 and 43200 (30 days)")
 			return
 		}
 		minutes = n
