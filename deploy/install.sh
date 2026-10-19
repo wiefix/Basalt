@@ -1,7 +1,13 @@
 #!/bin/sh
 # Basalt installer for Debian and Ubuntu (amd64, arm64).
 #
-#   Panel host:  sh install.sh panel [--domain panel.example.com] [--binary ./basalt] [--with-php] [--with-mariadb] [--with-docker] [--with-dns]
+#   Panel host:  sh install.sh panel [--domain panel.example.com] [--agent-host agents.example.com] [--binary ./basalt] [--with-php] [--with-mariadb] [--with-docker] [--with-dns]
+#
+#   --agent-host is the name or IP other servers' agents connect to (port
+#   8443; default: the domain, else this server's IP). It must reach this
+#   server directly: a TLS proxy (Cloudflare's orange cloud) breaks the
+#   agents' mutual TLS, so with the panel's domain behind one, give a
+#   DNS-only name or the IP. It is kept for later runs.
 #   New server:  the one-line command shown in the panel ("Add server"), which runs
 #                sh install.sh agent --panel https://HOST:8443 --token TOKEN --ca-sha256 FINGERPRINT
 #
@@ -42,10 +48,11 @@ usage() {
 MODE=${1:-}
 [ -n "$MODE" ] || usage
 shift
-DOMAIN="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0 USERNS=auto WITH_DNS=keep PURGE=0 YES=0
+DOMAIN="" AGENT_HOST="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0 USERNS=auto WITH_DNS=keep PURGE=0 YES=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--domain) DOMAIN=$2; shift 2 ;;
+	--agent-host) AGENT_HOST=$2; shift 2 ;;
 	--binary) BINARY=$2; shift 2 ;;
 	--panel) PANEL=$2; shift 2 ;;
 	--token) TOKEN=$2; shift 2 ;;
@@ -67,6 +74,9 @@ done
 # ---------- checks ----------
 
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo sh install.sh ...)"
+case "$AGENT_HOST" in
+*[!A-Za-z0-9.:\[\]-]*) die "--agent-host must be a host name or an IP address" ;;
+esac
 [ -r /etc/os-release ] || die "cannot detect the operating system"
 . /etc/os-release
 case " ${ID:-} ${ID_LIKE:-} " in
@@ -302,6 +312,16 @@ public_ip() {
 ADDR=${DOMAIN:-$(public_ip)}
 [ -n "$ADDR" ] || ADDR=$(hostname)
 
+# Where other servers' agents reach the panel: given once, remembered.
+if [ "$MODE" = panel ]; then
+	if [ -n "$AGENT_HOST" ]; then
+		printf '%s\n' "$AGENT_HOST" >"$LIB/server/agent-host"
+	elif [ -s "$LIB/server/agent-host" ]; then
+		AGENT_HOST=$(cat "$LIB/server/agent-host")
+	fi
+	AGENT_HOST=${AGENT_HOST:-$ADDR}
+fi
+
 # ---------- systemd units ----------
 
 HARDEN='NoNewPrivileges=yes
@@ -334,7 +354,7 @@ Wants=network-online.target
 [Service]
 User=basalt
 Group=basalt
-ExecStart=$BIN server --data-dir $LIB/server --listen 127.0.0.1:8080 --agent-listen :8443 --agent-url https://$ADDR:8443 --trusted-proxies 127.0.0.1,::1 --log-format json
+ExecStart=$BIN server --data-dir $LIB/server --listen 127.0.0.1:8080 --agent-listen :8443 --agent-url https://$AGENT_HOST:8443 --trusted-proxies 127.0.0.1,::1 --log-format json
 Restart=always
 RestartSec=2
 UMask=0077
@@ -474,6 +494,10 @@ if [ "$MODE" = panel ]; then
 	*[!0-9.]*) ;;
 	*) echo "  (No domain given: the browser will warn about the certificate. Re-run with --domain to get Let's Encrypt.)" ;;
 	esac
+	echo
+	echo "  Agents:       other servers connect to $AGENT_HOST:8443. It must lead to this server"
+	echo "                directly, not through a proxy such as Cloudflare's (use a DNS-only name"
+	echo "                or the IP: re-run with --agent-host)."
 	echo
 	echo "  Open these ports: 80/tcp, 443/tcp+udp (sites), 8443/tcp (other servers' agents), 2222/tcp (SFTP)"
 else

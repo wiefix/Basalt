@@ -31,13 +31,17 @@ run panel
 run node1
 sleep 3
 
-echo "### install panel"
-docker exec basalt-panel sh /deploy/install.sh panel --binary /dist/basalt-linux-$ARCH
+PANELIP=$(docker inspect -f '{{(index .NetworkSettings.Networks "basalt-net").IPAddress}}' basalt-panel)
+echo "### install panel (agents connect to its IP, as with a domain behind a proxy)"
+docker exec basalt-panel sh /deploy/install.sh panel --binary /dist/basalt-linux-$ARCH --agent-host "$PANELIP"
+echo "### a second run without --agent-host keeps it"
+docker exec basalt-panel sh /deploy/install.sh panel --binary /dist/basalt-linux-$ARCH >/dev/null
+docker exec basalt-panel grep -q -- "--agent-url https://$PANELIP:8443 " /etc/systemd/system/basalt-server.service
+docker exec basalt-panel sh /deploy/install.sh panel --agent-host 'a;b' >/dev/null 2>&1 && exit 5
 
 echo "### services on panel"
 docker exec basalt-panel systemctl is-active basalt-server basalt-proxy basalt-agent
 echo "### panel UI through the proxy"
-PANELIP=$(docker inspect -f '{{(index .NetworkSettings.Networks "basalt-net").IPAddress}}' basalt-panel)
 for i in $(seq 30); do
   docker exec basalt-panel curl -sk "https://$PANELIP/" | grep -q "<title>Basalt</title>" && break; sleep 1
 done
@@ -51,6 +55,7 @@ $API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; [print(
 
 echo "### add node1 with the one-line command from the panel"
 CMD=$($API -d '{"name":"node1"}' http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print(json.load(sys.stdin)["enrollment"]["install_command"])')
+case "$CMD" in *"--panel https://$PANELIP:8443 "*) ;; *) echo "the command does not use the agent host: $CMD"; exit 5 ;; esac
 docker exec basalt-node1 sh -c "$CMD --with-php --with-mariadb --with-docker --with-dns"
 docker exec basalt-node1 systemctl is-active basalt-proxy basalt-agent
 docker exec basalt-node1 sh -c 'git --version && docker buildx version | cut -d" " -f1-2' 
