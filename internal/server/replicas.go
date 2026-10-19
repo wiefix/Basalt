@@ -19,7 +19,9 @@ import (
 // each, behind the same domains. DNS answers with the address of every
 // server whose copy passes its health check, and certificates come through
 // the DNS-01 challenge (an HTTP challenge could reach another server).
-// Replicas have no shared state, so only stateless apps qualify.
+// Replicas have no shared state, so only stateless apps qualify: from an
+// image, a git repository, or a compose file without volumes (each server
+// runs all its services; a job runs once per server and deployment).
 
 // placementView is a server an app runs on.
 type placementView struct {
@@ -40,10 +42,13 @@ func viewPlacements(ps []store.AppPlacement) []placementView {
 // replicaProblem says why app cannot run on several servers ("" if it can).
 func (s *Server) replicaProblem(ctx context.Context, app *store.App, domains []string) (string, error) {
 	switch {
-	case app.Source != store.SourceImage && app.Source != store.SourceGit:
-		return "only apps from an image or a git repository can run on several servers", nil
+	case app.Source != store.SourceImage && app.Source != store.SourceGit && app.Source != store.SourceCompose:
+		return "only apps from an image, a git repository or a compose file can run on several servers", nil
 	case len(app.Volumes) > 0:
 		return "an app with volumes keeps its data on one server: remove them to run it on several", nil
+	case app.Source == store.SourceCompose && len(app.Summary.Volumes) > 0:
+		return "the compose file keeps data in volumes (" + strings.Join(app.Summary.Volumes, ", ") +
+			"), which stay on one server: remove them to run the app on several", nil
 	case len(domains) == 0:
 		return "add the app's domains first: traffic reaches the servers through them", nil
 	}

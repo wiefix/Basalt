@@ -18,17 +18,22 @@ import (
 type fakeHub struct {
 	mu      sync.Mutex
 	deploys []agentproto.AppSpec
+	servers []int64 // the server of each deployment
 }
 
 func (h *fakeHub) Connected(int64) bool { return true }
 func (h *fakeHub) Call(context.Context, int64, string, any, any) error {
 	return nil
 }
-func (h *fakeHub) Stream(_ context.Context, _ int64, msgType string, req, _ any, _ func(json.RawMessage) error) error {
+func (h *fakeHub) Stream(_ context.Context, serverID int64, msgType string, req, resp any, _ func(json.RawMessage) error) error {
 	if spec, ok := req.(agentproto.AppSpec); ok && msgType == agentproto.TypeAppDeploy {
 		h.mu.Lock()
 		h.deploys = append(h.deploys, spec)
+		h.servers = append(h.servers, serverID)
 		h.mu.Unlock()
+		if r, ok := resp.(*agentproto.AppDeployResponse); ok {
+			r.OK = true
+		}
 	}
 	return nil
 }

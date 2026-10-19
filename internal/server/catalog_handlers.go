@@ -363,6 +363,10 @@ func (s *Server) handleTemplateUpdate(w http.ResponseWriter, r *http.Request, p 
 		s.internalError(w, r, "parse template "+t.ID, err)
 		return
 	}
+	if len(app.Replicas) > 0 && len(cf.project.Volumes) > 0 {
+		writeError(w, http.StatusUnprocessableEntity, "the new version keeps data in volumes, but the app runs on several servers: remove the replicas first")
+		return
+	}
 	u := &templateUpdate{Revision: t.Revision, State: "backing_up"}
 	if req.Backup {
 		target := appTarget(app)

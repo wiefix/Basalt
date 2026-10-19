@@ -54,7 +54,8 @@ type App struct {
 	ReadOnly  bool  // read-only root filesystem (image and git apps)
 	RouteID   int64 // the route on the primary server
 	Domains   []string
-	// Replicas are the other servers the app runs on (image and git apps).
+	// Replicas are the other servers the app runs on (image, git and compose
+	// apps without volumes).
 	Replicas  []int64
 	TLS       proxy.TLSMode
 	CreatedAt time.Time

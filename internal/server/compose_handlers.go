@@ -157,6 +157,10 @@ func (s *Server) handleSetCompose(w http.ResponseWriter, r *http.Request, p *pri
 			return
 		}
 	}
+	if len(app.Replicas) > 0 && len(cf.project.Volumes) > 0 {
+		writeError(w, http.StatusUnprocessableEntity, "the app runs on several servers: its compose file cannot keep data in volumes (remove the replicas first)")
+		return
+	}
 	if cf.port == 0 && len(app.Domains) > 0 {
 		writeError(w, http.StatusUnprocessableEntity, "the app has domains: choose the service and port they point to")
 		return

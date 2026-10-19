@@ -109,6 +109,11 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		if warnings, err = s.composeSpec(ctx, app, composeContent, pinned, &spec); err != nil {
 			return nil, err
 		}
+		if len(app.Replicas) > 0 && len(spec.ComposeVolumes) > 0 {
+			// An earlier file (a rollback) may have had volumes.
+			return nil, &deployError{status: http.StatusUnprocessableEntity,
+				msg: "the app runs on several servers: this compose file keeps data in volumes (remove the replicas first)"}
+		}
 	case store.SourceDatabase:
 		var pinned map[string]string
 		if prev != nil {

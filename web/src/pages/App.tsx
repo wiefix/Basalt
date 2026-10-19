@@ -214,7 +214,9 @@ function Overview({ app, user, placements }: { app: App; user: User; placements:
       </div>
 
       {app.template && <TemplateCard app={app} user={user} />}
-      {(app.source === "image" || app.source === "git") && <ServersCard app={app} user={user} placements={placements} />}
+      {(app.source === "image" || app.source === "git" || app.source === "compose") && (
+        <ServersCard app={app} user={user} placements={placements} />
+      )}
       {app.source === "compose" && <ServicesCard app={app} services={st?.services} />}
       <ResourcesCard app={app} running={st?.state === "running"} />
       {app.source === "database" ? <LinksCard app={app} user={user} /> : app.source !== "mail" && <LinkedDatabases app={app} />}
@@ -1299,8 +1301,8 @@ function ServersCard({ app, user, placements }: { app: App; user: User; placemen
       <div className="card-body stack">
         <p className="faint small" style={{ margin: 0 }}>
           {list.length > 1
-            ? "Every deployment runs on each server in turn. DNS answers with the servers whose copy passes its health check (HTTPS on /, editable under Monitoring); certificates come through DNS."
-            : "Run the app on more servers for failover: DNS then answers only with the servers whose copy is up. It needs domains in a zone under DNS, and no volumes or linked databases (each server keeps its own copy)."}
+            ? `Every deployment runs on each server in turn${app.source === "compose" ? " (all services, jobs included, on each)" : ""}. DNS answers with the servers whose copy passes its health check (HTTPS on /, editable under Monitoring); certificates come through DNS.`
+            : `Run the app on more servers for failover: DNS then answers only with the servers whose copy is up. It needs domains in a zone under DNS, and no ${app.source === "compose" ? "volumes in its compose file" : "volumes"} or linked databases (each server keeps its own copy).`}
         </p>
         {admin &&
           (candidates.length === 0 ? (
