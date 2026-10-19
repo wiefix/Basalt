@@ -32,6 +32,7 @@ const (
 	EventAuditBroken  = "audit.broken"
 	EventSiteQuota    = "site.quota"
 	EventCertMissing  = "cert.missing"
+	EventProjectDisk  = "project.disk"
 )
 
 // notificationEvent is an event a channel can receive; Project: it is
@@ -55,6 +56,7 @@ var notificationEvents = []notificationEvent{
 	{EventCertMissing, "A domain still has no certificate a day after it was added", false},
 	{EventAuditBroken, "The audit log was changed outside the panel", false},
 	{EventSiteQuota, "A site goes over its disk quota", true},
+	{EventProjectDisk, "A project's sites go over its disk limit", true},
 }
 
 // findEvent returns the event e, or false if there is none.

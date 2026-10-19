@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -21,7 +23,48 @@ type Project struct {
 	// Resources counts what the project holds (sites, apps, zones, checks).
 	Resources int
 	Members   int
-	CreatedAt time.Time
+	Limits    ProjectLimits
+	// DiskAlerted: the project's admins were told that its sites went
+	// over Limits.DiskMB (and were not under it since).
+	DiskAlerted bool
+	CreatedAt   time.Time
+}
+
+// ProjectLimits caps what a project holds; 0 is no limit. The counts are
+// hard: creating or moving in one more is refused. The disk limit (files
+// and MariaDB databases of the sites) is soft: the project's admins hear
+// when the sites go over it.
+type ProjectLimits struct {
+	Sites     int `json:"sites"`
+	Apps      int `json:"apps"`      // apps other than databases
+	Databases int `json:"databases"` // container databases
+	DNSZones  int `json:"dns_zones"`
+	// HealthChecks counts the checks made by hand (those of an app on
+	// several servers come with the app).
+	HealthChecks int `json:"health_checks"`
+	DiskMB       int `json:"disk_mb"`
+}
+
+// ProjectUsage is what a project holds, counted as ProjectLimits counts.
+type ProjectUsage struct {
+	Sites, Apps, Databases, DNSZones, HealthChecks int
+	// DiskBytes adds up the last measurement of the sites.
+	DiskBytes int64
+}
+
+// LimitError refuses one more resource in a project at its limit.
+type LimitError struct {
+	What  string // "sites", "apps", …
+	Limit int
+}
+
+func (e *LimitError) Error() string {
+	what := strings.ReplaceAll(e.What, "_", " ")
+	what = strings.Replace(what, "dns", "DNS", 1)
+	if e.Limit == 1 {
+		what = strings.TrimSuffix(what, "s")
+	}
+	return fmt.Sprintf("the project may hold at most %d %s: an admin of the panel can raise its limits", e.Limit, what)
 }
 
 // ProjectMember is a user's role in a project.
@@ -59,17 +102,21 @@ const (
 const projectColumns = `p.id, p.name, p.description, p.created_at,
 	(SELECT COUNT(*) FROM sites WHERE project_id = p.id) + (SELECT COUNT(*) FROM apps WHERE project_id = p.id) +
 	(SELECT COUNT(*) FROM dns_zones WHERE project_id = p.id) + (SELECT COUNT(*) FROM health_checks WHERE project_id = p.id),
-	(SELECT COUNT(*) FROM project_members WHERE project_id = p.id)`
+	(SELECT COUNT(*) FROM project_members WHERE project_id = p.id), p.limits, p.disk_alerted`
 
 func scanProject(row interface{ Scan(...any) error }) (*Project, error) {
 	var p Project
 	var created int64
-	err := row.Scan(&p.ID, &p.Name, &p.Description, &created, &p.Resources, &p.Members)
+	var limits string
+	err := row.Scan(&p.ID, &p.Name, &p.Description, &created, &p.Resources, &p.Members, &limits, &p.DiskAlerted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
+	}
+	if err := json.Unmarshal([]byte(limits), &p.Limits); err != nil {
+		return nil, fmt.Errorf("project %d limits: %w", p.ID, err)
 	}
 	p.CreatedAt = time.Unix(created, 0)
 	return &p, nil
@@ -220,6 +267,88 @@ func projectExists(ctx context.Context, q interface {
 	return nil
 }
 
+type querier interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func projectUsage(ctx context.Context, q querier, id int64) (ProjectUsage, error) {
+	var u ProjectUsage
+	err := q.QueryRowContext(ctx, `SELECT
+		(SELECT COUNT(*) FROM sites WHERE project_id = ?1),
+		(SELECT COUNT(*) FROM apps WHERE project_id = ?1 AND source NOT IN ('database', 'mail')),
+		(SELECT COUNT(*) FROM apps WHERE project_id = ?1 AND source = 'database'),
+		(SELECT COUNT(*) FROM dns_zones WHERE project_id = ?1),
+		(SELECT COUNT(*) FROM health_checks WHERE project_id = ?1
+		 AND id NOT IN (SELECT health_check_id FROM proxy_routes WHERE health_check_id IS NOT NULL)),
+		(SELECT COALESCE(SUM(disk_bytes + db_bytes), 0) FROM sites WHERE project_id = ?1)`, id).
+		Scan(&u.Sites, &u.Apps, &u.Databases, &u.DNSZones, &u.HealthChecks, &u.DiskBytes)
+	return u, err
+}
+
+// ProjectUsage reports what a project holds.
+func (db *DB) ProjectUsage(ctx context.Context, id int64) (ProjectUsage, error) {
+	return projectUsage(ctx, db.R, id)
+}
+
+// SetProjectLimits changes a project's limits; what it holds already stays
+// (a project over a new limit only takes no more).
+func (db *DB) SetProjectLimits(ctx context.Context, id int64, l ProjectLimits) error {
+	b, err := json.Marshal(l)
+	if err != nil {
+		return err
+	}
+	return db.execOne(ctx, `UPDATE projects SET limits = ?, disk_alerted = 0 WHERE id = ?`, string(b), id)
+}
+
+func (db *DB) SetProjectDiskAlerted(ctx context.Context, id int64, alerted bool) error {
+	return db.execOne(ctx, `UPDATE projects SET disk_alerted = ? WHERE id = ?`, alerted, id)
+}
+
+// checkRoom refuses one more resource of a kind ("sites", "apps",
+// "databases", "dns_zones", "health_checks") in a project at its limit;
+// it runs in the transaction that adds the resource.
+func checkRoom(ctx context.Context, q querier, project int64, what string) error {
+	var limits string
+	err := q.QueryRowContext(ctx, `SELECT limits FROM projects WHERE id = ?`, project).Scan(&limits)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNoProject
+	}
+	if err != nil {
+		return err
+	}
+	var l ProjectLimits
+	if err := json.Unmarshal([]byte(limits), &l); err != nil {
+		return fmt.Errorf("project %d limits: %w", project, err)
+	}
+	limit := map[string]int{"sites": l.Sites, "apps": l.Apps, "databases": l.Databases,
+		"dns_zones": l.DNSZones, "health_checks": l.HealthChecks}[what]
+	if limit <= 0 {
+		return nil
+	}
+	u, err := projectUsage(ctx, q, project)
+	if err != nil {
+		return err
+	}
+	have := map[string]int{"sites": u.Sites, "apps": u.Apps, "databases": u.Databases,
+		"dns_zones": u.DNSZones, "health_checks": u.HealthChecks}[what]
+	if have >= limit {
+		return &LimitError{What: what, Limit: limit}
+	}
+	return nil
+}
+
+// appKind is what an app of a source counts as in a project's limits ("":
+// nothing, the mail server serves every project).
+func appKind(source string) string {
+	switch source {
+	case SourceMail:
+		return ""
+	case SourceDatabase:
+		return "databases"
+	}
+	return "apps"
+}
+
 // projectOrDefault is the project a new resource goes to.
 func projectOrDefault(id int64) int64 { return ProjectOrDefault(id) }
 
@@ -245,6 +374,30 @@ func (db *DB) MoveToProject(ctx context.Context, kind ProjectResource, id, proje
 	defer tx.Rollback()
 	if err := projectExists(ctx, tx, projectID); err != nil {
 		return err
+	}
+	// One more in the project it goes to.
+	if kind == ResourceSite || kind == ResourceApp || kind == ResourceDNSZone || kind == ResourceHealthCheck {
+		var current int64
+		what := string(kind)
+		var err error
+		if kind == ResourceApp {
+			var source string
+			err = tx.QueryRowContext(ctx, `SELECT project_id, source FROM apps WHERE id = ?`, id).Scan(&current, &source)
+			what = appKind(source)
+		} else {
+			err = tx.QueryRowContext(ctx, `SELECT project_id FROM `+string(kind)+` WHERE id = ?`, id).Scan(&current)
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if current != projectID && what != "" {
+			if err := checkRoom(ctx, tx, projectID, what); err != nil {
+				return err
+			}
+		}
 	}
 	switch kind {
 	case ResourceApp:

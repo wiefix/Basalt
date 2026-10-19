@@ -1,8 +1,18 @@
 import { useState, type FormEvent } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router";
-import { api, can, roleRank, type Project, type ProjectMember, type ProjectRole, type User } from "../api";
-import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useConfirm, useToast } from "../components/ui";
+import {
+  api,
+  can,
+  roleRank,
+  type Project,
+  type ProjectLimits,
+  type ProjectMember,
+  type ProjectRole,
+  type ProjectUsage,
+  type User,
+} from "../api";
+import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useConfirm, useToast } from "../components/ui";
 import { useProjects } from "../components/projects";
 
 const roleText: Record<ProjectRole, string> = {
@@ -137,7 +147,7 @@ export function ProjectPage({ user }: { user: User }) {
   const [editing, setEditing] = useState(false);
   if (data.isPending) return <Loading />;
   if (data.error) return <ErrorBox error={data.error} />;
-  const { project: p, members } = data.data;
+  const { project: p, members, usage } = data.data;
   const manage = roleRank[p.role] >= roleRank.admin;
   const remove = async () => {
     const ok = await confirm({
@@ -196,11 +206,154 @@ export function ProjectPage({ user }: { user: User }) {
             </Link>
           ))}
         </div>
+        <LimitsCard project={p} usage={usage} edit={can(user, "admin")} />
         <MembersCard project={p} members={members} manage={manage} me={user} />
         {manage && <ActivityCard projectId={p.id} />}
       </div>
       {editing && <ProjectModal project={p} onClose={() => setEditing(false)} />}
     </>
+  );
+}
+
+const limitRows: { key: keyof ProjectLimits & keyof ProjectUsage; label: string; to: string }[] = [
+  { key: "sites", label: "Sites", to: "/sites" },
+  { key: "apps", label: "Apps", to: "/apps" },
+  { key: "databases", label: "Databases", to: "/databases" },
+  { key: "dns_zones", label: "DNS zones", to: "/dns" },
+  { key: "health_checks", label: "Health checks", to: "/monitoring" },
+];
+
+// LimitsCard shows what the project holds against its limits; the panel's
+// admins change them.
+function LimitsCard({ project, usage, edit }: { project: Project; usage: ProjectUsage; edit: boolean }) {
+  const [editing, setEditing] = useState(false);
+  const l = project.limits;
+  const none = limitRows.every((r) => !l[r.key]) && !l.disk_mb;
+  const diskPct = l.disk_mb ? Math.min(100, (usage.disk_bytes / (l.disk_mb * 1048576)) * 100) : 0;
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Limits</h2>
+        {edit && (
+          <button className="btn sm" onClick={() => setEditing(true)}>
+            <Icon name="edit" /> Edit
+          </button>
+        )}
+      </div>
+      <div className="card-body stack">
+        {none && <p className="muted" style={{ margin: 0 }}>No limits: the project may hold any number of resources.</p>}
+        <div className="table-wrap">
+          <table className="table">
+            <tbody>
+              {limitRows.map((r) => {
+                const max = l[r.key];
+                const full = max > 0 && usage[r.key] >= max;
+                return (
+                  <tr key={r.key}>
+                    <td>
+                      <Link to={`${r.to}?project=${project.id}`}>{r.label}</Link>
+                    </td>
+                    <td>
+                      {usage[r.key]}
+                      {max > 0 && <span className="muted"> of {max}</span>}
+                      {full && <span className="badge warn" style={{ marginLeft: 8 }}>full</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+              <tr>
+                <td>Disk (sites)</td>
+                <td>
+                  {formatBytes(usage.disk_bytes)}
+                  {l.disk_mb > 0 && (
+                    <>
+                      <span className="muted"> of {formatBytes(l.disk_mb * 1048576)}</span>
+                      {usage.disk_bytes > l.disk_mb * 1048576 && (
+                        <span className="badge err" style={{ marginLeft: 8 }}>over</span>
+                      )}
+                      <div className={`progress${diskPct >= 100 ? " err" : diskPct >= 90 ? " warn" : ""}`} style={{ marginTop: 6, maxWidth: 240 }}>
+                        <div style={{ width: `${diskPct}%` }} />
+                      </div>
+                    </>
+                  )}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p className="faint small" style={{ margin: 0 }}>
+          At a limit, nothing more of that kind can be created in or moved to the project. The disk limit counts the files and
+          MariaDB databases of the sites (measured every 6 hours) and only notifies the project's channels.
+        </p>
+      </div>
+      {editing && <LimitsModal project={project} onClose={() => setEditing(false)} />}
+    </div>
+  );
+}
+
+function LimitsModal({ project, onClose }: { project: Project; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [form, setForm] = useState<Record<keyof ProjectLimits, string>>(() => {
+    const out = {} as Record<keyof ProjectLimits, string>;
+    for (const k of Object.keys(project.limits) as (keyof ProjectLimits)[]) out[k] = project.limits[k] ? String(project.limits[k]) : "";
+    return out;
+  });
+  const save = useMutation({
+    mutationFn: () => {
+      const l = {} as ProjectLimits;
+      for (const k of [...limitRows.map((r) => r.key), "disk_mb"] as (keyof ProjectLimits)[]) l[k] = Number(form[k]) || 0;
+      return api.setProjectLimits(project.id, l);
+    },
+    onSuccess: (r) => {
+      qc.setQueryData(["project", project.id], (old: { members: ProjectMember[] } | undefined) => old && { ...old, ...r });
+      qc.invalidateQueries({ queryKey: ["projects"] });
+      onClose();
+    },
+  });
+  const field = (k: keyof ProjectLimits, label: string, help?: string) => (
+    <Field key={k} label={label} help={help}>
+      <input
+        className="input"
+        type="number"
+        min={0}
+        inputMode="numeric"
+        placeholder="No limit"
+        value={form[k]}
+        onChange={(e) => setForm({ ...form, [k]: e.target.value })}
+      />
+    </Field>
+  );
+  return (
+    <Modal
+      title={`Limits of ${project.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" form="limits-form" disabled={save.isPending}>
+            Save
+          </button>
+        </>
+      }
+    >
+      <form
+        id="limits-form"
+        className="form"
+        onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          save.mutate();
+        }}
+      >
+        <ErrorBox error={save.error} />
+        <p className="muted" style={{ margin: 0 }}>
+          Empty or 0: no limit. What the project holds already stays when a limit is lower.
+        </p>
+        {limitRows.map((r) => field(r.key, r.label))}
+        {field("disk_mb", "Disk, MB", "Files and databases of the sites; going over it notifies, nothing stops.")}
+      </form>
+    </Modal>
   );
 }
 

@@ -51,7 +51,7 @@ func (db *DB) CreateSite(ctx context.Context, projectID, serverID int64, name st
 	defer tx.Rollback()
 
 	projectID = projectOrDefault(projectID)
-	if err := projectExists(ctx, tx, projectID); err != nil {
+	if err := checkRoom(ctx, tx, projectID, "sites"); err != nil {
 		return nil, err
 	}
 	site := &Site{ServerID: serverID, ProjectID: projectID, Name: name, Kind: "static", Domains: domains, TLS: tls, PHPVersion: phpVersion}

@@ -64,7 +64,7 @@ func (db *DB) CreateDNSZone(ctx context.Context, projectID int64, name string, r
 	}
 	defer tx.Rollback()
 	projectID = projectOrDefault(projectID)
-	if err := projectExists(ctx, tx, projectID); err != nil {
+	if err := checkRoom(ctx, tx, projectID, "dns_zones"); err != nil {
 		return nil, err
 	}
 	z := &DNSZone{ProjectID: projectID, Name: name, Serial: nextSerial(0, now), Records: len(records)}

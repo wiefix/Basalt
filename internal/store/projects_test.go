@@ -251,3 +251,112 @@ func TestProjectsMigration(t *testing.T) {
 		t.Fatal("deleted the default project under its resources")
 	}
 }
+
+// TestProjectLimits: a project at a limit takes no more resources of that
+// kind, created or moved in; the checks of an app's placements and the
+// mail server do not count.
+func TestProjectLimits(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTemp(t)
+	shop, _ := db.CreateProject(ctx, "Shop", "")
+	srv, _ := db.CreateServer(ctx, "s1", []byte("t1"), time.Now().Add(time.Hour))
+	srv2, _ := db.CreateServer(ctx, "s2", []byte("t2"), time.Now().Add(time.Hour))
+	if err := db.SetProjectLimits(ctx, shop.ID, ProjectLimits{Sites: 1, Apps: 1, Databases: 1, DNSZones: 1, HealthChecks: 1, DiskMB: 100}); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := db.Project(ctx, shop.ID); p.Limits.Sites != 1 || p.Limits.DiskMB != 100 {
+		t.Fatalf("limits: %+v", p.Limits)
+	}
+	limited := func(what string, err error) {
+		t.Helper()
+		var le *LimitError
+		if !errors.As(err, &le) || le.What != what || le.Limit != 1 {
+			t.Fatalf("%s over the limit: %v", what, err)
+		}
+	}
+	check := func(*dns.Zone) error { return nil }
+	hc := func(name string) *HealthCheck {
+		return &HealthCheck{ProjectID: shop.ID, Name: name, Kind: "https", Host: "192.0.2.1", Port: 443, Path: "/", Interval: 30, Timeout: 5}
+	}
+
+	s1, err := db.CreateSite(ctx, shop.ID, srv.ID, "one", []string{"one.example.com"}, proxy.TLSAuto, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.CreateSite(ctx, shop.ID, srv.ID, "two", []string{"two.example.com"}, proxy.TLSAuto, "")
+	limited("sites", err)
+	web, err := db.CreateApp(ctx, srv.ID, "web", AppSettings{ProjectID: shop.ID, Image: "nginx:1.27", Port: 80}, []string{"web.example.com"}, proxy.TLSAuto)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.CreateApp(ctx, srv.ID, "web2", AppSettings{ProjectID: shop.ID, Source: SourceCompose, Port: 80}, []string{}, proxy.TLSAuto)
+	limited("apps", err)
+	if _, err := db.CreateApp(ctx, srv.ID, "pg", AppSettings{ProjectID: shop.ID, Source: SourceDatabase, Engine: "postgres", EngineVersion: "18", Image: "postgres:18-alpine"}, []string{}, proxy.TLSAuto); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.CreateApp(ctx, srv.ID, "pg2", AppSettings{ProjectID: shop.ID, Source: SourceDatabase, Engine: "postgres", EngineVersion: "18", Image: "postgres:18-alpine"}, []string{}, proxy.TLSAuto)
+	limited("databases", err)
+	if _, err := db.CreateDNSZone(ctx, shop.ID, "example.com", nil, check, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.CreateDNSZone(ctx, shop.ID, "example.org", nil, check, time.Now())
+	limited("dns_zones", err)
+	if err := db.CreateHealthCheck(ctx, hc("a")); err != nil {
+		t.Fatal(err)
+	}
+	limited("health_checks", db.CreateHealthCheck(ctx, hc("b")))
+	// An app on another server brings its checks along, over the limit.
+	if err := db.AddAppReplica(ctx, web.ID, srv2.ID, hc("replica"), hc("primary")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Moving in counts; moving out makes room; the limits of the default
+	// project are none.
+	other, err := db.CreateSite(ctx, 0, srv.ID, "other", []string{"other.example.com"}, proxy.TLSAuto, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited("sites", db.MoveToProject(ctx, ResourceSite, other.ID, shop.ID))
+	if err := db.MoveToProject(ctx, ResourceSite, s1.ID, shop.ID); err != nil {
+		t.Fatalf("a move within the project: %v", err)
+	}
+	if err := db.MoveToProject(ctx, ResourceSite, s1.ID, DefaultProject); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MoveToProject(ctx, ResourceSite, other.ID, shop.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MoveToProject(ctx, ResourceSite, 999, shop.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("move a missing site: %v", err)
+	}
+	if _, err := db.CreateApp(ctx, srv.ID, "mail", AppSettings{ProjectID: shop.ID, Source: SourceMail, Image: "stalwart", Port: 8080, Hostname: "mail.example.com"}, []string{}, proxy.TLSAuto); err != nil {
+		t.Fatalf("the mail server is not an app of the project: %v", err)
+	}
+
+	if err := db.SetSiteUsage(ctx, other.ID, SiteUsage{DiskBytes: 3 << 20, DBBytes: 1 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	u, err := db.ProjectUsage(ctx, shop.ID)
+	if err != nil || u != (ProjectUsage{Sites: 1, Apps: 1, Databases: 1, DNSZones: 1, HealthChecks: 1, DiskBytes: 4 << 20}) {
+		t.Fatalf("usage: %+v %v", u, err)
+	}
+	if err := db.SetProjectDiskAlerted(ctx, shop.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := db.Project(ctx, shop.ID); !p.DiskAlerted {
+		t.Fatal("disk alert not recorded")
+	}
+	// No limits: no refusals; new limits start the disk alert over.
+	if err := db.SetProjectLimits(ctx, shop.ID, ProjectLimits{}); err != nil {
+		t.Fatal(err)
+	}
+	if p, _ := db.Project(ctx, shop.ID); p.DiskAlerted {
+		t.Fatal("disk alert stayed with new limits")
+	}
+	if err := db.CreateHealthCheck(ctx, hc("b")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetProjectLimits(ctx, 999, ProjectLimits{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("limits of a missing project: %v", err)
+	}
+}

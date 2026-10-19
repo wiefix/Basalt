@@ -90,9 +90,21 @@ func (s *Server) measureSites(ctx context.Context, serverID int64, sites []*stor
 	}
 	now := s.now()
 	byID := map[int64]*store.Site{}
+	projects := map[int64]bool{}
 	for _, site := range sites {
 		byID[site.ID] = site
 	}
+	defer func() {
+		for id := range projects {
+			pr, err := s.db.Project(ctx, id)
+			if err != nil {
+				continue
+			}
+			if usage, err := s.db.ProjectUsage(ctx, id); err == nil {
+				s.checkProjectDisk(ctx, pr, usage)
+			}
+		}
+	}()
 	for _, u := range resp.Sites {
 		site := byID[u.SiteID]
 		if site == nil || u.Error != "" {
@@ -103,8 +115,32 @@ func (s *Server) measureSites(ctx context.Context, serverID int64, sites []*stor
 			return err
 		}
 		s.checkQuota(ctx, site)
+		projects[site.ProjectID] = true
 	}
 	return nil
+}
+
+// checkProjectDisk reports a project whose sites went over its disk limit,
+// once (until they are back under).
+func (s *Server) checkProjectDisk(ctx context.Context, pr *store.Project, usage store.ProjectUsage) {
+	over := pr.Limits.DiskMB > 0 && usage.DiskBytes > int64(pr.Limits.DiskMB)<<20
+	if over == pr.DiskAlerted {
+		return
+	}
+	if err := s.db.SetProjectDiskAlerted(ctx, pr.ID, over); err != nil {
+		s.log.Error("record project disk alert", "err", err)
+		return
+	}
+	pr.DiskAlerted = over
+	if over {
+		s.notify(notify.Message{
+			Event:   EventProjectDisk,
+			Title:   fmt.Sprintf("Project %s is over its disk limit", pr.Name),
+			Text:    fmt.Sprintf("Its sites use %s (files and databases) of %d MB.", humanSize(usage.DiskBytes), pr.Limits.DiskMB),
+			Link:    fmt.Sprintf("/projects/%d", pr.ID),
+			Project: pr.ID,
+		})
+	}
 }
 
 // checkQuota reports a site that went over its quota, once.

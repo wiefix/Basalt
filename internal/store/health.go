@@ -136,7 +136,14 @@ func nameTaken(err error) error {
 }
 
 func (db *DB) CreateHealthCheck(ctx context.Context, c *HealthCheck) error {
-	return db.healthWrite(ctx, func(tx *sql.Tx) error { return insertHealthCheck(ctx, tx, c) })
+	return db.healthWrite(ctx, func(tx *sql.Tx) error {
+		// Checks of an app's placements (insertHealthCheck alone) come
+		// with the app and do not count.
+		if err := checkRoom(ctx, tx, projectOrDefault(c.ProjectID), "health_checks"); err != nil {
+			return err
+		}
+		return insertHealthCheck(ctx, tx, c)
+	})
 }
 
 func insertHealthCheck(ctx context.Context, tx *sql.Tx, c *HealthCheck) error {

@@ -924,11 +924,21 @@ export interface ProjectRequest {
   name?: string;
 }
 
+export interface ProjectUsageView {
+  apps: number;
+  databases: number;
+  disk_bytes: number;
+  dns_zones: number;
+  health_checks: number;
+  sites: number;
+}
+
 export interface ProjectView {
   created_at: string;
   default: boolean;
   description: string;
   id: number;
+  limits: StoreProjectLimitsOut;
   members: number;
   name: string;
   resources: number;
@@ -1152,6 +1162,24 @@ export interface StoreComposeService {
 export interface StoreComposeSummary {
   services: StoreComposeService[];
   volumes: string[];
+}
+
+export interface StoreProjectLimits {
+  apps?: number;
+  databases?: number;
+  disk_mb?: number;
+  dns_zones?: number;
+  health_checks?: number;
+  sites?: number;
+}
+
+export interface StoreProjectLimitsOut {
+  apps: number;
+  databases: number;
+  disk_mb: number;
+  dns_zones: number;
+  health_checks: number;
+  sites: number;
 }
 
 export interface TemplateInfoView {
@@ -1570,6 +1598,7 @@ export type GetProjectsResponse = {
 export type GetProjectsIdResponse = {
   members: ProjectMemberView[];
   project: ProjectView;
+  usage: ProjectUsageView;
 };
 
 export type GetProjectsIdAuditResponse = {
@@ -2215,6 +2244,13 @@ export type PutProjectsIdResponse = {
 };
 
 export type PutProjectsIdBody = ProjectRequest;
+
+export type PutProjectsIdLimitsResponse = {
+  project: ProjectView;
+  usage: ProjectUsageView;
+};
+
+export type PutProjectsIdLimitsBody = StoreProjectLimits;
 
 export type PutProjectsIdMembersUidResponse = void;
 

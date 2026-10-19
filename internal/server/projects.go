@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,13 +27,31 @@ type projectView struct {
 	Default     bool   `json:"default"`
 	// Role is what the caller may do in the project (their global role
 	// counts in every project).
-	Role      store.Role `json:"role"`
-	CreatedAt time.Time  `json:"created_at"`
+	Role store.Role `json:"role"`
+	// Limits: what the project may hold (0: no limit), set by the panel's
+	// admins.
+	Limits    store.ProjectLimits `json:"limits"`
+	CreatedAt time.Time           `json:"created_at"`
 }
 
 func viewProject(p *store.Project, role store.Role) projectView {
 	return projectView{ID: p.ID, Name: p.Name, Description: p.Description, Resources: p.Resources, Members: p.Members,
-		Default: p.ID == store.DefaultProject, Role: role, CreatedAt: p.CreatedAt}
+		Default: p.ID == store.DefaultProject, Role: role, Limits: p.Limits, CreatedAt: p.CreatedAt}
+}
+
+// projectUsageView is what a project holds, counted as its limits count.
+type projectUsageView struct {
+	Sites        int   `json:"sites"`
+	Apps         int   `json:"apps"`
+	Databases    int   `json:"databases"`
+	DNSZones     int   `json:"dns_zones"`
+	HealthChecks int   `json:"health_checks"`
+	DiskBytes    int64 `json:"disk_bytes"`
+}
+
+func viewProjectUsage(u store.ProjectUsage) projectUsageView {
+	return projectUsageView{Sites: u.Sites, Apps: u.Apps, Databases: u.Databases, DNSZones: u.DNSZones,
+		HealthChecks: u.HealthChecks, DiskBytes: u.DiskBytes}
 }
 
 // viewProjectFor describes a project with the principal's role in it.
@@ -110,7 +129,57 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request, p *pri
 	for i, m := range members {
 		out[i] = projectMemberView{UserID: m.UserID, Email: m.Email, Name: m.Name, Role: m.Role, CreatedAt: m.CreatedAt}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"project": s.viewProjectFor(r, p, pr), "members": out})
+	usage, err := s.db.ProjectUsage(r.Context(), pr.ID)
+	if err != nil {
+		s.internalError(w, r, "count project resources", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"project": s.viewProjectFor(r, p, pr), "members": out, "usage": viewProjectUsage(usage)})
+}
+
+// maxProjectLimit caps each count limit of a project.
+const maxProjectLimit = 100000
+
+// handleSetProjectLimits sets what a project may hold (the panel's admins:
+// a project's own admins do not raise its limits). What it holds already
+// stays.
+func (s *Server) handleSetProjectLimits(w http.ResponseWriter, r *http.Request, p *principal) {
+	pr, ok := s.pathProject(w, r, p, store.RoleAdmin)
+	if !ok {
+		return
+	}
+	var req store.ProjectLimits
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	for _, n := range []int{req.Sites, req.Apps, req.Databases, req.DNSZones, req.HealthChecks} {
+		if n < 0 || n > maxProjectLimit {
+			writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("each limit is 0 (none) to %d", maxProjectLimit))
+			return
+		}
+	}
+	if req.DiskMB < 0 || req.DiskMB > maxQuotaMB {
+		writeError(w, http.StatusUnprocessableEntity, "disk_mb must be 0 (none) or a number of MB")
+		return
+	}
+	if err := s.db.SetProjectLimits(r.Context(), pr.ID, req); err != nil {
+		s.internalError(w, r, "set project limits", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "project.limits_changed", map[string]any{"project_id": pr.ID, "limits": req})
+	pr, err := s.db.Project(r.Context(), pr.ID)
+	if err != nil {
+		s.internalError(w, r, "load project", err)
+		return
+	}
+	usage, err := s.db.ProjectUsage(r.Context(), pr.ID)
+	if err != nil {
+		s.internalError(w, r, "count project resources", err)
+		return
+	}
+	// Checked against the last measurement of the sites at once.
+	s.checkProjectDisk(r.Context(), pr, usage)
+	writeJSON(w, http.StatusOK, map[string]any{"project": s.viewProjectFor(r, p, pr), "usage": viewProjectUsage(usage)})
 }
 
 type projectRequest struct {
@@ -349,6 +418,8 @@ func (s *Server) handleMove(kind store.ProjectResource) principalHandler {
 		case errors.Is(err, store.ErrProjectMismatch), errors.Is(err, store.ErrReplicaCheckMove):
 			writeError(w, http.StatusConflict, err.Error())
 			return
+		case projectError(w, err):
+			return
 		case err != nil:
 			s.internalError(w, r, "move to project", err)
 			return
@@ -401,12 +472,17 @@ func (s *Server) visibleIn(r *http.Request, p *principal) (func(project int64) b
 	}, nil
 }
 
-// projectError answers a create request naming an unknown project; it
-// reports whether it did.
+// projectError answers a create request naming an unknown project, or a
+// project at its limit; it reports whether it did.
 func projectError(w http.ResponseWriter, err error) bool {
-	if errors.Is(err, store.ErrNoProject) {
+	var limit *store.LimitError
+	switch {
+	case errors.Is(err, store.ErrNoProject):
 		writeError(w, http.StatusUnprocessableEntity, "project not found")
-		return true
+	case errors.As(err, &limit):
+		writeError(w, http.StatusUnprocessableEntity, limit.Error())
+	default:
+		return false
 	}
-	return false
+	return true
 }

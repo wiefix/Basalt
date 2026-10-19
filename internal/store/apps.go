@@ -144,6 +144,11 @@ func (db *DB) CreateApp(ctx context.Context, serverID int64, name string, st App
 	if err := projectExists(ctx, tx, st.ProjectID); err != nil {
 		return nil, err
 	}
+	if what := appKind(st.Source); what != "" {
+		if err := checkRoom(ctx, tx, st.ProjectID, what); err != nil {
+			return nil, err
+		}
+	}
 	a := &App{ServerID: serverID, ProjectID: st.ProjectID, Name: name, Source: st.Source, Image: st.Image, Git: st.Git, Port: st.Port,
 		Volumes: st.Volumes, MemoryMB: st.MemoryMB, CPUs: st.CPUs, Domains: domains, TLS: tls,
 		Engine: st.Engine, EngineVersion: st.EngineVersion, Links: []int64{}, ReadOnly: st.ReadOnly, Hostname: st.Hostname,

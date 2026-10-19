@@ -677,7 +677,28 @@ export interface Project {
   members: number;
   default: boolean;
   role: Role; // what you may do in it (a role on the panel counts everywhere)
+  limits: ProjectLimits;
   created_at: string;
+}
+
+// ProjectLimits: what a project may hold, 0 is no limit. Counts are hard;
+// the disk limit (files and databases of its sites) only notifies.
+export interface ProjectLimits {
+  sites: number;
+  apps: number;
+  databases: number;
+  dns_zones: number;
+  health_checks: number;
+  disk_mb: number;
+}
+
+export interface ProjectUsage {
+  sites: number;
+  apps: number;
+  databases: number;
+  dns_zones: number;
+  health_checks: number;
+  disk_bytes: number; // the sites' last measurement
 }
 
 export type ProjectRole = "admin" | "member" | "viewer";
@@ -919,7 +940,9 @@ export const api = {
     post<{ user: User }>("/api/v1/users", b),
 
   projects: () => get<{ projects: Project[] }>("/api/v1/projects"),
-  project: (id: number) => get<{ project: Project; members: ProjectMember[] }>(`/api/v1/projects/${id}`),
+  project: (id: number) => get<{ project: Project; members: ProjectMember[]; usage: ProjectUsage }>(`/api/v1/projects/${id}`),
+  setProjectLimits: (id: number, l: ProjectLimits) =>
+    put<{ project: Project; usage: ProjectUsage }>(`/api/v1/projects/${id}/limits`, l),
   createProject: (b: { name: string; description: string }) => post<{ project: Project }>("/api/v1/projects", b),
   updateProject: (id: number, b: { name: string; description: string }) => put<{ project: Project }>(`/api/v1/projects/${id}`, b),
   deleteProject: (id: number) => del<void>(`/api/v1/projects/${id}`),

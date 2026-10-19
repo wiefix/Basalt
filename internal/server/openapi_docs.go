@@ -11,6 +11,7 @@ import (
 	"github.com/wiefix/basalt/internal/mailserver"
 	"github.com/wiefix/basalt/internal/php"
 	"github.com/wiefix/basalt/internal/sftpd"
+	"github.com/wiefix/basalt/internal/store"
 )
 
 // Responses several routes share.
@@ -89,9 +90,11 @@ var apiDocs = map[string]apiDoc{
 	"GET /api/v1/audit/verify": {summary: "Verify the audit log's hash chain", resp: auditCheckView{}},
 
 	// Projects.
-	"GET /api/v1/projects":         {summary: "Projects (the default one first)", resp: obj("projects", []projectView{})},
-	"POST /api/v1/projects":        {summary: "Create a project", body: projectRequest{}, resp: obj("project", projectView{})},
-	"GET /api/v1/projects/{id}":    {summary: "A project with its members", resp: obj("project", projectView{}, "members", []projectMemberView{})},
+	"GET /api/v1/projects":      {summary: "Projects (the default one first)", resp: obj("projects", []projectView{})},
+	"POST /api/v1/projects":     {summary: "Create a project", body: projectRequest{}, resp: obj("project", projectView{})},
+	"GET /api/v1/projects/{id}": {summary: "A project with its members and what it holds", resp: obj("project", projectView{}, "members", []projectMemberView{}, "usage", projectUsageView{})},
+	"PUT /api/v1/projects/{id}/limits": {summary: "Set what a project may hold (0: no limit); counts are hard, the disk limit only notifies",
+		body: store.ProjectLimits{}, resp: obj("project", projectView{}, "usage", projectUsageView{})},
 	"PUT /api/v1/projects/{id}":    {summary: "Rename a project or change its description", body: projectRequest{}, resp: obj("project", projectView{})},
 	"DELETE /api/v1/projects/{id}": {summary: "Delete an empty project (not the default one)", resp: noContent},
 	"GET /api/v1/projects/{id}/audit": {summary: "The audit log of a project's resources, newest first (its admins)", query: []queryParam{
