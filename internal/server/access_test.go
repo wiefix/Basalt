@@ -23,7 +23,14 @@ type projectEnv struct {
 
 func newProjectEnv(t *testing.T) *projectEnv {
 	t.Helper()
-	srv := newTestServerWith(t, Options{SetupToken: testSetupToken, Agents: &fakeHub{}})
+	return newProjectEnvWith(t, Options{})
+}
+
+// newProjectEnvWith is newProjectEnv with more options.
+func newProjectEnvWith(t *testing.T, opts Options) *projectEnv {
+	t.Helper()
+	opts.SetupToken, opts.Agents = testSetupToken, &fakeHub{}
+	srv := newTestServerWith(t, opts)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	e := &projectEnv{env: &env{t: t, srv: srv, ts: ts, clock: &testClock{}}}

@@ -394,7 +394,7 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 			name, link = app.Name, appPage(app)
 		}
 		s.notify(notify.Message{Event: EventDeployFailed, Title: fmt.Sprintf("Deployment #%d of %s failed", depID, name),
-			Text: truncate(resp.Error, 1000), Link: link})
+			Text: truncate(resp.Error, 1000), Link: link, Project: x.projectID})
 	}
 	if resp.OK && spec.Mail {
 		s.configureMail(context.Background())

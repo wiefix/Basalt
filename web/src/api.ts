@@ -619,6 +619,7 @@ export type ChannelKind = "webhook" | "slack" | "discord" | "telegram" | "email"
 
 export interface NotificationChannel {
   id: number;
+  project_id: number; // 0: a channel of the whole panel
   name: string;
   kind: ChannelKind;
   events: string[];
@@ -640,8 +641,16 @@ export interface NotificationChannel {
   queued: number; // messages waiting for another attempt
 }
 
+// NotificationEvent: project means a project's channels can get it.
+export interface NotificationEvent {
+  id: string;
+  label: string;
+  project: boolean;
+}
+
 // ChannelInput: secret fields left empty keep the current value.
 export type ChannelInput = {
+  project_id?: number; // a new channel's project (0: the whole panel)
   name: string;
   kind: ChannelKind;
   events: string[];
@@ -1030,7 +1039,7 @@ export const api = {
   healthEvents: (id: number) =>
     get<{ events: { status: string; detail: string; at: string }[] }>(`/api/v1/health-checks/${id}/events`),
   notifications: () =>
-    get<{ channels: NotificationChannel[]; events: { id: string; label: string }[]; panel_url: string }>("/api/v1/notifications"),
+    get<{ channels: NotificationChannel[]; events: NotificationEvent[]; panel_url: string }>("/api/v1/notifications"),
   setPanelURL: (url: string) => put<{ panel_url: string }>("/api/v1/notifications/panel-url", { url }),
   createChannel: (b: ChannelInput) => post<{ channel: NotificationChannel }>("/api/v1/notifications", b),
   updateChannel: (id: number, b: ChannelInput) => put<{ channel: NotificationChannel }>(`/api/v1/notifications/${id}`, b),

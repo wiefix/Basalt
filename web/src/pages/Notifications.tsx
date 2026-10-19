@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, can, type ChannelInput, type ChannelKind, type NotificationChannel, type User } from "../api";
+import { api, can, type ChannelInput, type ChannelKind, type NotificationChannel, type NotificationEvent, type User } from "../api";
 import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
+import { ProjectBadge, ProjectFilter, adminProjects, useCanCreate, useProjectFilter, useProjects } from "../components/projects";
 
 const kindLabel: Record<ChannelKind, string> = {
   webhook: "Webhook",
@@ -30,13 +31,18 @@ export function NotificationsPage({ user }: { user: User }) {
   const qc = useQueryClient();
   const toast = useToast();
   const confirm = useConfirm();
-  const data = useQuery({ queryKey: ["notifications"], queryFn: api.notifications, enabled: can(user, "admin"), refetchInterval: 15_000 });
+  // The panel's admins manage every channel, a project's admins its own.
+  const allowed = useCanCreate(user);
+  const admin = can(user, "admin");
+  const data = useQuery({ queryKey: ["notifications"], queryFn: api.notifications, enabled: allowed, refetchInterval: 15_000 });
   const [editing, setEditing] = useState<NotificationChannel | "new" | null>(null);
   const [testing, setTesting] = useState<number | null>(null);
-  if (!can(user, "admin")) return <div className="empty">You do not have access to this page.</div>;
+  const [project, setProject] = useProjectFilter();
+  if (!allowed) return <div className="empty">You do not have access to this page.</div>;
   if (data.isPending) return <Loading />;
   if (data.error) return <ErrorBox error={data.error} />;
-  const { channels, events, panel_url } = data.data;
+  const { events, panel_url } = data.data;
+  const channels = data.data.channels.filter((c) => !project || c.project_id === project);
   const eventLabel = (id: string) => events.find((e) => e.id === id)?.label ?? id;
 
   const test = async (c: NotificationChannel) => {
@@ -67,11 +73,18 @@ export function NotificationsPage({ user }: { user: User }) {
       <div className="page-head">
         <div>
           <h1>Notifications</h1>
-          <div className="sub">Where the panel tells you about failures: health checks, deployments, backups.</div>
+          <div className="sub">
+            {admin
+              ? "Where the panel tells you about failures: health checks, deployments, backups."
+              : "Where you hear about failures in your projects: health checks, deployments, backups."}
+          </div>
         </div>
-        <button className="btn primary" onClick={() => setEditing("new")}>
-          <Icon name="plus" /> Add channel
-        </button>
+        <div className="row">
+          <ProjectFilter value={project} onChange={setProject} />
+          <button className="btn primary" onClick={() => setEditing("new")}>
+            <Icon name="plus" /> Add channel
+          </button>
+        </div>
       </div>
       {channels.length === 0 ? (
         <div className="card empty">
@@ -94,6 +107,7 @@ export function NotificationsPage({ user }: { user: User }) {
                 <tr key={c.id}>
                   <td>
                     <strong>{c.name}</strong> <span className="badge plain">{kindLabel[c.kind]}</span>
+                    {c.project_id ? <ProjectBadge id={c.project_id} /> : admin && <span className="faint small" style={{ marginLeft: 6 }}>whole panel</span>}
                     <div className="mono faint small" style={{ overflowWrap: "anywhere" }}>
                       {where(c)}
                     </div>
@@ -141,32 +155,45 @@ export function NotificationsPage({ user }: { user: User }) {
           </table>
         </div>
       )}
-      <PanelURLCard url={panel_url} />
+      {admin && <PanelURLCard url={panel_url} />}
       <p className="faint small">
+        A channel of a project gets only the events about its sites, apps, databases and health checks, and reaches only
+        public addresses; a channel of the whole panel gets every event. 
         A failed delivery is tried again after 10 seconds, a minute, 5 and 30 minutes and 2 hours, also after a restart of the panel. Three or more messages of one kind within 10 seconds (a server down fails many health checks) arrive as one. A health check notifies when it goes down
         and when it comes back.
       </p>
       {editing && (
-        <ChannelModal channel={editing === "new" ? null : editing} events={events} onClose={() => setEditing(null)} />
+        <ChannelModal user={user} channel={editing === "new" ? null : editing} events={events} onClose={() => setEditing(null)} />
       )}
     </>
   );
 }
 
 function ChannelModal({
+  user,
   channel,
   events,
   onClose,
 }: {
+  user: User;
   channel: NotificationChannel | null;
-  events: { id: string; label: string }[];
+  events: NotificationEvent[];
   onClose: () => void;
 }) {
   const qc = useQueryClient();
   const c = channel;
+  const projects = useProjects();
+  // Where a new channel can go: the whole panel (its admins) or a project one administers.
+  const places = [
+    ...(can(user, "admin") ? [{ id: 0, name: "The whole panel (every event)" }] : []),
+    ...adminProjects(projects.data?.projects).map((p) => ({ id: p.id, name: `Project ${p.name}` })),
+  ];
+  const [projectId, setProjectId] = useState<number>(c?.project_id ?? places[0]?.id ?? 0);
+  const offered = projectId ? events.filter((e) => e.project) : events;
   const [kind, setKind] = useState<ChannelKind>(c?.kind ?? "email");
   const [name, setName] = useState(c?.name ?? "");
   const [chosen, setChosen] = useState<string[]>(c?.events ?? events.map((e) => e.id));
+  const sent = chosen.filter((id) => offered.some((e) => e.id === id));
   const [url, setURL] = useState(c?.kind === "webhook" ? (c.url ?? "") : "");
   const [secret, setSecret] = useState(c?.secret ?? "");
   const [allowPrivate, setAllowPrivate] = useState(c?.allow_private ?? false);
@@ -182,9 +209,9 @@ function ChannelModal({
   const [to, setTo] = useState((c?.to ?? []).join("\n"));
   const save = useMutation({
     mutationFn: () => {
-      const b: ChannelInput = { name: name.trim(), kind, events: chosen };
+      const b: ChannelInput = { name: name.trim(), kind, events: sent, project_id: c ? undefined : projectId };
       if (kind === "webhook") {
-        Object.assign(b, { url: url.trim(), allow_private: allowPrivate });
+        Object.assign(b, { url: url.trim(), allow_private: allowPrivate && !projectId });
         // A new webhook without a secret gets a generated one.
         if (c || secret) b.secret = secret;
       }
@@ -245,6 +272,17 @@ function ChannelModal({
         <Field label="Name">
           <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="ops" required autoFocus />
         </Field>
+        {!c && places.length > 1 && (
+          <Field label="For" help="A project's channel gets only the events about its resources.">
+            <select className="input" value={projectId} onChange={(e) => setProjectId(Number(e.target.value))}>
+              {places.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         {kind === "webhook" && (
           <>
             <Field label="URL" help="Receives a POST with JSON: event, title, text, at.">
@@ -262,10 +300,12 @@ function ChannelModal({
               <input className="input mono" value={secret} onChange={(e) => setSecret(e.target.value)} autoComplete="off" />
             </Field>
             {c?.secret && <CodeBox text={c.secret} />}
-            <label className="row small">
-              <input type="checkbox" checked={allowPrivate} onChange={(e) => setAllowPrivate(e.target.checked)} />
-              The receiver is on a private network (allows private addresses and plain http)
-            </label>
+            {!projectId && (
+              <label className="row small">
+                <input type="checkbox" checked={allowPrivate} onChange={(e) => setAllowPrivate(e.target.checked)} />
+                The receiver is on a private network (allows private addresses and plain http)
+              </label>
+            )}
           </>
         )}
         {(kind === "slack" || kind === "discord") && (
@@ -341,7 +381,7 @@ function ChannelModal({
         )}
         <Field label="Send">
           <div className="stack" style={{ gap: 6 }}>
-            {events.map((e) => (
+            {offered.map((e) => (
               <label key={e.id} className="row small">
                 <input
                   type="checkbox"

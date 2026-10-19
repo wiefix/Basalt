@@ -79,7 +79,7 @@ func sameProbe(a, b *store.HealthCheck) bool {
 func (s *Server) HealthReport(serverID int64, r agentproto.HealthReport) {
 	now := s.now()
 	type change struct {
-		id             int64
+		id, project    int64
 		name, from     string
 		status, detail string
 	}
@@ -101,7 +101,7 @@ func (s *Server) HealthReport(serverID int64, r agentproto.HealthReport) {
 	for id := range seen {
 		st := s.health.states[id]
 		if status, detail, ok := evaluateHealth(st, now, s.agents.Connected); ok {
-			changes = append(changes, change{id: id, name: st.check.Name, from: st.check.Status, status: status, detail: detail})
+			changes = append(changes, change{id: id, project: st.check.ProjectID, name: st.check.Name, from: st.check.Status, status: status, detail: detail})
 			st.check.Status = status
 			st.check.StatusSince = &now
 		}
@@ -120,9 +120,9 @@ func (s *Server) HealthReport(serverID int64, r agentproto.HealthReport) {
 		s.log.Info("health check changed", "check_id", c.id, "status", c.status, "detail", c.detail)
 		switch {
 		case c.status == store.HealthDown:
-			s.notify(notify.Message{Event: EventHealthDown, Title: c.name + " is down", Text: c.detail, At: now, Link: "/monitoring"})
+			s.notify(notify.Message{Event: EventHealthDown, Title: c.name + " is down", Text: c.detail, At: now, Link: "/monitoring", Project: c.project})
 		case c.status == store.HealthUp && c.from == store.HealthDown:
-			s.notify(notify.Message{Event: EventHealthUp, Title: c.name + " is back up", Text: c.detail, At: now, Link: "/monitoring"})
+			s.notify(notify.Message{Event: EventHealthUp, Title: c.name + " is back up", Text: c.detail, At: now, Link: "/monitoring", Project: c.project})
 		}
 	}
 	// DNS records follow the check: the DNS servers get the zones without

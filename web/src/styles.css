@@ -855,6 +855,10 @@ textarea.input {
   .hide-sm {
     display: none;
   }
+  /* A long subtitle next to a filter and a button: the controls go below. */
+  .page-head {
+    flex-wrap: wrap;
+  }
   .table th,
   .table td {
     padding: 8px 10px;

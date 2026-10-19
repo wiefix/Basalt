@@ -32,6 +32,9 @@ type Message struct {
 	At    time.Time `json:"at"`
 	// Link is the panel page about it ("" when unknown).
 	Link string `json:"link,omitempty"`
+	// Project is the project of the resource it is about (0: none); the
+	// panel picks the channels by it.
+	Project int64 `json:"-"`
 }
 
 // plain is the message as text for chats and email.
@@ -119,6 +122,9 @@ type SMTP struct {
 	From     string
 	To       []string
 	Insecure bool // do not verify the server's certificate
+	// Dialer, when set, connects to the server (it may refuse private
+	// addresses).
+	Dialer *net.Dialer `json:"-"`
 }
 
 // Validate checks the settings.
@@ -165,6 +171,9 @@ func Email(ctx context.Context, c SMTP, m Message) error {
 	}
 	addr := net.JoinHostPort(c.Host, strconv.Itoa(c.Port))
 	d := &net.Dialer{Timeout: 15 * time.Second}
+	if c.Dialer != nil {
+		d = c.Dialer
+	}
 	var conn net.Conn
 	var err error
 	tlsConf := &tls.Config{ServerName: c.Host, InsecureSkipVerify: c.Insecure, MinVersion: tls.VersionTLS12}

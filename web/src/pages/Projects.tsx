@@ -189,6 +189,7 @@ export function ProjectPage({ user }: { user: User }) {
             ["/databases", "Databases"],
             ["/dns", "DNS zones"],
             ["/monitoring", "Health checks"],
+            ...(manage ? [["/notifications", "Notifications"]] : []),
           ].map(([to, label]) => (
             <Link key={to} className="btn sm" to={`${to}?project=${p.id}`}>
               {label}

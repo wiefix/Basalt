@@ -127,7 +127,8 @@ func (s *Server) checkQuota(ctx context.Context, site *store.Site) {
 			Title: fmt.Sprintf("Site %s is over its disk quota", site.Name),
 			Text: fmt.Sprintf("It uses %s (files %s, databases %s) of %d MB.", humanSize(site.Usage.Total()),
 				humanSize(site.Usage.DiskBytes), humanSize(site.Usage.DBBytes), site.QuotaMB),
-			Link: fmt.Sprintf("/sites/%d", site.ID),
+			Link:    fmt.Sprintf("/sites/%d", site.ID),
+			Project: site.ProjectID,
 		})
 	}
 }

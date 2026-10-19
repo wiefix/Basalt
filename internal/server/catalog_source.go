@@ -141,13 +141,7 @@ func fetchClient(allowPrivate bool) *http.Client {
 func outboundClient(allowPrivate bool, timeout time.Duration, checkURL func(*url.URL) error, hint string) *http.Client {
 	d := &net.Dialer{Timeout: 10 * time.Second}
 	if !allowPrivate {
-		d.Control = func(network, address string, _ syscall.RawConn) error {
-			ap, err := netip.ParseAddrPort(address)
-			if err != nil || !dns.PublicAddr(ap.Addr()) {
-				return fmt.Errorf("%s is not a public address (%s)", address, hint)
-			}
-			return nil
-		}
+		d = publicDialer(hint)
 	}
 	return &http.Client{
 		Timeout:   timeout,
@@ -159,6 +153,18 @@ func outboundClient(allowPrivate bool, timeout time.Duration, checkURL func(*url
 			return checkURL(req.URL)
 		},
 	}
+}
+
+// publicDialer connects only to public addresses, checked after the name
+// is resolved; hint says what to do about a private one.
+func publicDialer(hint string) *net.Dialer {
+	return &net.Dialer{Timeout: 10 * time.Second, Control: func(network, address string, _ syscall.RawConn) error {
+		ap, err := netip.ParseAddrPort(address)
+		if err != nil || !dns.PublicAddr(ap.Addr()) {
+			return fmt.Errorf("%s is not a public address (%s)", address, hint)
+		}
+		return nil
+	}}
 }
 
 func fetchFile(ctx context.Context, hc *http.Client, u string) ([]byte, error) {

@@ -728,7 +728,7 @@ func (s *Server) runBackup(b *store.Backup, req agentproto.BackupRequest, live *
 	} else {
 		name, link := s.resourceName(b)
 		s.notify(notify.Message{Event: EventBackupFailed, Title: "Backup of " + name + " failed",
-			Text: truncate(resp.Error, 1000), Link: link})
+			Text: truncate(resp.Error, 1000), Link: link, Project: project})
 	}
 	if err := s.db.Audit(context.Background(), nil, action, "", withProject(map[string]any{
 		"backup_id": b.ID, "resource": req.Resource, "error": truncate(resp.Error, 500),
@@ -1102,5 +1102,6 @@ func (s *Server) recordMissedBackup(ctx context.Context, t *backupTarget, p *sto
 		s.log.Error("record backup", "err", err, "backup_id", b.ID)
 	}
 	name, link := s.resourceName(b)
-	s.notify(notify.Message{Event: EventBackupFailed, Title: "Backup of " + name + " failed", Text: truncate(msg, 1000), Link: link})
+	s.notify(notify.Message{Event: EventBackupFailed, Title: "Backup of " + name + " failed", Text: truncate(msg, 1000), Link: link,
+		Project: t.projectID()})
 }

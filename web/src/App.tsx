@@ -23,6 +23,7 @@ import { AccountPage } from "./pages/Account";
 import { AuditPage } from "./pages/Audit";
 import { APIDocsPage } from "./pages/APIDocs";
 import { ProjectPage, ProjectsPage } from "./pages/Projects";
+import { useCanCreate } from "./components/projects";
 
 // The signed-in user, or null when signed out. A 401 is a normal answer
 // here, not an error: as an error, every refetch (e.g. on window focus) would
@@ -70,6 +71,8 @@ function Shell({ user }: { user: User }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [, toggleTheme] = useTheme();
+  // Admins of a project manage its notification channels.
+  const projectAdmin = useCanCreate(user);
 
   const logout = async () => {
     await api.logout().catch(() => {});
@@ -117,7 +120,7 @@ function Shell({ user }: { user: User }) {
         <NavLink className="nav-link" to="/dns">
           <Icon name="route" /> DNS
         </NavLink>
-        {can(user, "admin") && (
+        {projectAdmin && (
           <NavLink className="nav-link" to="/notifications">
             <Icon name="bell" /> Notifications
           </NavLink>

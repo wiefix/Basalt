@@ -414,11 +414,13 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("GET /api/v1/apps/{id}", s.requireProject(store.RoleViewer, s.handleGetApp))
 	rt.Handle("PUT /api/v1/apps/{id}", s.requireProject(store.RoleAdmin, s.handleUpdateApp))
 	rt.Handle("DELETE /api/v1/apps/{id}", s.requireProject(store.RoleAdmin, s.handleDeleteApp))
-	rt.Handle("GET /api/v1/notifications", s.requireRole(store.RoleAdmin, s.handleNotifications))
-	rt.Handle("POST /api/v1/notifications", s.requireRole(store.RoleAdmin, s.handleCreateChannel))
-	rt.Handle("PUT /api/v1/notifications/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateChannel))
-	rt.Handle("DELETE /api/v1/notifications/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteChannel))
-	rt.Handle("POST /api/v1/notifications/{id}/test", s.requireRole(store.RoleAdmin, s.handleTestChannel))
+	// Notification channels: the panel's admins, and projects' admins for
+	// their projects' channels (pathChannel, channelProjects).
+	rt.Handle("GET /api/v1/notifications", s.requireRole(store.RoleUser, s.handleNotifications))
+	rt.Handle("POST /api/v1/notifications", s.requireRole(store.RoleUser, s.handleCreateChannel))
+	rt.Handle("PUT /api/v1/notifications/{id}", s.requireRole(store.RoleUser, s.handleUpdateChannel))
+	rt.Handle("DELETE /api/v1/notifications/{id}", s.requireRole(store.RoleUser, s.handleDeleteChannel))
+	rt.Handle("POST /api/v1/notifications/{id}/test", s.requireRole(store.RoleUser, s.handleTestChannel))
 	rt.Handle("PUT /api/v1/notifications/panel-url", s.requireRole(store.RoleAdmin, s.handleSetPanelURL))
 	rt.Handle("PUT /api/v1/apps/{id}/domains", s.requireProject(store.RoleAdmin, s.handleSetAppDomains))
 	rt.Handle("POST /api/v1/apps/{id}/replicas", s.requireProject(store.RoleAdmin, s.handleAddReplica))

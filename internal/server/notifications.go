@@ -34,30 +34,36 @@ const (
 	EventCertMissing  = "cert.missing"
 )
 
-var notificationEvents = []struct {
-	ID    string `json:"id"`
-	Label string `json:"label"`
-}{
-	{EventHealthDown, "A health check goes down"},
-	{EventHealthUp, "A health check is back up"},
-	{EventDeployFailed, "A deployment fails"},
-	{EventBackupFailed, "A backup or a backup integrity check fails"},
-	{EventServerDown, "A server's agent has been offline for 5 minutes"},
-	{EventServerUp, "A server reported offline is back"},
-	{EventMailProblem, "The mail deliverability check finds a new problem"},
-	{EventCertExpiring, "A certificate is not renewed and expires within 14 days"},
-	{EventCertMissing, "A domain still has no certificate a day after it was added"},
-	{EventAuditBroken, "The audit log was changed outside the panel"},
-	{EventSiteQuota, "A site goes over its disk quota"},
+// notificationEvent is an event a channel can receive; Project: it is
+// about a resource of a project, so a channel of that project can get it
+// (the others concern the whole panel).
+type notificationEvent struct {
+	ID      string `json:"id"`
+	Label   string `json:"label"`
+	Project bool   `json:"project"`
 }
 
-func validEvent(e string) bool {
-	return slices.ContainsFunc(notificationEvents, func(x struct {
-		ID    string `json:"id"`
-		Label string `json:"label"`
-	}) bool {
-		return x.ID == e
-	})
+var notificationEvents = []notificationEvent{
+	{EventHealthDown, "A health check goes down", true},
+	{EventHealthUp, "A health check is back up", true},
+	{EventDeployFailed, "A deployment fails", true},
+	{EventBackupFailed, "A backup or a backup integrity check fails", true},
+	{EventServerDown, "A server's agent has been offline for 5 minutes", false},
+	{EventServerUp, "A server reported offline is back", false},
+	{EventMailProblem, "The mail deliverability check finds a new problem", false},
+	{EventCertExpiring, "A certificate is not renewed and expires within 14 days", false},
+	{EventCertMissing, "A domain still has no certificate a day after it was added", false},
+	{EventAuditBroken, "The audit log was changed outside the panel", false},
+	{EventSiteQuota, "A site goes over its disk quota", true},
+}
+
+// findEvent returns the event e, or false if there is none.
+func findEvent(e string) (notificationEvent, bool) {
+	i := slices.IndexFunc(notificationEvents, func(x notificationEvent) bool { return x.ID == e })
+	if i < 0 {
+		return notificationEvent{}, false
+	}
+	return notificationEvents[i], true
 }
 
 // Delivery: attempts and the pauses before them (about 2.5 hours in all);
@@ -105,10 +111,12 @@ func (s *Server) channelConfig(c *store.NotificationChannel) (*channelConfig, er
 
 // channelView shows a channel without its secrets.
 type channelView struct {
-	ID     int64    `json:"id"`
-	Name   string   `json:"name"`
-	Kind   string   `json:"kind"`
-	Events []string `json:"events"`
+	ID int64 `json:"id"`
+	// ProjectID: the project whose events it gets (0: the whole panel).
+	ProjectID int64    `json:"project_id"`
+	Name      string   `json:"name"`
+	Kind      string   `json:"kind"`
+	Events    []string `json:"events"`
 	// Settings without secrets.
 	URL          string   `json:"url,omitempty"` // webhook (Slack and Discord URLs are secret)
 	Secret       string   `json:"secret,omitempty"`
@@ -132,7 +140,7 @@ type channelView struct {
 }
 
 func (s *Server) viewChannel(c *store.NotificationChannel) channelView {
-	v := channelView{ID: c.ID, Name: c.Name, Kind: c.Kind, Events: nonNil(c.Events),
+	v := channelView{ID: c.ID, ProjectID: c.ProjectID, Name: c.Name, Kind: c.Kind, Events: nonNil(c.Events),
 		LastSentAt: c.LastSentAt, LastError: c.LastError, LastErrorAt: c.LastErrorAt}
 	cfg, err := s.channelConfig(c)
 	if err != nil {
@@ -160,6 +168,9 @@ func (s *Server) viewChannel(c *store.NotificationChannel) channelView {
 // channelRequest creates or changes a channel. An empty secret field
 // (Slack/Discord URL, token, SMTP password) keeps the current one.
 type channelRequest struct {
+	// ProjectID: a new channel's project (0: the whole panel, for its
+	// admins); a change keeps the project.
+	ProjectID    int64    `json:"project_id"`
 	Name         string   `json:"name"`
 	Kind         string   `json:"kind"`
 	Events       []string `json:"events"`
@@ -279,7 +290,9 @@ func (req *channelRequest) config(old *channelConfig) (*channelConfig, error) {
 	return cfg, nil
 }
 
-func (req *channelRequest) check() error {
+// check validates the name and events of a channel of project (0: the
+// whole panel).
+func (req *channelRequest) check(project int64) error {
 	req.Name = strings.TrimSpace(req.Name)
 	if !serverNameRE.MatchString(req.Name) {
 		return errors.New("name must be 1-63 characters: letters, digits, dot, dash, underscore")
@@ -287,14 +300,32 @@ func (req *channelRequest) check() error {
 	slices.Sort(req.Events)
 	req.Events = slices.Compact(req.Events)
 	for _, e := range req.Events {
-		if !validEvent(e) {
+		ev, ok := findEvent(e)
+		if !ok {
 			return fmt.Errorf("unknown event %q", e)
 		}
+		if project != 0 && !ev.Project {
+			return fmt.Errorf("a project's channel gets only events about its resources, not %q", e)
+		}
+	}
+	// A project's channel reaches only public addresses: the private
+	// network is the panel's.
+	if project != 0 && req.AllowPrivate {
+		return errors.New("only channels of the whole panel may reach private addresses")
 	}
 	return nil
 }
 
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request, p *principal) {
+	visible, err := s.channelProjects(r, p)
+	if err != nil {
+		s.internalError(w, r, "load project roles", err)
+		return
+	}
+	if visible == nil {
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return
+	}
 	list, err := s.db.NotificationChannels(r.Context())
 	if err != nil {
 		s.internalError(w, r, "list notification channels", err)
@@ -305,12 +336,44 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request, p *
 		s.internalError(w, r, "count queued notifications", err)
 		return
 	}
-	out := make([]channelView, len(list))
-	for i, c := range list {
-		out[i] = s.viewChannel(c)
-		out[i].Queued = queued[c.ID]
+	out := []channelView{}
+	for _, c := range list {
+		if visible(c.ProjectID) {
+			v := s.viewChannel(c)
+			v.Queued = queued[c.ID]
+			out = append(out, v)
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"channels": out, "events": notificationEvents, "panel_url": s.panelURL(r.Context())})
+	panelURL := ""
+	if p.user.Role.AtLeast(store.RoleAdmin) {
+		panelURL = s.panelURL(r.Context())
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"channels": out, "events": notificationEvents, "panel_url": panelURL})
+}
+
+// channelProjects returns a filter of the channels the principal manages:
+// a panel admin all of them, a project's admin those of the project. It is
+// nil for one who manages none.
+func (s *Server) channelProjects(r *http.Request, p *principal) (func(project int64) bool, error) {
+	if p.user.Role.AtLeast(store.RoleAdmin) {
+		return func(int64) bool { return true }, nil
+	}
+	projects, err := s.db.Projects(r.Context())
+	if err != nil {
+		return nil, err
+	}
+	admin := map[int64]bool{}
+	for _, pr := range projects {
+		if ok, err := s.canIn(r.Context(), p, pr.ID, store.RoleAdmin); err != nil {
+			return nil, err
+		} else if ok {
+			admin[pr.ID] = true
+		}
+	}
+	if len(admin) == 0 {
+		return nil, nil
+	}
+	return func(project int64) bool { return admin[project] }, nil
 }
 
 // settingPanelURL is the panel's public address, for links in messages.
@@ -354,7 +417,15 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request, p *
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := req.check(); err != nil {
+	if req.ProjectID == 0 {
+		if !p.user.Role.AtLeast(store.RoleAdmin) {
+			writeError(w, http.StatusForbidden, "only the panel's admins add channels of the whole panel: choose a project")
+			return
+		}
+	} else if _, ok := s.checkCreate(w, r, p, req.ProjectID); !ok {
+		return
+	}
+	if err := req.check(req.ProjectID); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
@@ -364,9 +435,11 @@ func (s *Server) handleCreateChannel(w http.ResponseWriter, r *http.Request, p *
 		return
 	}
 	// The config is sealed with the channel's ID: insert, then store it.
-	c := &store.NotificationChannel{Name: req.Name, Kind: req.Kind, Events: req.Events, Config: []byte{}}
+	c := &store.NotificationChannel{ProjectID: req.ProjectID, Name: req.Name, Kind: req.Kind, Events: req.Events, Config: []byte{}}
 	if err := s.db.CreateNotificationChannel(r.Context(), c); errors.Is(err, store.ErrNameTaken) {
 		writeError(w, http.StatusConflict, "a channel with this name exists")
+		return
+	} else if projectError(w, err) {
 		return
 	} else if err != nil {
 		s.internalError(w, r, "create notification channel", err)
@@ -397,11 +470,24 @@ func (s *Server) saveChannel(w http.ResponseWriter, r *http.Request, c *store.No
 	return true
 }
 
-func (s *Server) pathChannel(w http.ResponseWriter, r *http.Request) (*store.NotificationChannel, bool) {
+// pathChannel loads the channel {id}: a panel admin manages every channel,
+// a project's admin those of the project (others are not found).
+func (s *Server) pathChannel(w http.ResponseWriter, r *http.Request, p *principal) (*store.NotificationChannel, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err == nil {
 		c, err := s.db.NotificationChannel(r.Context(), id)
 		if err == nil {
+			role := p.user.Role
+			if c.ProjectID != 0 {
+				if role, err = s.roleIn(r.Context(), p, c.ProjectID); err != nil {
+					s.internalError(w, r, "load project roles", err)
+					return nil, false
+				}
+			}
+			if !roleAllows(w, role, store.RoleAdmin, "channel not found") {
+				return nil, false
+			}
+			p.project = c.ProjectID
 			return c, true
 		}
 		if !errors.Is(err, store.ErrNotFound) {
@@ -414,7 +500,7 @@ func (s *Server) pathChannel(w http.ResponseWriter, r *http.Request) (*store.Not
 }
 
 func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request, p *principal) {
-	c, ok := s.pathChannel(w, r)
+	c, ok := s.pathChannel(w, r, p)
 	if !ok {
 		return
 	}
@@ -429,7 +515,11 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request, p *
 		writeError(w, http.StatusUnprocessableEntity, "the kind of a channel cannot change")
 		return
 	}
-	if err := req.check(); err != nil {
+	if req.ProjectID != 0 && req.ProjectID != c.ProjectID {
+		writeError(w, http.StatusUnprocessableEntity, "a channel stays in its project: add a new one instead")
+		return
+	}
+	if err := req.check(c.ProjectID); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
@@ -452,7 +542,7 @@ func (s *Server) handleUpdateChannel(w http.ResponseWriter, r *http.Request, p *
 }
 
 func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request, p *principal) {
-	c, ok := s.pathChannel(w, r)
+	c, ok := s.pathChannel(w, r, p)
 	if !ok {
 		return
 	}
@@ -466,7 +556,7 @@ func (s *Server) handleDeleteChannel(w http.ResponseWriter, r *http.Request, p *
 
 // handleTestChannel sends a test message now and reports the outcome.
 func (s *Server) handleTestChannel(w http.ResponseWriter, r *http.Request, p *principal) {
-	c, ok := s.pathChannel(w, r)
+	c, ok := s.pathChannel(w, r, p)
 	if !ok {
 		return
 	}
@@ -494,9 +584,11 @@ func (s *Server) deliver(ctx context.Context, c *store.NotificationChannel, m no
 			return validHookURL(u.String(), allowPrivate)
 		}, "allow private addresses for a webhook on your network")
 	}
+	// A project's channel never reaches the private network.
+	private := c.ProjectID == 0
 	switch c.Kind {
 	case "webhook":
-		return notify.Webhook(ctx, hook(cfg.AllowPrivate), cfg.URL, cfg.Secret, m)
+		return notify.Webhook(ctx, hook(cfg.AllowPrivate && private), cfg.URL, cfg.Secret, m)
 	case "slack":
 		return notify.Slack(ctx, hook(s.notifyPrivate), cfg.URL, m)
 	case "discord":
@@ -507,7 +599,11 @@ func (s *Server) deliver(ctx context.Context, c *store.NotificationChannel, m no
 		if cfg.SMTP == nil {
 			return errors.New("no SMTP settings")
 		}
-		return notify.Email(ctx, *cfg.SMTP, m)
+		smtp := *cfg.SMTP
+		if !private && !s.notifyPrivate {
+			smtp.Dialer = publicDialer("a project's channel reaches only public mail servers")
+		}
+		return notify.Email(ctx, smtp, m)
 	}
 	return fmt.Errorf("unknown kind %q", c.Kind)
 }
@@ -534,19 +630,20 @@ func (s *Server) notify(m notify.Message) {
 	}
 	// Messages of one event within notifyWindow go out together: one down
 	// server fails many health checks at once.
+	// Per event and project: a project's channels get only their messages.
+	key := m.Event + "|" + strconv.FormatInt(m.Project, 10)
 	s.batchMu.Lock()
 	defer s.batchMu.Unlock()
-	if s.batches[m.Event] == nil {
-		event := m.Event
-		time.AfterFunc(s.notifyWindow, func() { s.flushBatch(event) })
+	if s.batches[key] == nil {
+		time.AfterFunc(s.notifyWindow, func() { s.flushBatch(key) })
 	}
-	s.batches[m.Event] = append(s.batches[m.Event], m)
+	s.batches[key] = append(s.batches[key], m)
 }
 
-func (s *Server) flushBatch(event string) {
+func (s *Server) flushBatch(key string) {
 	s.batchMu.Lock()
-	msgs := s.batches[event]
-	delete(s.batches, event)
+	msgs := s.batches[key]
+	delete(s.batches, key)
 	s.batchMu.Unlock()
 	for _, m := range summarize(msgs) {
 		s.enqueue(m)
@@ -563,7 +660,7 @@ func summarize(msgs []notify.Message) []notify.Message {
 		return msgs
 	}
 	first := msgs[0]
-	sum := notify.Message{Event: first.Event, At: first.At, Link: first.Link,
+	sum := notify.Message{Event: first.Event, At: first.At, Link: first.Link, Project: first.Project,
 		Title: fmt.Sprintf("%s and %d more", first.Title, len(msgs)-1)}
 	var b strings.Builder
 	const listed = 20
@@ -582,8 +679,8 @@ func summarize(msgs []notify.Message) []notify.Message {
 	return []notify.Message{sum}
 }
 
-// enqueue stores m for every channel subscribed to its event and starts
-// delivering it.
+// enqueue stores m for every channel subscribed to its event (the panel's
+// channels, and those of the project it is about) and starts delivering it.
 func (s *Server) enqueue(m notify.Message) {
 	ctx := context.Background()
 	// m.Link is a page of the panel: a link only once its address is known.
@@ -599,7 +696,7 @@ func (s *Server) enqueue(m notify.Message) {
 	}
 	var ids []int64
 	for _, c := range list {
-		if slices.Contains(c.Events, m.Event) {
+		if slices.Contains(c.Events, m.Event) && (c.ProjectID == 0 || c.ProjectID == m.Project) {
 			ids = append(ids, c.ID)
 		}
 	}

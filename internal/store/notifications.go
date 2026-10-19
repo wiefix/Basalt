@@ -5,16 +5,19 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
 // NotificationChannel is where events are sent.
 type NotificationChannel struct {
-	ID     int64
-	Name   string
-	Kind   string // webhook, slack, discord, telegram, email
-	Config []byte // encrypted settings (kind-specific JSON)
-	Events []string
+	ID int64
+	// ProjectID: the project whose events it receives (0: the whole panel).
+	ProjectID int64
+	Name      string
+	Kind      string // webhook, slack, discord, telegram, email
+	Config    []byte // encrypted settings (kind-specific JSON)
+	Events    []string
 	// The outcome of the last delivery.
 	LastSentAt  *time.Time
 	LastError   string
@@ -22,14 +25,14 @@ type NotificationChannel struct {
 	CreatedAt   time.Time
 }
 
-const channelColumns = `id, name, kind, config, events, last_sent_at, last_error, last_error_at, created_at`
+const channelColumns = `id, COALESCE(project_id, 0), name, kind, config, events, last_sent_at, last_error, last_error_at, created_at`
 
 func scanChannel(row interface{ Scan(...any) error }) (*NotificationChannel, error) {
 	var c NotificationChannel
 	var events string
 	var sent, errAt sql.NullInt64
 	var created int64
-	err := row.Scan(&c.ID, &c.Name, &c.Kind, &c.Config, &events, &sent, &c.LastError, &errAt, &created)
+	err := row.Scan(&c.ID, &c.ProjectID, &c.Name, &c.Kind, &c.Config, &events, &sent, &c.LastError, &errAt, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -71,9 +74,12 @@ func (db *DB) CreateNotificationChannel(ctx context.Context, c *NotificationChan
 	events, _ := json.Marshal(nonNilStrings(c.Events))
 	var created int64
 	err := db.W.QueryRowContext(ctx,
-		`INSERT INTO notification_channels (name, kind, config, events) VALUES (?, ?, ?, ?) RETURNING id, created_at`,
-		c.Name, c.Kind, c.Config, string(events)).Scan(&c.ID, &created)
+		`INSERT INTO notification_channels (project_id, name, kind, config, events) VALUES (?, ?, ?, ?, ?) RETURNING id, created_at`,
+		nullID(c.ProjectID), c.Name, c.Kind, c.Config, string(events)).Scan(&c.ID, &created)
 	if err != nil {
+		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+			return ErrNoProject
+		}
 		return nameTaken(err)
 	}
 	c.CreatedAt = time.Unix(created, 0)
@@ -81,7 +87,7 @@ func (db *DB) CreateNotificationChannel(ctx context.Context, c *NotificationChan
 }
 
 // UpdateNotificationChannel changes a channel's name, settings and events
-// (not its kind).
+// (not its kind or project).
 func (db *DB) UpdateNotificationChannel(ctx context.Context, c *NotificationChannel) error {
 	events, _ := json.Marshal(nonNilStrings(c.Events))
 	res, err := db.W.ExecContext(ctx, `UPDATE notification_channels SET name = ?, config = ?, events = ? WHERE id = ?`,

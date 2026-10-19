@@ -278,6 +278,7 @@ export interface ChannelRequest {
   from?: string;
   kind?: string;
   name?: string;
+  project_id?: number;
   secret?: string;
   smtp_host?: string;
   smtp_insecure?: boolean;
@@ -302,6 +303,7 @@ export interface ChannelView {
   last_error_at?: string;
   last_sent_at: string | null;
   name: string;
+  project_id: number;
   queued: number;
   secret?: string;
   smtp_host?: string;
@@ -806,6 +808,12 @@ export interface MoveRequest {
 
 export interface NameserversRequest {
   nameservers?: string[];
+}
+
+export interface NotificationEvent {
+  id: string;
+  label: string;
+  project: boolean;
 }
 
 export interface PanelBackupView {
@@ -1534,10 +1542,7 @@ export type GetMailDomainsIdMailboxesResponse = {
 
 export type GetNotificationsResponse = {
   channels: ChannelView[];
-  events: {
-    id: string;
-    label: string;
-  }[];
+  events: NotificationEvent[];
   panel_url: string;
 };
 

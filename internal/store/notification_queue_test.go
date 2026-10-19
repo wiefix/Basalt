@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -69,5 +70,41 @@ func TestNotificationQueue(t *testing.T) {
 	}
 	if n, _ := db.QueuedNotifications(ctx); n[a.ID] != 0 || n[b.ID] == 0 {
 		t.Fatalf("after deleting channel a: %v", n)
+	}
+}
+
+// TestProjectChannels: a channel's name is unique among the panel's
+// channels and within its project; a project's channels go with it.
+func TestProjectChannels(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTemp(t)
+	shop, _ := db.CreateProject(ctx, "Shop", "")
+	ch := func(project int64) *NotificationChannel {
+		return &NotificationChannel{ProjectID: project, Name: "ops", Kind: "webhook", Config: []byte("x")}
+	}
+	if err := db.CreateNotificationChannel(ctx, ch(0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateNotificationChannel(ctx, ch(0)); !errors.Is(err, ErrNameTaken) {
+		t.Fatalf("second panel channel of the name: %v", err)
+	}
+	c := ch(shop.ID)
+	if err := db.CreateNotificationChannel(ctx, c); err != nil {
+		t.Fatalf("the name in a project: %v", err)
+	}
+	if err := db.CreateNotificationChannel(ctx, ch(shop.ID)); !errors.Is(err, ErrNameTaken) {
+		t.Fatalf("second channel of the name in the project: %v", err)
+	}
+	if err := db.CreateNotificationChannel(ctx, ch(999)); !errors.Is(err, ErrNoProject) {
+		t.Fatalf("channel of a missing project: %v", err)
+	}
+	if got, _ := db.NotificationChannel(ctx, c.ID); got.ProjectID != shop.ID {
+		t.Fatalf("project of the channel: %+v", got)
+	}
+	if err := db.DeleteProject(ctx, shop.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.NotificationChannel(ctx, c.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("channel outlived its project: %v", err)
 	}
 }
