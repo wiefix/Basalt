@@ -32,9 +32,12 @@ run node1
 sleep 3
 
 PANELIP=$(docker inspect -f '{{(index .NetworkSettings.Networks "basalt-net").IPAddress}}' basalt-panel)
-echo "### install panel (agents connect to its IP, as with a domain behind a proxy)"
-OUT=$(docker exec basalt-panel sh /deploy/install.sh panel --binary /dist/basalt-linux-$ARCH --agent-host "$PANELIP" 2>&1) || { echo "$OUT"; exit 1; }
+echo "### guided install of the panel (answers typed into a terminal; agents connect to its IP)"
+# Domain: none; agents: the IP; Docker, PHP, MariaDB, DNS: no; install: yes.
+OUT=$(printf '\n%s\nn\nn\nn\nn\ny\n' "$PANELIP" |
+  docker exec -i basalt-panel script -qec "sh /deploy/install.sh --binary /dist/basalt-linux-$ARCH" /dev/null 2>&1) || { echo "$OUT"; exit 1; }
 echo "$OUT"
+case "$OUT" in *"Ready to install"*"Agents:  $PANELIP:8443"*"Basalt is running"*) ;; *) echo "the guided install did not ask or finish"; exit 6 ;; esac
 # The installer's service starts the agent: no advice to start it by hand.
 case "$OUT" in *"start the agent with"*) echo "the installer tells to start the agent by hand"; exit 6 ;; esac
 echo "### a second run without --agent-host keeps it"

@@ -1,6 +1,8 @@
 #!/bin/sh
 # Basalt installer for Debian and Ubuntu (amd64, arm64).
 #
+#   Guided:      curl -fsSL https://github.com/wiefix/Basalt/releases/latest/download/install.sh | sh
+#                asks for the panel's domain and what to install, then sets up the panel here.
 #   Panel host:  sh install.sh panel [--domain panel.example.com] [--agent-host agents.example.com] [--binary ./basalt] [--with-php] [--with-mariadb] [--with-docker] [--with-dns]
 #
 #   --agent-host is the name or IP other servers' agents connect to (port
@@ -38,16 +40,59 @@ RELEASES=https://github.com/wiefix/Basalt/releases/latest/download
 RELEASE_KEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBUisbbyEb5bDa9jp6Y2foeJ6cqcja04cPmm/BcLGD4v basalt-release'
 
 say() { printf '\033[1m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[33mwarning:\033[0m %s\n' "$*"; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
+public_ip() {
+	ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}' ||
+		hostname -I | awk '{print $1}'
+}
+
+# ask VAR QUESTION DEFAULT reads an answer from the terminal (the script
+# itself may come through a pipe); an empty answer takes the default.
+ask() {
+	if [ -n "$3" ]; then
+		printf '%s [%s]: ' "$2" "$3" >/dev/tty
+	else
+		printf '%s: ' "$2" >/dev/tty
+	fi
+	IFS= read -r _answer </dev/tty || _answer=""
+	[ -n "$_answer" ] || _answer=$3
+	eval "$1=\$_answer"
+}
+
+# yesno VAR QUESTION y|n sets VAR to 1 or 0.
+yesno() {
+	while :; do
+		ask _yn "$2 (y/n)" "$3"
+		case "$_yn" in
+		y | Y | yes) eval "$1=1"; return ;;
+		n | N | no) eval "$1=0"; return ;;
+		esac
+	done
+}
+
+host_ok() {
+	case "$1" in
+	"" | *[!A-Za-z0-9.:\[\]-]*) return 1 ;;
+	esac
+}
+
 usage() {
-	sed -n '2,22p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
+	if [ -f "$0" ]; then
+		sed -n '2,/^set -eu/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
+	else
+		echo "usage: sh install.sh [panel | agent | uninstall] [options]; without a mode, in a terminal, it asks what to install"
+	fi
 	exit 2
 }
 
+# No mode (or only options such as --binary): the guided install of a panel.
 MODE=${1:-}
-[ -n "$MODE" ] || usage
-shift
+case "$MODE" in
+"" | -*) MODE=guided ;;
+*) shift ;;
+esac
 DOMAIN="" AGENT_HOST="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0 USERNS=auto WITH_DNS=keep PURGE=0 YES=0
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -74,9 +119,7 @@ done
 # ---------- checks ----------
 
 [ "$(id -u)" -eq 0 ] || die "run as root (sudo sh install.sh ...)"
-case "$AGENT_HOST" in
-*[!A-Za-z0-9.:\[\]-]*) die "--agent-host must be a host name or an IP address" ;;
-esac
+[ -z "$AGENT_HOST" ] || host_ok "$AGENT_HOST" || die "--agent-host must be a host name or an IP address"
 [ -r /etc/os-release ] || die "cannot detect the operating system"
 . /etc/os-release
 case " ${ID:-} ${ID_LIKE:-} " in
@@ -90,10 +133,75 @@ aarch64 | arm64) ARCH=arm64 ;;
 *) die "unsupported CPU architecture $(uname -m)" ;;
 esac
 case "$MODE" in
-panel | uninstall) ;;
+panel | uninstall | guided) ;;
 agent) [ -n "$PANEL" ] && [ -n "$TOKEN" ] && [ -n "$CA_SHA" ] || die "agent mode needs --panel, --token and --ca-sha256" ;;
 *) usage ;;
 esac
+
+# ---------- guided install ----------
+
+if [ "$MODE" = guided ]; then
+	(exec </dev/tty) 2>/dev/null || usage # no terminal to ask on
+	MODE=panel
+	IP=$(public_ip)
+	echo
+	say "Basalt: install the panel on this server"
+	echo "  The panel, its proxy and an agent run here. Other servers are added later in the"
+	echo "  panel (Servers, Add server), which shows the one command to run on each."
+	echo
+	while :; do
+		ask DOMAIN "Domain of the panel, e.g. panel.example.com (empty: this server's IP $IP)" "$DOMAIN"
+		DOMAIN=$(printf '%s' "$DOMAIN" | tr 'A-Z' 'a-z')
+		case "$DOMAIN" in
+		"") break ;;
+		*[!a-z0-9.-]* | .* | *. | *..* | -* | *-) ;;
+		*.*) break ;;
+		esac
+		echo "  That is not a domain name."
+		DOMAIN=""
+	done
+	RESOLVED=""
+	if [ -n "$DOMAIN" ] && command -v getent >/dev/null 2>&1; then
+		RESOLVED=$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk '{print $1; exit}')
+		if [ -z "$RESOLVED" ]; then
+			warn "$DOMAIN does not resolve yet. Add an A record $DOMAIN -> $IP; the panel gets its certificate once it does."
+		elif [ "$RESOLVED" != "$IP" ]; then
+			warn "$DOMAIN points to $RESOLVED, not to this server ($IP). Behind a proxy (Cloudflare's orange cloud) the panel works, but other servers' agents need a direct address below. Otherwise fix the A record."
+		else
+			echo "  $DOMAIN points to this server: the panel gets a Let's Encrypt certificate."
+		fi
+	elif [ -z "$DOMAIN" ]; then
+		echo "  Without a domain the browser warns about the panel's certificate (re-run with a domain later)."
+	fi
+	DEFAULT_AGENT=${DOMAIN:-$IP}
+	[ -z "$RESOLVED" ] || [ "$RESOLVED" = "$IP" ] || DEFAULT_AGENT=$IP
+	[ ! -s "$LIB/server/agent-host" ] || DEFAULT_AGENT=$(cat "$LIB/server/agent-host")
+	[ -z "$AGENT_HOST" ] || DEFAULT_AGENT=$AGENT_HOST
+	while :; do
+		ask AGENT_HOST "Address other servers reach this one at (port 8443, directly, not through a proxy)" "$DEFAULT_AGENT"
+		host_ok "$AGENT_HOST" && break
+		echo "  Give a host name or an IP address."
+	done
+	echo
+	echo "  What should this server run besides the panel? (Each can be added later by running this again.)"
+	yesno WITH_DOCKER "  Docker: apps from images, git and compose, databases, mail, the app catalog" y
+	yesno WITH_PHP "  PHP-FPM: PHP sites" y
+	yesno WITH_DB "  MariaDB: databases of PHP sites" y
+	yesno DNS_ANSWER "  DNS server on port 53: host your domains' DNS here" n
+	[ "$DNS_ANSWER" = 0 ] || WITH_DNS=1
+	echo
+	say "Ready to install"
+	echo "  Panel:   https://${DOMAIN:-$IP}/"
+	echo "  Agents:  $AGENT_HOST:8443"
+	ON=""
+	[ "$WITH_DOCKER" = 0 ] || ON="$ON Docker"
+	[ "$WITH_PHP" = 0 ] || ON="$ON PHP"
+	[ "$WITH_DB" = 0 ] || ON="$ON MariaDB"
+	[ "$WITH_DNS" != 1 ] || ON="$ON DNS"
+	echo "  Also:   ${ON:- nothing else}"
+	yesno GO "Install now" y
+	[ "$GO" = 1 ] || { echo "Nothing was changed."; exit 0; }
+fi
 
 # ---------- uninstall ----------
 
@@ -305,10 +413,6 @@ fi
 
 # ---------- addresses ----------
 
-public_ip() {
-	ip -4 route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit }}' ||
-		hostname -I | awk '{print $1}'
-}
 ADDR=${DOMAIN:-$(public_ip)}
 [ -n "$ADDR" ] || ADDR=$(hostname)
 
