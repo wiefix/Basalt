@@ -142,11 +142,11 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request, p *pr
 	case !validTokenName(req.Name):
 		writeError(w, http.StatusUnprocessableEntity, "name: 1 to 64 characters, no surrounding spaces")
 		return
-	case !req.Role.Valid():
+	case !req.Role.AtLeast(store.RoleViewer):
 		writeError(w, http.StatusUnprocessableEntity, "role must be viewer, member, admin or owner")
 		return
-	case !p.user.Role.AtLeast(req.Role):
-		writeError(w, http.StatusUnprocessableEntity, "a token cannot do more than your own role ("+string(p.user.Role)+")")
+	case !s.highestRole(r, p).AtLeast(req.Role):
+		writeError(w, http.StatusUnprocessableEntity, "a token cannot do more than your own role ("+string(s.highestRole(r, p))+")")
 		return
 	case req.ExpiresDays < 0 || req.ExpiresDays > maxTokenDays:
 		writeError(w, http.StatusUnprocessableEntity, "expires_days must be 0 (never) to "+strconv.Itoa(maxTokenDays))
@@ -176,6 +176,21 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request, p *pr
 	s.audit(r, &p.user.ID, "token.created", map[string]any{"token_id": t.ID, "name": t.Name, "role": t.Role,
 		"expires_days": req.ExpiresDays})
 	writeJSON(w, http.StatusCreated, map[string]any{"token": s.viewToken(t, false), "secret": secret})
+}
+
+// highestRole is the most the user may do anywhere: their global role or
+// their highest role in a project. A token's role caps both, so a token
+// of a project admin with role admin is an admin in that project only.
+func (s *Server) highestRole(r *http.Request, p *principal) store.Role {
+	best := p.user.Role
+	if roles, err := s.db.UserProjectRoles(r.Context(), p.user.ID); err == nil {
+		for _, pr := range roles {
+			if !best.AtLeast(pr) {
+				best = pr
+			}
+		}
+	}
+	return best
 }
 
 func (s *Server) handleDeleteMyToken(w http.ResponseWriter, r *http.Request, p *principal) {

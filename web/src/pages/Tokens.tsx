@@ -4,7 +4,7 @@ import { Link } from "react-router";
 import { api, roleRank, type APIToken, type Role, type User } from "../api";
 import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
 
-const roleText: Record<Role, string> = {
+const roleText: Record<Exclude<Role, "user">, string> = {
   viewer: "Read only (viewer)",
   member: "Deploy and manage files (member)",
   admin: "Manage everything (admin)",
@@ -131,9 +131,12 @@ export function TokensCard({ user }: { user: User }) {
 
 function NewTokenModal({ user, onClose }: { user: User; onClose: () => void }) {
   const qc = useQueryClient();
-  const roles = (Object.keys(roleText) as Role[]).filter((r) => roleRank[r] <= roleRank[user.role]);
+  // A user with no role on the panel may give a token up to their role in a
+  // project (the panel checks it).
+  const max = user.role === "user" ? "admin" : user.role;
+  const roles = (Object.keys(roleText) as Exclude<Role, "user">[]).filter((r) => roleRank[r] <= roleRank[max]);
   const [name, setName] = useState("");
-  const [role, setRole] = useState<Role>(roleRank[user.role] >= roleRank.member ? "member" : "viewer");
+  const [role, setRole] = useState<Role>(roleRank[max] >= roleRank.member ? "member" : "viewer");
   const [days, setDays] = useState(90);
   const [password, setPassword] = useState("");
   const [secret, setSecret] = useState<string | null>(null);
@@ -196,7 +199,7 @@ function NewTokenModal({ user, onClose }: { user: User; onClose: () => void }) {
           <select className="input" value={role} onChange={(e) => setRole(e.target.value as Role)}>
             {roles.map((r) => (
               <option key={r} value={r}>
-                {roleText[r]}
+                {roleText[r as keyof typeof roleText]}
               </option>
             ))}
           </select>

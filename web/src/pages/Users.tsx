@@ -5,6 +5,7 @@ import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useCon
 import { AllTokensCard } from "./Tokens";
 
 const ROLES: { role: Role; text: string }[] = [
+  { role: "user", text: "User — only the projects they are a member of" },
   { role: "viewer", text: "Viewer — read-only access" },
   { role: "member", text: "Member — manage files and use servers" },
   { role: "admin", text: "Admin — manage servers, sites and users" },

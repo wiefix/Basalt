@@ -85,9 +85,11 @@ function Shell({ user }: { user: User }) {
         <div className="brand">
           <Logo /> Basalt
         </div>
-        <NavLink className="nav-link" to="/servers">
-          <Icon name="server" /> Servers
-        </NavLink>
+        {can(user, "viewer") && (
+          <NavLink className="nav-link" to="/servers">
+            <Icon name="server" /> Servers
+          </NavLink>
+        )}
         <NavLink className="nav-link" to="/sites">
           <Icon name="globe" /> Sites
         </NavLink>
@@ -100,9 +102,11 @@ function Shell({ user }: { user: User }) {
         <NavLink className="nav-link" to="/databases">
           <Icon name="database" /> Databases
         </NavLink>
-        <NavLink className="nav-link" to="/mail">
-          <Icon name="mail" /> Mail
-        </NavLink>
+        {can(user, "viewer") && (
+          <NavLink className="nav-link" to="/mail">
+            <Icon name="mail" /> Mail
+          </NavLink>
+        )}
         <NavLink className="nav-link" to="/monitoring">
           <Icon name="pulse" /> Monitoring
         </NavLink>
@@ -151,7 +155,8 @@ function Shell({ user }: { user: User }) {
       </aside>
       <main className="main">
         <Routes>
-          <Route path="/" element={<Navigate to="/servers" replace />} />
+          {/* Users with no role on the panel work in their projects' sites and apps. */}
+          <Route path="/" element={<Navigate to={can(user, "viewer") ? "/servers" : "/sites"} replace />} />
           <Route path="/servers" element={<ServersPage user={user} />} />
           <Route path="/servers/:id" element={<ServerPage user={user} />} />
           <Route path="/sites" element={<SitesPage user={user} />} />

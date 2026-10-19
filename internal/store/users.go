@@ -16,9 +16,12 @@ const (
 	RoleAdmin  Role = "admin"
 	RoleMember Role = "member"
 	RoleViewer Role = "viewer"
+	// RoleUser has no rights on the panel itself, only those of the
+	// projects the user belongs to.
+	RoleUser Role = "user"
 )
 
-var roleRank = map[Role]int{RoleViewer: 1, RoleMember: 2, RoleAdmin: 3, RoleOwner: 4}
+var roleRank = map[Role]int{RoleUser: 1, RoleViewer: 2, RoleMember: 3, RoleAdmin: 4, RoleOwner: 5}
 
 // AtLeast reports whether r grants at least the privileges of min.
 func (r Role) AtLeast(min Role) bool { return roleRank[r] >= roleRank[min] && roleRank[min] > 0 }

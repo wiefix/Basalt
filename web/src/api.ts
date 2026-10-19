@@ -1,7 +1,7 @@
 // Typed client for the Basalt API. Types mirror the JSON views in
 // internal/server/*_handlers.go.
 
-export type Role = "owner" | "admin" | "member" | "viewer";
+export type Role = "owner" | "admin" | "member" | "viewer" | "user";
 
 export interface User {
   id: number;
@@ -709,6 +709,7 @@ export interface OpenAPIOperation {
   operationId: string;
   tags: string[];
   "x-basalt-role"?: Role;
+  "x-basalt-project"?: boolean;
   parameters?: { name: string; in: "path" | "query"; description?: string }[];
   requestBody?: { content: Record<string, { schema: unknown }> };
   responses?: Record<string, { description: string; content?: Record<string, { schema: unknown }> }>;
@@ -1215,5 +1216,5 @@ export const sourceLabel = (a: App) =>
       ? `compose · ${(a.compose?.services ?? []).map((s) => s.name).join(", ")}`
       : a.image;
 
-export const roleRank: Record<Role, number> = { viewer: 1, member: 2, admin: 3, owner: 4 };
+export const roleRank: Record<Role, number> = { user: 0, viewer: 1, member: 2, admin: 3, owner: 4 };
 export const can = (user: User | undefined, min: Role) => !!user && roleRank[user.role] >= roleRank[min];

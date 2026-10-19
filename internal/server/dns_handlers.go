@@ -201,6 +201,60 @@ func (s *Server) checkWildcards(ctx context.Context, domains []string, tls proxy
 	return nil
 }
 
+// checkDomainProjects refuses domains in a DNS zone of another project:
+// whoever holds a zone controls the names in it (records, certificates
+// through DNS-01), so a site or app of project may not take one.
+func (s *Server) checkDomainProjects(ctx context.Context, domains []string, project int64) error {
+	if len(domains) == 0 {
+		return nil
+	}
+	zones, err := s.db.DNSZones(ctx)
+	if err != nil {
+		return err
+	}
+	names := make([]string, len(zones))
+	owner := map[string]int64{}
+	for i, z := range zones {
+		names[i], owner[z.Name] = z.Name, z.ProjectID
+	}
+	for _, d := range domains {
+		if zn := dns.ZoneOf(strings.TrimPrefix(d, "*."), names); zn != "" && owner[zn] != project {
+			return invalidZone{fmt.Errorf("%s is in the DNS zone %s of another project", d, zn)}
+		}
+	}
+	return nil
+}
+
+// checkZoneProjects refuses a zone for project when sites or apps of other
+// projects answer to names in it.
+func (s *Server) checkZoneProjects(ctx context.Context, zone string, project int64) error {
+	list, err := s.db.DomainProjects(ctx)
+	if err != nil {
+		return err
+	}
+	for _, d := range list {
+		if d.Project != project && dns.ZoneOf(strings.TrimPrefix(d.Domain, "*."), []string{zone}) != "" {
+			return invalidZone{fmt.Errorf("%s, a domain of another project, is in %s: the zone must be in that project", d.Domain, zone)}
+		}
+	}
+	return nil
+}
+
+// domainError answers a domain or zone refused by checkDomainProjects or
+// checkZoneProjects (409), or another error; it reports whether err was set.
+func (s *Server) domainError(w http.ResponseWriter, r *http.Request, err error) bool {
+	var invalid invalidZone
+	switch {
+	case err == nil:
+		return false
+	case errors.As(err, &invalid):
+		writeError(w, http.StatusConflict, err.Error())
+	default:
+		s.internalError(w, r, "check domains", err)
+	}
+	return true
+}
+
 // challengeTTL bounds how long a DNS-01 record stays if the proxy never
 // removes it (the CA validates within minutes).
 const challengeTTL = time.Hour
@@ -288,9 +342,19 @@ func (s *Server) handleDNSOverview(w http.ResponseWriter, r *http.Request, p *pr
 		s.internalError(w, r, "list dns servers", err)
 		return
 	}
-	zv := make([]dnsZoneView, len(zones))
-	for i, z := range zones {
-		zv[i] = viewDNSZone(z)
+	visible, err := s.visibleIn(r, p)
+	if err != nil {
+		s.internalError(w, r, "load project roles", err)
+		return
+	}
+	zv := []dnsZoneView{}
+	for _, z := range zones {
+		if visible(z.ProjectID) {
+			zv = append(zv, viewDNSZone(z))
+		}
+	}
+	if !p.user.Role.AtLeast(store.RoleViewer) {
+		servers = nil // the servers are the panel's: global roles see them
 	}
 	sv := make([]dnsServerView, len(servers))
 	for i, st := range servers {
@@ -343,9 +407,17 @@ func (s *Server) handleCreateZone(w http.ResponseWriter, r *http.Request, p *pri
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	project, ok := s.checkCreate(w, r, p, req.ProjectID)
+	if !ok {
+		return
+	}
+	req.ProjectID = project
 	name := dns.NormalizeZoneName(req.Name)
 	if err := dns.ValidateZoneName(name); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if s.domainError(w, r, s.checkZoneProjects(r.Context(), name, req.ProjectID)) {
 		return
 	}
 	ns, err := s.db.DNSNameservers(r.Context())
@@ -385,6 +457,9 @@ func (s *Server) pathZone(w http.ResponseWriter, r *http.Request) (*store.DNSZon
 	if err == nil {
 		z, err := s.db.DNSZone(r.Context(), id)
 		if err == nil {
+			if !s.checkProject(w, r, z.ProjectID, "zone not found") {
+				return nil, false
+			}
 			return z, true
 		}
 		if !errors.Is(err, store.ErrNotFound) {
@@ -458,6 +533,13 @@ func (s *Server) handlePutRecord(w http.ResponseWriter, r *http.Request, p *prin
 	if err := rec.Validate(z.Name); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
+	}
+	if rec.HealthCheck != 0 {
+		// Only a check of the zone's project (another project's is not found).
+		if c, err := s.db.HealthCheck(r.Context(), rec.HealthCheck); err == nil && c.ProjectID != z.ProjectID {
+			writeError(w, http.StatusUnprocessableEntity, "the health check does not exist")
+			return
+		}
 	}
 	out, err := s.db.PutDNSRecord(r.Context(), z.ID, id, &rec, checkZone, s.now())
 	if s.recordError(w, r, err) {

@@ -41,12 +41,13 @@ func TestProjectsAPI(t *testing.T) {
 	if mem := got["members"].([]any); len(mem) != 1 || mem[0].(map[string]any)["role"] != "admin" {
 		t.Fatalf("members: %v", mem)
 	}
-	// A project admin is not a global admin: projects stay the panel admins'.
+	// A project admin manages its members, but projects stay the panel admins'.
 	member := e.client()
 	member.login("m@example.com", pass)
 	member.want(http.StatusOK, "GET", "/api/v1/projects", nil)
 	member.want(http.StatusForbidden, "POST", "/api/v1/projects", map[string]any{"name": "Mine"})
-	member.want(http.StatusForbidden, "PUT", "/api/v1/projects/"+sid+"/members/"+mid, map[string]any{"role": "admin"})
+	member.want(http.StatusNoContent, "PUT", "/api/v1/projects/"+sid+"/members/"+mid, map[string]any{"role": "admin"})
+	member.want(http.StatusForbidden, "DELETE", "/api/v1/projects/"+sid, nil)
 
 	// Resources: in the chosen project, or the default one.
 	z := owner.want(http.StatusCreated, "POST", "/api/v1/dns/zones", map[string]any{"name": "example.com", "project_id": shop["id"]}).body["zone"].(map[string]any)

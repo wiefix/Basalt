@@ -135,6 +135,14 @@ func (s *Server) pathApp(w http.ResponseWriter, r *http.Request) (*store.App, bo
 		s.internalError(w, r, "load app", err)
 		return nil, false
 	}
+	// The mail server serves every project: only global roles reach it.
+	if app.Source == store.SourceMail {
+		if !s.checkGlobal(w, r, "app not found") {
+			return nil, false
+		}
+	} else if !s.checkProject(w, r, app.ProjectID, "app not found") {
+		return nil, false
+	}
 	return app, true
 }
 
@@ -260,6 +268,11 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	project, ok := s.checkCreate(w, r, p, req.ProjectID)
+	if !ok {
+		return
+	}
+	req.ProjectID = project
 	name := strings.TrimSpace(req.Name)
 	if !serverNameRE.MatchString(name) {
 		writeError(w, http.StatusUnprocessableEntity, "name must be 1-63 characters: letters, digits, dot, dash, underscore")
@@ -306,6 +319,9 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if s.domainError(w, r, s.checkDomainProjects(r.Context(), domains, req.ProjectID)) {
 		return
 	}
 	srv, err := s.db.ServerByID(r.Context(), req.ServerID)
@@ -375,9 +391,18 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request, p *princ
 		s.internalError(w, r, "list apps", err)
 		return
 	}
-	out := make([]appView, len(apps))
-	for i, a := range apps {
-		out[i] = s.viewAppFull(a)
+	visible, err := s.visibleIn(r, p)
+	if err != nil {
+		s.internalError(w, r, "load project roles", err)
+		return
+	}
+	out := []appView{}
+	for _, a := range apps {
+		// The mail server is in no project: global roles see it.
+		if a.Source == store.SourceMail && !p.user.Role.AtLeast(store.RoleViewer) || a.Source != store.SourceMail && !visible(a.ProjectID) {
+			continue
+		}
+		out = append(out, s.viewAppFull(a))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"apps": out})
 }
@@ -457,6 +482,9 @@ func (s *Server) handleSetAppDomains(w http.ResponseWriter, r *http.Request, p *
 	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if s.domainError(w, r, s.checkDomainProjects(r.Context(), domains, app.ProjectID)) {
 		return
 	}
 	if len(app.Replicas) > 0 {

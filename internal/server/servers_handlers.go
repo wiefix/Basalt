@@ -85,6 +85,14 @@ func (s *Server) viewServer(srv *store.Server) serverView {
 	}
 }
 
+// placementOnly is what users without a global role see of a server: what
+// they need to place sites and apps on it, not how it is run.
+func placementOnly(v serverView) serverView {
+	return serverView{ID: v.ID, Name: v.Name, Status: v.Status, PHPVersions: v.PHPVersions, Isolated: v.Isolated,
+		Docker: v.Docker, Restic: v.Restic, MariaDB: v.MariaDB, PHPLimits: v.PHPLimits,
+		DetectedIPs: []string{}, PublicIPs: []string{}, DNSIPs: v.DNSIPs, CreatedAt: v.CreatedAt}
+}
+
 type enrollmentView struct {
 	Token     string    `json:"token"`
 	ExpiresAt time.Time `json:"expires_at"`
@@ -172,6 +180,9 @@ func (s *Server) handleListServers(w http.ResponseWriter, r *http.Request, p *pr
 	out := make([]serverView, len(servers))
 	for i, srv := range servers {
 		out[i] = s.viewServer(srv)
+		if !p.user.Role.AtLeast(store.RoleViewer) {
+			out[i] = placementOnly(out[i])
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"servers": out})
 }

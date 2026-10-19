@@ -221,7 +221,11 @@ func projectExists(ctx context.Context, q interface {
 }
 
 // projectOrDefault is the project a new resource goes to.
-func projectOrDefault(id int64) int64 {
+func projectOrDefault(id int64) int64 { return ProjectOrDefault(id) }
+
+// ProjectOrDefault is the project a new resource with project id goes to
+// (0: the default one).
+func ProjectOrDefault(id int64) int64 {
 	if id <= 0 {
 		return DefaultProject
 	}
@@ -278,4 +282,33 @@ func (db *DB) MoveToProject(ctx context.Context, kind ProjectResource, id, proje
 		return ErrNotFound
 	}
 	return tx.Commit()
+}
+
+// DomainProject is a domain a site or app of a project answers to.
+type DomainProject struct {
+	Domain  string
+	Project int64
+}
+
+// DomainProjects lists the domains of sites and apps with their projects
+// (the mail server's names and manual routes belong to no project).
+func (db *DB) DomainProjects(ctx context.Context) ([]DomainProject, error) {
+	rows, err := db.R.QueryContext(ctx,
+		`SELECT DISTINCT d.domain, COALESCE(s.project_id, a.project_id) FROM proxy_route_domains d
+		 JOIN proxy_routes r ON r.id = d.route_id
+		 LEFT JOIN sites s ON s.id = r.site_id LEFT JOIN apps a ON a.id = r.app_id
+		 WHERE s.id IS NOT NULL OR (a.id IS NOT NULL AND a.source != 'mail') ORDER BY d.domain`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []DomainProject
+	for rows.Next() {
+		var d DomainProject
+		if err := rows.Scan(&d.Domain, &d.Project); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }

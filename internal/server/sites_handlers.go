@@ -53,6 +53,9 @@ func (s *Server) pathSite(w http.ResponseWriter, r *http.Request) (*store.Site, 
 		s.internalError(w, r, "load site", err)
 		return nil, false
 	}
+	if !s.checkProject(w, r, site.ProjectID, "site not found") {
+		return nil, false
+	}
 	return site, true
 }
 
@@ -111,6 +114,11 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, p *pri
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	project, ok := s.checkCreate(w, r, p, req.ProjectID)
+	if !ok {
+		return
+	}
+	req.ProjectID = project
 	name := strings.TrimSpace(req.Name)
 	if !serverNameRE.MatchString(name) {
 		writeError(w, http.StatusUnprocessableEntity, "name must be 1-63 characters: letters, digits, dot, dash, underscore")
@@ -122,6 +130,9 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, p *pri
 	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if s.domainError(w, r, s.checkDomainProjects(r.Context(), domains, req.ProjectID)) {
 		return
 	}
 	srv, err := s.db.ServerByID(r.Context(), req.ServerID)
@@ -171,9 +182,16 @@ func (s *Server) handleListSites(w http.ResponseWriter, r *http.Request, p *prin
 		s.internalError(w, r, "list sites", err)
 		return
 	}
-	out := make([]siteView, len(sites))
-	for i, site := range sites {
-		out[i] = viewSite(site)
+	visible, err := s.visibleIn(r, p)
+	if err != nil {
+		s.internalError(w, r, "load project roles", err)
+		return
+	}
+	out := []siteView{}
+	for _, site := range sites {
+		if visible(site.ProjectID) {
+			out = append(out, viewSite(site))
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sites": out})
 }
@@ -205,6 +223,9 @@ func (s *Server) handleSetSiteDomains(w http.ResponseWriter, r *http.Request, p 
 	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if s.domainError(w, r, s.checkDomainProjects(r.Context(), domains, site.ProjectID)) {
 		return
 	}
 	err = s.db.SetSiteDomains(r.Context(), site.ID, domains)

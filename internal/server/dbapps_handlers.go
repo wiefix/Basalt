@@ -151,7 +151,8 @@ func (s *Server) handleLinkApp(w http.ResponseWriter, r *http.Request, p *princi
 	}
 	target, err := s.db.AppByID(r.Context(), req.AppID)
 	switch {
-	case errors.Is(err, store.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound) || err == nil && target.ProjectID != dbApp.ProjectID:
+		// An app of another project is not there for this database.
 		writeError(w, http.StatusUnprocessableEntity, "app not found")
 		return
 	case err != nil:
@@ -159,9 +160,6 @@ func (s *Server) handleLinkApp(w http.ResponseWriter, r *http.Request, p *princi
 		return
 	case target.Source == store.SourceDatabase:
 		writeError(w, http.StatusUnprocessableEntity, "a database cannot be linked to another database")
-		return
-	case target.ProjectID != dbApp.ProjectID:
-		writeError(w, http.StatusUnprocessableEntity, "the app is in another project")
 		return
 	case target.ServerID != dbApp.ServerID:
 		writeError(w, http.StatusUnprocessableEntity, "the app runs on another server")

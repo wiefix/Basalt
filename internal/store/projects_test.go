@@ -206,6 +206,8 @@ func TestProjectsMigration(t *testing.T) {
 		`INSERT INTO apps (id, server_id, name, image, port) VALUES (7, 1, 'web', 'nginx:1.27', 80)`,
 		`INSERT INTO dns_zones (id, name, serial) VALUES (3, 'example.com', 1)`,
 		`INSERT INTO health_checks (id, name, kind, host, port, interval_s, timeout_s) VALUES (2, 'c', 'tcp', 'x', 80, 30, 5)`,
+		`INSERT INTO users (id, email, name, password_hash, role, webauthn_handle) VALUES (4, 'o@example.com', 'O', 'h', 'owner', x'01')`,
+		`INSERT INTO sessions (token_hash, user_id, ip, user_agent, expires_at) VALUES (x'aa', 4, '', '', 9999999999)`,
 	} {
 		if _, err := db.W.ExecContext(ctx, q); err != nil {
 			t.Fatalf("%s: %v", q, err)
@@ -224,6 +226,25 @@ func TestProjectsMigration(t *testing.T) {
 	db.W.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&fk)
 	if fk != 1 {
 		t.Fatal("foreign keys left off")
+	}
+	// The users table was rebuilt for the role "user": rows, references and
+	// the passkey handle's uniqueness stay.
+	if u, err := db.UserByID(ctx, 4); err != nil || u.Role != RoleOwner {
+		t.Fatalf("user after the rebuild: %+v %v", u, err)
+	}
+	if _, err := db.CreateUser(ctx, "u@example.com", "U", "h", RoleUser); err != nil {
+		t.Fatalf("role user: %v", err)
+	}
+	if _, err := db.W.ExecContext(ctx, `UPDATE users SET webauthn_handle = x'01' WHERE email = 'u@example.com'`); err == nil {
+		t.Fatal("two users with one passkey handle")
+	}
+	if _, err := db.W.ExecContext(ctx, `DELETE FROM users WHERE id = 4`); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	db.R.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&n)
+	if n != 0 {
+		t.Fatal("sessions outlived their user after the rebuild")
 	}
 	// The default project cannot go while it holds anything, even in SQL.
 	if _, err := db.W.ExecContext(ctx, `DELETE FROM projects WHERE id = 1`); err == nil {

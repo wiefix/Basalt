@@ -63,10 +63,10 @@ func TestOpenAPICoversRoutes(t *testing.T) {
 	if o := op("GET", "/api/v1/users"); o["x-basalt-role"] != "admin" || o["security"] != nil {
 		t.Errorf("list users: %v", o)
 	}
-	if o := op("POST", "/api/v1/account/tokens"); o["x-basalt-role"] != "viewer" || !strings.Contains(o["description"].(string), "not an API token") {
+	if o := op("POST", "/api/v1/account/tokens"); o["x-basalt-role"] != nil || !strings.Contains(o["description"].(string), "not an API token") {
 		t.Errorf("create token: %v", o)
 	}
-	if o := op("GET", "/api/v1/apps/{id}/backups"); o["x-basalt-role"] != "viewer" || o["tags"].([]any)[0] != "backups" {
+	if o := op("GET", "/api/v1/apps/{id}/backups"); o["x-basalt-role"] != "viewer" || o["x-basalt-project"] != true || o["tags"].([]any)[0] != "backups" {
 		t.Errorf("app backups: %v", o)
 	}
 	// Bodies are described from their Go types.

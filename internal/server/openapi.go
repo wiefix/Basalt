@@ -16,6 +16,7 @@ import (
 	"unicode"
 
 	"github.com/wiefix/basalt/internal/buildinfo"
+	"github.com/wiefix/basalt/internal/store"
 )
 
 // router registers handlers and remembers each route with who may call
@@ -174,7 +175,14 @@ func openAPI(routes []route) map[string]any {
 			op["security"] = []any{map[string]any{"session": []string{}}}
 			notes = append(notes, "A session that passed the password and waits for the second factor.")
 		default:
-			if a.role != "" {
+			switch {
+			case a.project:
+				op["x-basalt-role"] = a.role
+				op["x-basalt-project"] = true
+				notes = append(notes, "Role: "+string(a.role)+" or higher in the project of the resource (a role on the panel counts in every project).")
+			case a.role == store.RoleUser:
+				notes = append(notes, "Any signed-in user; what it shows depends on their projects.")
+			case a.role != "":
 				op["x-basalt-role"] = a.role
 				notes = append(notes, "Role: "+string(a.role)+" or higher.")
 			}

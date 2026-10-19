@@ -326,7 +326,22 @@ func (s *Server) handleHealthChecks(w http.ResponseWriter, r *http.Request, p *p
 		s.internalError(w, r, "list health checks", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"checks": list})
+	visible, err := s.visibleIn(r, p)
+	if err != nil {
+		s.internalError(w, r, "load project roles", err)
+		return
+	}
+	out := []healthCheckView{}
+	for _, c := range list {
+		if visible(c.ProjectID) {
+			// Which servers probe is the panel's business.
+			if !p.user.Role.AtLeast(store.RoleViewer) {
+				c.Results = []healthResultView{}
+			}
+			out = append(out, c)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"checks": out})
 }
 
 type healthCheckRequest struct {
@@ -379,6 +394,11 @@ func (s *Server) handleCreateHealthCheck(w http.ResponseWriter, r *http.Request,
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	project, ok := s.checkCreate(w, r, p, req.ProjectID)
+	if !ok {
+		return
+	}
+	req.ProjectID = project
 	c, err := req.check()
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
@@ -423,6 +443,9 @@ func (s *Server) pathHealthCheck(w http.ResponseWriter, r *http.Request) (*store
 	if err == nil {
 		c, err := s.db.HealthCheck(r.Context(), id)
 		if err == nil {
+			if !s.checkProject(w, r, c.ProjectID, "health check not found") {
+				return nil, false
+			}
 			return c, true
 		}
 		if !errors.Is(err, store.ErrNotFound) {

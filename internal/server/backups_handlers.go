@@ -93,6 +93,10 @@ func (s *Server) handleListStorages(w http.ResponseWriter, r *http.Request, p *p
 	out := make([]storageView, len(list))
 	for i, st := range list {
 		out[i] = viewStorage(st)
+		// Others choose a storage for their backups: its name, not where it is.
+		if !p.user.Role.AtLeast(store.RoleAdmin) {
+			out[i] = storageView{ID: st.ID, Name: st.Name, Kind: st.Kind, CreatedAt: st.CreatedAt}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"storages": out})
 }
@@ -371,17 +375,17 @@ func (s *Server) pathAppTarget(w http.ResponseWriter, r *http.Request) (*backupT
 // backupRoutes registers the backup API of sites or apps under prefix
 // ("/api/v1/sites/{id}").
 func (s *Server) backupRoutes(mux *router, prefix string, t targetResolver) {
-	mux.Handle("GET "+prefix+"/backups", s.requireRole(store.RoleViewer, s.handleBackups(t)))
-	mux.Handle("POST "+prefix+"/backups", s.requireRole(store.RoleMember, s.handleRunBackup(t)))
-	mux.Handle("GET "+prefix+"/backups/{bid}", s.requireRole(store.RoleMember, s.handleGetBackup(t)))
-	mux.Handle("GET "+prefix+"/backups/{bid}/stream", s.requireRole(store.RoleMember, s.handleBackupStream(t)))
-	mux.Handle("PUT "+prefix+"/backup-policy", s.requireRole(store.RoleAdmin, s.handleSetBackupPolicy(t)))
-	mux.Handle("DELETE "+prefix+"/backup-policy", s.requireRole(store.RoleAdmin, s.handleDeleteBackupPolicy(t)))
-	mux.Handle("GET "+prefix+"/snapshots", s.requireRole(store.RoleMember, s.handleSnapshots(t)))
-	mux.Handle("POST "+prefix+"/restore", s.requireRole(store.RoleAdmin, s.handleRestore(t)))
-	mux.Handle("GET "+prefix+"/snapshots/{sid}/files", s.requireRole(store.RoleMember, s.handleSnapshotFiles(t)))
-	mux.Handle("GET "+prefix+"/snapshots/{sid}/download", s.requireRole(store.RoleMember, s.handleSnapshotDownload(t)))
-	mux.Handle("POST "+prefix+"/snapshots/{sid}/restore-copy", s.requireRole(store.RoleMember, s.handleRestoreCopy(t)))
+	mux.Handle("GET "+prefix+"/backups", s.requireProject(store.RoleViewer, s.handleBackups(t)))
+	mux.Handle("POST "+prefix+"/backups", s.requireProject(store.RoleMember, s.handleRunBackup(t)))
+	mux.Handle("GET "+prefix+"/backups/{bid}", s.requireProject(store.RoleMember, s.handleGetBackup(t)))
+	mux.Handle("GET "+prefix+"/backups/{bid}/stream", s.requireProject(store.RoleMember, s.handleBackupStream(t)))
+	mux.Handle("PUT "+prefix+"/backup-policy", s.requireProject(store.RoleAdmin, s.handleSetBackupPolicy(t)))
+	mux.Handle("DELETE "+prefix+"/backup-policy", s.requireProject(store.RoleAdmin, s.handleDeleteBackupPolicy(t)))
+	mux.Handle("GET "+prefix+"/snapshots", s.requireProject(store.RoleMember, s.handleSnapshots(t)))
+	mux.Handle("POST "+prefix+"/restore", s.requireProject(store.RoleAdmin, s.handleRestore(t)))
+	mux.Handle("GET "+prefix+"/snapshots/{sid}/files", s.requireProject(store.RoleMember, s.handleSnapshotFiles(t)))
+	mux.Handle("GET "+prefix+"/snapshots/{sid}/download", s.requireProject(store.RoleMember, s.handleSnapshotDownload(t)))
+	mux.Handle("POST "+prefix+"/snapshots/{sid}/restore-copy", s.requireProject(store.RoleMember, s.handleRestoreCopy(t)))
 }
 
 type handler = func(w http.ResponseWriter, r *http.Request, p *principal)

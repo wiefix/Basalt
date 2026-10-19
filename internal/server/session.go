@@ -25,6 +25,9 @@ type principal struct {
 	user    *store.User
 	session *store.Session
 	token   *store.APIToken
+	// projects are the user's roles in the projects they belong to, loaded
+	// on first use (roleIn).
+	projects map[int64]store.Role
 }
 
 type principalKey struct{}
@@ -181,6 +184,9 @@ type access struct {
 	role        store.Role // "" when no role is required
 	sessionOnly bool       // not with an API token
 	mfaPending  bool       // only between the password and the second factor
+	// project: role is needed in the project of the resource the route is
+	// about (a site, app, DNS zone or health check), not on the panel.
+	project bool
 }
 
 // guarded is a handler behind an access check; the router records its
@@ -208,6 +214,89 @@ func (s *Server) roleCheck(min store.Role, h principalHandler) http.Handler {
 		}
 		h(w, r, p)
 	})
+}
+
+// projectMinKey holds, for a route guarded by requireProject, the role it
+// needs in the project of its resource.
+type projectMinKey struct{}
+
+// requireProject allows any signed-in user; the handler's resolver (pathSite,
+// pathApp, pathZone, pathHealthCheck) loads the resource and checks that the
+// user has at least min in its project (checkProject). A global role counts
+// in every project.
+func (s *Server) requireProject(min store.Role, h principalHandler) http.Handler {
+	return guarded{s.roleCheck(store.RoleUser, func(w http.ResponseWriter, r *http.Request, p *principal) {
+		h(w, r.WithContext(context.WithValue(r.Context(), projectMinKey{}, min)), p)
+	}), access{role: min, project: true}}
+}
+
+// roleIn is the principal's role in a project: the higher of its global
+// role and its role there (an API token caps both).
+func (s *Server) roleIn(ctx context.Context, p *principal, project int64) (store.Role, error) {
+	if p.projects == nil {
+		m, err := s.db.UserProjectRoles(ctx, p.user.ID)
+		if err != nil {
+			return "", err
+		}
+		p.projects = m
+	}
+	role := p.user.Role
+	if pr, ok := p.projects[project]; ok {
+		if p.token != nil && !p.token.Role.AtLeast(pr) {
+			pr = p.token.Role
+		}
+		if !role.AtLeast(pr) {
+			role = pr
+		}
+	}
+	return role, nil
+}
+
+// checkProject enforces the role a requireProject route needs in project,
+// the project of the resource it loaded: a resource the principal cannot
+// see is not found (notFound), one it can see but not change is forbidden.
+// Routes guarded by a global role pass. It writes the error response itself.
+func (s *Server) checkProject(w http.ResponseWriter, r *http.Request, project int64, notFound string) bool {
+	min, ok := r.Context().Value(projectMinKey{}).(store.Role)
+	if !ok {
+		return true
+	}
+	p := principalFrom(r.Context())
+	role, err := s.roleIn(r.Context(), p, project)
+	if err != nil {
+		s.internalError(w, r, "load project roles", err)
+		return false
+	}
+	return roleAllows(w, role, min, notFound)
+}
+
+// checkGlobal is checkProject for a resource of no project (the mail
+// server): only the global role counts.
+func (s *Server) checkGlobal(w http.ResponseWriter, r *http.Request, notFound string) bool {
+	min, ok := r.Context().Value(projectMinKey{}).(store.Role)
+	if !ok {
+		return true
+	}
+	return roleAllows(w, principalFrom(r.Context()).user.Role, min, notFound)
+}
+
+func roleAllows(w http.ResponseWriter, role, min store.Role, notFound string) bool {
+	switch {
+	case !role.AtLeast(store.RoleViewer):
+		writeError(w, http.StatusNotFound, notFound)
+		return false
+	case !role.AtLeast(min):
+		writeError(w, http.StatusForbidden, "insufficient permissions")
+		return false
+	}
+	return true
+}
+
+// canIn reports whether the principal has at least min in project (for
+// lists and for the project a new resource goes to).
+func (s *Server) canIn(ctx context.Context, p *principal, project int64, min store.Role) (bool, error) {
+	role, err := s.roleIn(ctx, p, project)
+	return err == nil && role.AtLeast(min), err
 }
 
 // requireSession is requireRole for what an API token may not do: manage

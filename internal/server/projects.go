@@ -13,9 +13,9 @@ import (
 )
 
 // Projects group sites, apps (container databases included), DNS zones and
-// health checks. Global admins manage projects and their members; what a
-// membership allows is enforced in a later step (until then the global
-// role decides everything, as before).
+// health checks. A user's role in a project applies to its resources (and
+// a global role to all of them). Global admins create and delete projects
+// and move resources between them; project admins manage the members.
 
 type projectView struct {
 	ID          int64     `json:"id"`
@@ -46,18 +46,34 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request, p *princ
 		s.internalError(w, r, "list projects", err)
 		return
 	}
-	out := make([]projectView, len(list))
-	for i, x := range list {
-		out[i] = viewProject(x)
+	out := []projectView{}
+	for _, x := range list {
+		// Users see the projects they belong to; global roles see all.
+		if ok, err := s.canIn(r.Context(), p, x.ID, store.RoleViewer); err != nil {
+			s.internalError(w, r, "load project roles", err)
+			return
+		} else if ok {
+			out = append(out, viewProject(x))
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"projects": out})
 }
 
-func (s *Server) pathProject(w http.ResponseWriter, r *http.Request) (*store.Project, bool) {
+// pathProject loads the project {id}; the principal needs min in it (a
+// project it cannot see is not found).
+func (s *Server) pathProject(w http.ResponseWriter, r *http.Request, p *principal, min store.Role) (*store.Project, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err == nil {
 		pr, err := s.db.Project(r.Context(), id)
 		if err == nil {
+			role, err := s.roleIn(r.Context(), p, pr.ID)
+			if err != nil {
+				s.internalError(w, r, "load project roles", err)
+				return nil, false
+			}
+			if !roleAllows(w, role, min, "project not found") {
+				return nil, false
+			}
 			return pr, true
 		}
 		if !errors.Is(err, store.ErrNotFound) {
@@ -70,7 +86,7 @@ func (s *Server) pathProject(w http.ResponseWriter, r *http.Request) (*store.Pro
 }
 
 func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request, p *principal) {
-	pr, ok := s.pathProject(w, r)
+	pr, ok := s.pathProject(w, r, p, store.RoleViewer)
 	if !ok {
 		return
 	}
@@ -134,7 +150,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request, p *
 }
 
 func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request, p *principal) {
-	pr, ok := s.pathProject(w, r)
+	pr, ok := s.pathProject(w, r, p, store.RoleAdmin)
 	if !ok {
 		return
 	}
@@ -160,7 +176,7 @@ func (s *Server) handleUpdateProject(w http.ResponseWriter, r *http.Request, p *
 }
 
 func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request, p *principal) {
-	pr, ok := s.pathProject(w, r)
+	pr, ok := s.pathProject(w, r, p, store.RoleAdmin)
 	if !ok {
 		return
 	}
@@ -182,7 +198,8 @@ type projectMemberRequest struct {
 
 // handleSetProjectMember adds a user to a project or changes their role.
 func (s *Server) handleSetProjectMember(w http.ResponseWriter, r *http.Request, p *principal) {
-	pr, ok := s.pathProject(w, r)
+	// The project's admins manage its members.
+	pr, ok := s.pathProject(w, r, p, store.RoleAdmin)
 	if !ok {
 		return
 	}
@@ -212,7 +229,8 @@ func (s *Server) handleSetProjectMember(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *Server) handleRemoveProjectMember(w http.ResponseWriter, r *http.Request, p *principal) {
-	pr, ok := s.pathProject(w, r)
+	// The project's admins manage its members.
+	pr, ok := s.pathProject(w, r, p, store.RoleAdmin)
 	if !ok {
 		return
 	}
@@ -245,12 +263,29 @@ func (s *Server) handleMove(kind store.ProjectResource) principalHandler {
 		if !decodeJSON(w, r, &req) {
 			return
 		}
-		if kind == store.ResourceApp {
-			// The mail server serves every project.
-			if app, err := s.db.AppByID(r.Context(), id); err == nil && app.Source == store.SourceMail {
+		// Domains stay with the project of their DNS zone.
+		var check error
+		switch kind {
+		case store.ResourceApp:
+			app, err := s.db.AppByID(r.Context(), id)
+			if err == nil && app.Source == store.SourceMail {
 				writeError(w, http.StatusUnprocessableEntity, "the mail server belongs to no project")
 				return
 			}
+			if err == nil {
+				check = s.checkDomainProjects(r.Context(), app.Domains, req.ProjectID)
+			}
+		case store.ResourceSite:
+			if site, err := s.db.SiteByID(r.Context(), id); err == nil {
+				check = s.checkDomainProjects(r.Context(), site.Domains, req.ProjectID)
+			}
+		case store.ResourceDNSZone:
+			if z, err := s.db.DNSZone(r.Context(), id); err == nil {
+				check = s.checkZoneProjects(r.Context(), z.Name, req.ProjectID)
+			}
+		}
+		if s.domainError(w, r, check) {
+			return
 		}
 		switch err := s.db.MoveToProject(r.Context(), kind, id, req.ProjectID); {
 		case errors.Is(err, store.ErrNotFound):
@@ -275,6 +310,42 @@ func (s *Server) handleMove(kind store.ProjectResource) principalHandler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// checkCreate checks that the principal may create resources (admin) in
+// project (0: the default one) and returns it; it writes the error
+// response itself.
+func (s *Server) checkCreate(w http.ResponseWriter, r *http.Request, p *principal, project int64) (int64, bool) {
+	project = store.ProjectOrDefault(project)
+	role, err := s.roleIn(r.Context(), p, project)
+	if err != nil {
+		s.internalError(w, r, "load project roles", err)
+		return 0, false
+	}
+	if !role.AtLeast(store.RoleViewer) {
+		writeError(w, http.StatusUnprocessableEntity, "project not found")
+		return 0, false
+	}
+	if !role.AtLeast(store.RoleAdmin) {
+		writeError(w, http.StatusForbidden, "insufficient permissions in this project")
+		return 0, false
+	}
+	return project, true
+}
+
+// visibleIn returns a filter of the projects whose resources the principal
+// may see.
+func (s *Server) visibleIn(r *http.Request, p *principal) (func(project int64) bool, error) {
+	if p.user.Role.AtLeast(store.RoleViewer) {
+		return func(int64) bool { return true }, nil
+	}
+	if _, err := s.roleIn(r.Context(), p, 0); err != nil { // loads the memberships
+		return nil, err
+	}
+	return func(project int64) bool {
+		role, _ := s.roleIn(r.Context(), p, project)
+		return role.AtLeast(store.RoleViewer)
+	}, nil
 }
 
 // projectError answers a create request naming an unknown project; it

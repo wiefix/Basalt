@@ -83,6 +83,11 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request, p *princi
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	project, ok := s.checkCreate(w, r, p, req.ProjectID)
+	if !ok {
+		return
+	}
+	req.ProjectID = project
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		name = t.ID
@@ -119,6 +124,9 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request, p *princi
 	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if s.domainError(w, r, s.checkDomainProjects(r.Context(), domains, req.ProjectID)) {
 		return
 	}
 	srv, err := s.db.ServerByID(r.Context(), req.ServerID)
