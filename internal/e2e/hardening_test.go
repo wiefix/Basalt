@@ -45,7 +45,7 @@ func TestHardeningWithDocker(t *testing.T) {
 	if d, log := followDeployment(t, p, base, jsonID(dep["id"])); d["status"] != "succeeded" {
 		t.Fatalf("deployment: %v\n%s", d, log)
 	}
-	list, _ := dc.ContainerList(context.Background(), map[string]string{"basalt.app": id})
+	list, _ := dc.ContainerList(context.Background(), appLabels(id))
 	if len(list) != 1 {
 		t.Fatalf("%d containers", len(list))
 	}

@@ -224,11 +224,11 @@ func TestGitAppWithDocker(t *testing.T) {
 	base := "/api/v1/apps/" + aid
 	t.Cleanup(func() {
 		ctx := context.Background()
-		list, _ := dc.ContainerList(ctx, map[string]string{"basalt.app": aid})
+		list, _ := dc.ContainerList(ctx, appLabels(aid))
 		for _, c := range list {
 			dc.ContainerRemove(ctx, c.ID, true)
 		}
-		dc.NetworkRemove(ctx, "basalt-app-"+aid)
+		dc.NetworkRemove(ctx, appNet(aid))
 		for _, d := range p.call(200, "GET", base+"/deployments", nil)["deployments"].([]any) {
 			dc.ImageRemove(ctx, d.(map[string]any)["image"].(string))
 		}

@@ -33,7 +33,7 @@ func TestCancelDeploymentWithDocker(t *testing.T) {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		for _, dep := range deployments {
-			list, _ := dc.ContainerList(ctx, map[string]string{"basalt.app": aid, "basalt.deployment": dep})
+			list, _ := dc.ContainerList(ctx, appLabels(aid, "basalt.deployment", dep))
 			for _, c := range list {
 				dc.ContainerRemove(ctx, c.ID, true)
 			}
@@ -77,10 +77,10 @@ func TestCancelDeploymentWithDocker(t *testing.T) {
 	}
 	// (Filtered by deployment: a dev panel on the same Docker may use the
 	// same app ID.)
-	if list, _ := dc.ContainerList(context.Background(), map[string]string{"basalt.app": aid, "basalt.deployment": did}); len(list) != 0 {
+	if list, _ := dc.ContainerList(context.Background(), appLabels(aid, "basalt.deployment", did)); len(list) != 0 {
 		t.Fatalf("container of the canceled deployment left: %+v", list)
 	}
-	if list, _ := dc.ContainerList(context.Background(), map[string]string{"basalt.app": aid, "basalt.deployment": jsonID(first["id"])}); len(list) != 1 {
+	if list, _ := dc.ContainerList(context.Background(), appLabels(aid, "basalt.deployment", jsonID(first["id"]))); len(list) != 1 {
 		t.Fatalf("previous container: %+v", list)
 	}
 	if code, _ := h.get("cancel.localhost", "/"); code != 200 {

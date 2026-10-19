@@ -72,11 +72,11 @@ func TestPrivateRegistryWithDocker(t *testing.T) {
 	aid := jsonID(r["app"].(map[string]any)["id"])
 	base := "/api/v1/apps/" + aid
 	t.Cleanup(func() {
-		list, _ := dc.ContainerList(context.Background(), map[string]string{"basalt.app": aid})
+		list, _ := dc.ContainerList(context.Background(), appLabels(aid))
 		for _, c := range list {
 			dc.ContainerRemove(context.Background(), c.ID, true)
 		}
-		dc.NetworkRemove(context.Background(), "basalt-app-"+aid)
+		dc.NetworkRemove(context.Background(), appNet(aid))
 	})
 	deploy := func(body map[string]any) (map[string]any, string) {
 		t.Helper()

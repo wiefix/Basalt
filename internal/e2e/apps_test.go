@@ -141,12 +141,12 @@ func TestAppsWithDocker(t *testing.T) {
 	base := "/api/v1/apps/" + aid
 	t.Cleanup(func() {
 		ctx := context.Background()
-		list, _ := dc.ContainerList(ctx, map[string]string{"basalt.app": aid})
+		list, _ := dc.ContainerList(ctx, appLabels(aid))
 		for _, c := range list {
 			dc.ContainerRemove(ctx, c.ID, true)
 		}
-		dc.NetworkRemove(ctx, "basalt-app-"+aid)
-		dc.VolumeRemove(ctx, "basalt-app-"+aid+"-data")
+		dc.NetworkRemove(ctx, appNet(aid))
+		dc.VolumeRemove(ctx, appNet(aid)+"-data")
 	})
 
 	// Before any deployment the domain answers 503.
@@ -223,7 +223,7 @@ func TestAppsWithDocker(t *testing.T) {
 		t.Fatalf("requests failed during a zero-downtime deployment: %d of %d; first: %v",
 			failed.Load(), served.Load()+failed.Load(), firstFailure.Load())
 	}
-	list, _ := dc.ContainerList(context.Background(), map[string]string{"basalt.app": aid})
+	list, _ := dc.ContainerList(context.Background(), appLabels(aid))
 	if len(list) != 1 {
 		t.Fatalf("%d containers after redeploy; the old one must be removed", len(list))
 	}
@@ -251,14 +251,14 @@ func TestAppsWithDocker(t *testing.T) {
 
 	// Deleting the app (keeping data) removes containers and the network.
 	p.call(200, "DELETE", base, nil)
-	list, _ = dc.ContainerList(context.Background(), map[string]string{"basalt.app": aid})
+	list, _ = dc.ContainerList(context.Background(), appLabels(aid))
 	if len(list) != 0 {
 		t.Fatalf("containers left: %d", len(list))
 	}
-	if _, err := dc.NetworkInspect(context.Background(), "basalt-app-"+aid); err == nil {
+	if _, err := dc.NetworkInspect(context.Background(), appNet(aid)); err == nil {
 		t.Fatal("network left behind")
 	}
-	if vols, _ := dc.VolumeList(context.Background(), map[string]string{"basalt.app": aid}); len(vols) != 1 {
+	if vols, _ := dc.VolumeList(context.Background(), appLabels(aid)); len(vols) != 1 {
 		t.Fatalf("data volume must be kept by default: %v", vols)
 	}
 	// Without a route the name gets no certificate either: any non-app answer.

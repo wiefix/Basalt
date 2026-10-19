@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"strconv"
 	"strings"
 
 	"github.com/wiefix/basalt/internal/agentproto"
@@ -74,7 +73,7 @@ func (b *backupManager) appBackupOptions(ctx context.Context, it agentproto.Back
 		if err := b.helperImage(ctx, lg); err != nil {
 			return nil, "", err
 		}
-		vol := appVolume(it.AppID, it.Volume)
+		vol := b.apps.volume(it.AppID, it.Volume)
 		if _, err := b.apps.dc.VolumeInspect(ctx, vol); errors.Is(err, docker.ErrNotFound) {
 			return nil, "", fmt.Errorf("volume %s does not exist yet (deploy the app first)", it.Volume)
 		}
@@ -117,9 +116,8 @@ func (b *backupManager) restoreAppItem(ctx context.Context, r *restic.Runner, re
 		if err := b.helperImage(ctx, lg); err != nil {
 			return err
 		}
-		vol := appVolume(it.Item.AppID, it.Item.Volume)
-		labels := map[string]string{labelApp: strconv.FormatInt(it.Item.AppID, 10), labelVolume: it.Item.Volume}
-		if err := dc.VolumeCreate(ctx, vol, labels); err != nil {
+		vol := b.apps.volume(it.Item.AppID, it.Item.Volume)
+		if err := dc.VolumeCreate(ctx, vol, b.apps.appLabels(it.Item.AppID, labelVolume, it.Item.Volume)); err != nil {
 			return err
 		}
 		// Containers using the volume stop while it is replaced.

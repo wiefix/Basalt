@@ -144,12 +144,12 @@ func TestDatabaseWithDocker(t *testing.T) {
 		id := jsonID(p.call(http.StatusCreated, "POST", "/api/v1/apps", body)["app"].(map[string]any)["id"])
 		t.Cleanup(func() {
 			ctx := context.Background()
-			list, _ := dc.ContainerList(ctx, map[string]string{"basalt.app": id})
+			list, _ := dc.ContainerList(ctx, appLabels(id))
 			for _, c := range list {
 				dc.ContainerRemove(ctx, c.ID, true)
 			}
-			dc.NetworkRemove(ctx, "basalt-app-"+id)
-			dc.VolumeRemove(ctx, "basalt-app-"+id+"-data")
+			dc.NetworkRemove(ctx, appNet(id))
+			dc.VolumeRemove(ctx, appNet(id)+"-data")
 		})
 		return id
 	}
@@ -184,7 +184,7 @@ func TestDatabaseWithDocker(t *testing.T) {
 		t.Fatalf("attach: %v", r["attach_error"])
 	}
 	url := p.call(200, "GET", "/api/v1/apps/"+web+"/env", nil)["env"].(map[string]any)["DATABASE_URL"].(string)
-	if out, err := run("basalt-app-"+web, "postgres:18-alpine", "psql", url, "-tAc", "CREATE TABLE t (v text); INSERT INTO t VALUES ('kept'); SELECT 1"); err != nil || !strings.HasSuffix(out, "1") {
+	if out, err := run(appNet(web), "postgres:18-alpine", "psql", url, "-tAc", "CREATE TABLE t (v text); INSERT INTO t VALUES ('kept'); SELECT 1"); err != nil || !strings.HasSuffix(out, "1") {
 		t.Fatalf("psql from the app network: %v %s", err, out)
 	}
 	// Other networks do not reach it.
@@ -201,7 +201,7 @@ func TestDatabaseWithDocker(t *testing.T) {
 	if d, log := deploy(pg); d["status"] != "succeeded" || !strings.Contains(log, "Stopping service pg") {
 		t.Fatalf("deploy with a limit: %v\n%s", d, log)
 	}
-	if out, err := run("basalt-app-"+web, "postgres:18-alpine", "psql", url, "-tAc", "SELECT v FROM t"); err != nil || out != "kept" {
+	if out, err := run(appNet(web), "postgres:18-alpine", "psql", url, "-tAc", "SELECT v FROM t"); err != nil || out != "kept" {
 		t.Fatalf("data after replacement: %v %s", err, out)
 	}
 
@@ -215,17 +215,17 @@ func TestDatabaseWithDocker(t *testing.T) {
 	if newURL == url || newURL != pw["connection"].(map[string]any)["url"] {
 		t.Fatalf("app URL %q after the change (was %q)", newURL, url)
 	}
-	if out, err := run("basalt-app-"+web, "postgres:18-alpine", "psql", newURL, "-tAc", "SELECT v FROM t"); err != nil || out != "kept" {
+	if out, err := run(appNet(web), "postgres:18-alpine", "psql", newURL, "-tAc", "SELECT v FROM t"); err != nil || out != "kept" {
 		t.Fatalf("new password: %v %s", err, out)
 	}
-	if _, err := run("basalt-app-"+web, "postgres:18-alpine", "psql", url, "-tAc", "SELECT 1"); err == nil {
+	if _, err := run(appNet(web), "postgres:18-alpine", "psql", url, "-tAc", "SELECT 1"); err == nil {
 		t.Fatal("the old password still signs in")
 	}
 	url = newURL
 
 	// Unlinked: no longer reachable.
 	p.call(200, "DELETE", "/api/v1/apps/"+pg+"/links/"+web, nil)
-	if _, err := run("basalt-app-"+web, "postgres:18-alpine", "pg_isready", "-h", "pg", "-t", "2"); err == nil {
+	if _, err := run(appNet(web), "postgres:18-alpine", "pg_isready", "-h", "pg", "-t", "2"); err == nil {
 		t.Fatal("database reachable after unlinking")
 	}
 
@@ -236,10 +236,10 @@ func TestDatabaseWithDocker(t *testing.T) {
 		t.Fatalf("redis deployment: %v\n%s", d, log)
 	}
 	redisURL := p.call(200, "GET", "/api/v1/apps/"+web+"/env", nil)["env"].(map[string]any)["REDIS_URL"].(string)
-	if out, err := run("basalt-app-"+web, "redis:8-alpine", "redis-cli", "-u", redisURL, "--no-auth-warning", "ping"); err != nil || out != "PONG" {
+	if out, err := run(appNet(web), "redis:8-alpine", "redis-cli", "-u", redisURL, "--no-auth-warning", "ping"); err != nil || out != "PONG" {
 		t.Fatalf("redis from the app network: %v %s", err, out)
 	}
-	if out, _ := run("basalt-app-"+web, "redis:8-alpine", "redis-cli", "-h", "cache", "ping"); strings.Contains(out, "PONG") {
+	if out, _ := run(appNet(web), "redis:8-alpine", "redis-cli", "-h", "cache", "ping"); strings.Contains(out, "PONG") {
 		t.Fatal("redis answers without a password")
 	}
 	// Redis takes a new password with a new container.
@@ -249,16 +249,16 @@ func TestDatabaseWithDocker(t *testing.T) {
 		t.Fatalf("redis redeployment: %v\n%s", d, log)
 	}
 	newRedis := p.call(200, "GET", "/api/v1/apps/"+web+"/env", nil)["env"].(map[string]any)["REDIS_URL"].(string)
-	if out, err := run("basalt-app-"+web, "redis:8-alpine", "redis-cli", "-u", newRedis, "--no-auth-warning", "ping"); err != nil || out != "PONG" || newRedis == redisURL {
+	if out, err := run(appNet(web), "redis:8-alpine", "redis-cli", "-u", newRedis, "--no-auth-warning", "ping"); err != nil || out != "PONG" || newRedis == redisURL {
 		t.Fatalf("redis with the new password: %v %s", err, out)
 	}
-	if out, _ := run("basalt-app-"+web, "redis:8-alpine", "redis-cli", "-u", redisURL, "--no-auth-warning", "ping"); out == "PONG" {
+	if out, _ := run(appNet(web), "redis:8-alpine", "redis-cli", "-u", redisURL, "--no-auth-warning", "ping"); out == "PONG" {
 		t.Fatal("redis still takes the old password")
 	}
 
 	// Deleting the app detaches the database from its network.
 	p.call(200, "DELETE", "/api/v1/apps/"+web, nil)
-	if _, err := dc.NetworkInspect(context.Background(), "basalt-app-"+web); err == nil {
+	if _, err := dc.NetworkInspect(context.Background(), appNet(web)); err == nil {
 		t.Fatal("app network left behind")
 	}
 	if st := p.call(200, "GET", "/api/v1/apps/"+cache+"/status", nil)["status"].(map[string]any); st["state"] != "running" {
@@ -266,7 +266,7 @@ func TestDatabaseWithDocker(t *testing.T) {
 	}
 	p.call(200, "DELETE", "/api/v1/apps/"+pg+"?volumes=1", nil)
 	p.call(200, "DELETE", "/api/v1/apps/"+cache+"?volumes=1", nil)
-	if vols, _ := dc.VolumeList(context.Background(), map[string]string{"basalt.app": pg}); len(vols) != 0 {
+	if vols, _ := dc.VolumeList(context.Background(), appLabels(pg)); len(vols) != 0 {
 		t.Fatalf("volumes left: %v", vols)
 	}
 }
@@ -306,7 +306,7 @@ func TestEveryEngineWithDocker(t *testing.T) {
 			base := "/api/v1/apps/" + id
 			t.Cleanup(func() {
 				p.call(200, "DELETE", base+"?volumes=1", nil)
-				dc.VolumeRemove(context.Background(), "basalt-app-"+id+"-data")
+				dc.VolumeRemove(context.Background(), appNet(id)+"-data")
 			})
 			p.call(200, "POST", base+"/links", map[string]any{"app_id": mustAtoi(web)})
 			dep := p.call(http.StatusAccepted, "POST", base+"/deploy", map[string]any{})["deployment"].(map[string]any)
@@ -330,7 +330,7 @@ func TestEveryEngineWithDocker(t *testing.T) {
 				args = []string{"redis-cli", "-u", c["url"].(string), "--no-auth-warning", "ping"}
 			}
 			out, err := exec.Command("docker", append([]string{"--host", "unix://" + sock, "run", "--rm",
-				"--network", "basalt-app-" + web, image}, args...)...).CombinedOutput()
+				"--network", appNet(web), image}, args...)...).CombinedOutput()
 			if s := strings.TrimSpace(string(out)); err != nil || !strings.HasSuffix(s, "1") && s != "PONG" {
 				t.Fatalf("client: %v %s", err, s)
 			}
@@ -349,7 +349,7 @@ func TestEveryEngineWithDocker(t *testing.T) {
 						a = []string{"mariadb", "-h", host, "-u", user, "-p" + pass, db, "-sNe", "SELECT 1"}
 					}
 					out, err := exec.Command("docker", append([]string{"--host", "unix://" + sock, "run", "--rm",
-						"--network", "basalt-app-" + web, image}, a...)...).CombinedOutput()
+						"--network", appNet(web), image}, a...)...).CombinedOutput()
 					if err == nil && !strings.HasSuffix(strings.TrimSpace(string(out)), "1") {
 						err = fmt.Errorf("%s", out)
 					}
@@ -369,7 +369,7 @@ func TestEveryEngineWithDocker(t *testing.T) {
 			// Backup and restore: a value changed after the backup comes back.
 			query := func(q string) string {
 				t.Helper()
-				ctr := strings.TrimSpace(dockerOut(t, sock, "ps", "-q", "--filter", "label=basalt.app="+id))
+				ctr := strings.TrimSpace(dockerOut(t, sock, "ps", "-q", "--filter", "label=basalt.namespace="+e2eNamespace, "--filter", "label=basalt.app="+id))
 				var args []string
 				switch engine {
 				case "postgres":

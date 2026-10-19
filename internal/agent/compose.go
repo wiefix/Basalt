@@ -20,8 +20,8 @@ import (
 // jobTimeout bounds a service that runs to completion (e.g. migrations).
 const jobTimeout = 15 * time.Minute
 
-func serviceContainer(appID, deploymentID int64, service string) string {
-	return appNetwork(appID) + "-" + service + "-d" + strconv.FormatInt(deploymentID, 10)
+func (m *appsManager) serviceContainer(appID, deploymentID int64, service string) string {
+	return m.network(appID) + "-" + service + "-d" + strconv.FormatInt(deploymentID, 10)
 }
 
 // deployCompose runs a compose app: services start in dependency order,
@@ -54,8 +54,7 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 		return nil, err
 	}
 	for _, v := range spec.ComposeVolumes {
-		labels := map[string]string{labelApp: strconv.FormatInt(spec.AppID, 10), labelVolume: v}
-		if err := dc.VolumeCreate(ctx, appVolume(spec.AppID, v), labels); err != nil {
+		if err := dc.VolumeCreate(ctx, m.volume(spec.AppID, v), m.appLabels(spec.AppID, labelVolume, v)); err != nil {
 			return nil, fmt.Errorf("create volume %s: %w", v, err)
 		}
 	}
@@ -112,7 +111,7 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 				undo = append(undo, func(ctx context.Context) { dc.ContainerStart(ctx, id) })
 			}
 		}
-		name := serviceContainer(spec.AppID, spec.DeploymentID, svc.Name)
+		name := m.serviceContainer(spec.AppID, spec.DeploymentID, svc.Name)
 		if err := dc.ContainerRemove(ctx, name, true); err != nil { // left by an earlier attempt
 			return rollback(err)
 		}
@@ -190,7 +189,7 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 func (m *appsManager) attach(ctx context.Context, dc *docker.Client, appID int64, containers map[string]string, attach []int64) error {
 	want := map[string]int64{}
 	for _, id := range attach {
-		want[appNetwork(id)] = id
+		want[m.network(id)] = id
 	}
 	var errs []error
 	for _, cid := range slices.Sorted(maps.Keys(containers)) {
@@ -201,7 +200,7 @@ func (m *appsManager) attach(ctx context.Context, dc *docker.Client, appID int64
 			continue
 		}
 		for name := range info.NetworkSettings.Networks {
-			if _, ok := want[name]; !ok && name != appNetwork(appID) && strings.HasPrefix(name, "basalt-app-") {
+			if _, ok := want[name]; !ok && name != m.network(appID) && strings.HasPrefix(name, m.networkPrefix()) {
 				if err := dc.NetworkDisconnect(ctx, name, cid, true); err != nil && !errors.Is(err, docker.ErrNotFound) {
 					errs = append(errs, fmt.Errorf("disconnect %s from %s: %w", service, name, err))
 				}
@@ -348,7 +347,7 @@ func (m *appsManager) serviceConfig(spec agentproto.AppSpec, svc agentproto.Serv
 		}
 	}
 	hc := &docker.HostConfig{
-		NetworkMode:    appNetwork(spec.AppID),
+		NetworkMode:    m.network(spec.AppID),
 		RestartPolicy:  docker.RestartPolicy{Name: svc.Restart, MaximumRetryCount: svc.MaxRetries},
 		CapDrop:        capDrop,
 		SecurityOpt:    []string{"no-new-privileges:true"},
@@ -365,14 +364,14 @@ func (m *appsManager) serviceConfig(spec agentproto.AppSpec, svc agentproto.Serv
 		hc.Tmpfs = maps.Clone(svc.Tmpfs)
 	}
 	for _, mnt := range svc.Mounts {
-		hc.Mounts = append(hc.Mounts, docker.Mount{Type: "volume", Source: appVolume(spec.AppID, mnt.Volume),
+		hc.Mounts = append(hc.Mounts, docker.Mount{Type: "volume", Source: m.volume(spec.AppID, mnt.Volume),
 			Target: mnt.Path, ReadOnly: mnt.ReadOnly})
 	}
 	labels := maps.Clone(svc.Labels)
 	if labels == nil {
 		labels = map[string]string{}
 	}
-	labels[labelApp] = strconv.FormatInt(spec.AppID, 10)
+	maps.Copy(labels, m.appLabels(spec.AppID))
 	labels[labelDeployment] = strconv.FormatInt(spec.DeploymentID, 10)
 	labels[labelService] = svc.Name
 	labels[labelConfig] = hash
@@ -385,7 +384,7 @@ func (m *appsManager) serviceConfig(spec agentproto.AppSpec, svc agentproto.Serv
 		Tty: svc.Tty, OpenStdin: svc.OpenStdin, StopSignal: svc.StopSignal,
 		Labels: labels, Healthcheck: svc.Health, HostConfig: hc,
 		NetworkingConfig: &docker.NetworkingConfig{EndpointsConfig: map[string]*docker.EndpointSettings{
-			appNetwork(spec.AppID): {Aliases: append([]string{svc.Name}, svc.Aliases...)},
+			m.network(spec.AppID): {Aliases: append([]string{svc.Name}, svc.Aliases...)},
 		}},
 	}
 	if svc.StopGrace > 0 {

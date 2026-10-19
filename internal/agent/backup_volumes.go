@@ -331,7 +331,7 @@ func (b *backupManager) restoreVolumeCopy(ctx context.Context, r *restic.Runner,
 	if err := b.helperImage(ctx, &deployLog{}); err != nil {
 		return agentproto.RestoreCopyResponse{}, err
 	}
-	volName := appVolume(req.AppID, vol)
+	volName := b.apps.volume(req.AppID, vol)
 	if _, err := b.apps.dc.VolumeInspect(ctx, volName); errors.Is(err, docker.ErrNotFound) {
 		return agentproto.RestoreCopyResponse{}, fmt.Errorf("the app has no volume %s now", vol)
 	} else if err != nil {

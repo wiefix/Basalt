@@ -32,6 +32,9 @@ const (
 	// settings, which tells whether a deployment must replace it.
 	labelService = "basalt.service"
 	labelConfig  = "basalt.config"
+	// labelNamespace marks the resources of an agent started with a Docker
+	// namespace; resources without it belong to the agent without one.
+	labelNamespace = "basalt.namespace"
 )
 
 const (
@@ -73,6 +76,10 @@ type appsManager struct {
 	upstreams map[int64]string
 	lastErr   string
 
+	// namespace separates this agent's Docker resources from those of
+	// another panel's agent on the same daemon ("" for the usual one).
+	namespace string
+
 	dataDir   string        // builds and known hosts live here
 	gitCAFile string        // extra CA bundle for https git remotes
 	builds    chan struct{} // limits concurrent builds
@@ -82,7 +89,7 @@ type appsManager struct {
 
 func newAppsManager(cfg Config, log *slog.Logger) *appsManager {
 	m := &appsManager{
-		log: log, socket: cfg.DockerSocket, publish: runtime.GOOS != "linux",
+		log: log, socket: cfg.DockerSocket, publish: runtime.GOOS != "linux", namespace: cfg.DockerNamespace,
 		locks: map[int64]*sync.Mutex{}, upstreams: map[int64]string{}, onChange: func() {},
 		dataDir: cfg.DataDir, gitCAFile: cfg.GitCAFile, builds: make(chan struct{}, maxConcurrentBuilds),
 	}
@@ -92,13 +99,44 @@ func newAppsManager(cfg Config, log *slog.Logger) *appsManager {
 	return m
 }
 
-func appNetwork(appID int64) string { return "basalt-app-" + strconv.FormatInt(appID, 10) }
-
-func appContainer(appID, deploymentID int64) string {
-	return appNetwork(appID) + "-d" + strconv.FormatInt(deploymentID, 10)
+// networkPrefix starts the names of every network, container and volume
+// of the agent's apps: "basalt-app-", or "basalt-<namespace>-app-" when
+// the agent shares the Docker daemon with another panel's agent.
+func (m *appsManager) networkPrefix() string {
+	if m.namespace == "" {
+		return "basalt-app-"
+	}
+	return "basalt-" + m.namespace + "-app-"
 }
 
-func appVolume(appID int64, name string) string { return appNetwork(appID) + "-" + name }
+func (m *appsManager) network(appID int64) string {
+	return m.networkPrefix() + strconv.FormatInt(appID, 10)
+}
+
+func (m *appsManager) container(appID, deploymentID int64) string {
+	return m.network(appID) + "-d" + strconv.FormatInt(deploymentID, 10)
+}
+
+func (m *appsManager) volume(appID int64, name string) string { return m.network(appID) + "-" + name }
+
+// appLabels returns the labels of a resource of the app, with more given
+// as key, value pairs.
+func (m *appsManager) appLabels(appID int64, kv ...string) map[string]string {
+	labels := map[string]string{labelApp: strconv.FormatInt(appID, 10)}
+	if m.namespace != "" {
+		labels[labelNamespace] = m.namespace
+	}
+	for i := 0; i+1 < len(kv); i += 2 {
+		labels[kv[i]] = kv[i+1]
+	}
+	return labels
+}
+
+// ours tells whether a resource with these labels belongs to this agent's
+// namespace (Docker cannot filter on a missing label).
+func (m *appsManager) ours(labels map[string]string) bool {
+	return labels[labelNamespace] == m.namespace
+}
 
 func (m *appsManager) client() (*docker.Client, error) {
 	if m.dc == nil || !docker.Available(m.socket) {
@@ -212,13 +250,12 @@ func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec, strea
 		return fail(err)
 	}
 	for _, v := range spec.Volumes {
-		labels := map[string]string{labelApp: strconv.FormatInt(spec.AppID, 10), labelVolume: v.Name}
-		if err := dc.VolumeCreate(ctx, appVolume(spec.AppID, v.Name), labels); err != nil {
+		if err := dc.VolumeCreate(ctx, m.volume(spec.AppID, v.Name), m.appLabels(spec.AppID, labelVolume, v.Name)); err != nil {
 			return fail(fmt.Errorf("create volume %s: %w", v.Name, err))
 		}
 	}
 
-	name := appContainer(spec.AppID, spec.DeploymentID)
+	name := m.container(spec.AppID, spec.DeploymentID)
 	// A container left by an earlier attempt of the same deployment.
 	if err := dc.ContainerRemove(ctx, name, true); err != nil {
 		return fail(err)
@@ -347,14 +384,14 @@ func (m *appsManager) removeImageRef(ctx context.Context, dc *docker.Client, ref
 }
 
 func (m *appsManager) ensureNetwork(ctx context.Context, dc *docker.Client, appID int64) error {
-	name := appNetwork(appID)
+	name := m.network(appID)
 	if _, err := dc.NetworkInspect(ctx, name); err == nil {
 		return nil
 	} else if !errors.Is(err, docker.ErrNotFound) {
 		return err
 	}
 	_, err := dc.NetworkCreate(ctx, docker.NetworkConfig{
-		Name: name, Labels: map[string]string{labelApp: strconv.FormatInt(appID, 10)},
+		Name: name, Labels: m.appLabels(appID),
 	})
 	if errors.Is(err, docker.ErrConflict) {
 		return nil // created concurrently
@@ -369,7 +406,7 @@ func (m *appsManager) containerConfig(spec agentproto.AppSpec) docker.ContainerC
 	}
 	init, pids := true, int64(4096)
 	hc := &docker.HostConfig{
-		NetworkMode:   appNetwork(spec.AppID),
+		NetworkMode:   m.network(spec.AppID),
 		RestartPolicy: docker.RestartPolicy{Name: "unless-stopped"},
 		CapDrop:       appCapDrop,
 		SecurityOpt:   []string{"no-new-privileges:true"},
@@ -384,19 +421,17 @@ func (m *appsManager) containerConfig(spec agentproto.AppSpec) docker.ContainerC
 		hc.Tmpfs = map[string]string{"/tmp": "", "/run": ""}
 	}
 	for _, v := range spec.Volumes {
-		hc.Mounts = append(hc.Mounts, docker.Mount{Type: "volume", Source: appVolume(spec.AppID, v.Name), Target: v.Path})
+		hc.Mounts = append(hc.Mounts, docker.Mount{Type: "volume", Source: m.volume(spec.AppID, v.Name), Target: v.Path})
 	}
 	cfg := docker.ContainerConfig{
 		Image: spec.Image,
 		Env:   env,
-		Labels: map[string]string{
-			labelApp:        strconv.FormatInt(spec.AppID, 10),
-			labelDeployment: strconv.FormatInt(spec.DeploymentID, 10),
-			labelPort:       strconv.Itoa(spec.Port),
-		},
+		Labels: m.appLabels(spec.AppID,
+			labelDeployment, strconv.FormatInt(spec.DeploymentID, 10),
+			labelPort, strconv.Itoa(spec.Port)),
 		HostConfig: hc,
 		NetworkingConfig: &docker.NetworkingConfig{EndpointsConfig: map[string]*docker.EndpointSettings{
-			appNetwork(spec.AppID): {Aliases: []string{"app"}},
+			m.network(spec.AppID): {Aliases: []string{"app"}},
 		}},
 	}
 	if m.publish && spec.Port > 0 {
@@ -506,7 +541,7 @@ func (m *appsManager) upstreamOf(info *docker.ContainerInfo, appID int64, port i
 		}
 		return ""
 	}
-	if n, ok := info.NetworkSettings.Networks[appNetwork(appID)]; ok && n.IPAddress != "" {
+	if n, ok := info.NetworkSettings.Networks[m.network(appID)]; ok && n.IPAddress != "" {
 		return net.JoinHostPort(n.IPAddress, strconv.Itoa(port))
 	}
 	return ""
@@ -522,6 +557,7 @@ func (m *appsManager) containers(ctx context.Context, dc *docker.Client, appID i
 	if err != nil {
 		return nil, err
 	}
+	list = slices.DeleteFunc(list, func(c docker.ContainerSummary) bool { return !m.ours(c.Labels) })
 	slices.SortFunc(list, func(a, b docker.ContainerSummary) int {
 		return -cmpInt(labelInt(a.Labels, labelDeployment), labelInt(b.Labels, labelDeployment))
 	})
@@ -748,14 +784,14 @@ func (m *appsManager) Delete(ctx context.Context, appID int64, volumes bool, ima
 		}
 	}
 	// Databases linked to the app joined its network: detach them first.
-	if info, err := dc.NetworkInspect(ctx, appNetwork(appID)); err == nil {
+	if info, err := dc.NetworkInspect(ctx, m.network(appID)); err == nil {
 		for id := range info.Containers {
 			if err := dc.NetworkDisconnect(ctx, info.ID, id, true); err != nil && !errors.Is(err, docker.ErrNotFound) {
 				return err
 			}
 		}
 	}
-	if err := dc.NetworkRemove(ctx, appNetwork(appID)); err != nil {
+	if err := dc.NetworkRemove(ctx, m.network(appID)); err != nil {
 		return err
 	}
 	if err := agentproto.ValidateImageRefs(images); err != nil {
@@ -768,6 +804,9 @@ func (m *appsManager) Delete(ctx context.Context, appID int64, volumes bool, ima
 			return err
 		}
 		for _, v := range vols {
+			if !m.ours(v.Labels) {
+				continue
+			}
 			if err := dc.VolumeRemove(ctx, v.Name); err != nil {
 				return err
 			}

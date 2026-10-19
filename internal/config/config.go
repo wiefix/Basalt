@@ -11,9 +11,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
+
+// dockerNamespaceRE: an agent's Docker namespace goes into resource names.
+var dockerNamespaceRE = regexp.MustCompile(`^[a-z0-9]{0,16}$`)
 
 // Common holds settings shared by all long-running subcommands.
 type Common struct {
@@ -81,12 +85,16 @@ type Agent struct {
 	ProxyUser     string
 	MySQLSocket   string
 	DockerSocket  string
-	GitCAFile     string
-	Restic        string
-	PanelDomain   string
-	PanelUpstream string
-	ReleaseKey    string
-	WordPressURL  string
+	// DockerNamespace keeps this agent's Docker resources apart from those
+	// of another panel's agent on the same daemon (tests next to a dev
+	// panel); "" names them as always.
+	DockerNamespace string
+	GitCAFile       string
+	Restic          string
+	PanelDomain     string
+	PanelUpstream   string
+	ReleaseKey      string
+	WordPressURL    string
 }
 
 // Proxy configures `basalt proxy`.
@@ -212,6 +220,7 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs.StringVar(&cfg.PanelUpstream, "panel-upstream", env("PANEL_UPSTREAM", "127.0.0.1:8080"), "address of the panel's HTTP listener")
 	fs.StringVar(&cfg.MySQLSocket, "mysql-socket", env("MYSQL_SOCKET", "/run/mysqld/mysqld.sock"), "local MariaDB/MySQL socket (empty disables databases)")
 	fs.StringVar(&cfg.DockerSocket, "docker-socket", env("DOCKER_SOCKET", "/var/run/docker.sock"), "local Docker Engine socket (empty disables apps)")
+	fs.StringVar(&cfg.DockerNamespace, "docker-namespace", env("DOCKER_NAMESPACE", ""), "keep this agent's containers, networks and volumes apart from another panel's agent on the same Docker (lowercase letters and digits; empty for the usual names)")
 	fs.StringVar(&cfg.Restic, "restic", env("RESTIC", "restic"), "restic binary used for backups")
 	fs.StringVar(&cfg.GitCAFile, "git-ca-file", env("GIT_CA_FILE", ""), "extra CA certificates (PEM) trusted for https git repositories")
 	fs.StringVar(&cfg.ReleaseKey, "release-key", env("RELEASE_KEY", ""), "public key (authorized_keys line) updates must be signed with (default: the Basalt release key)")
@@ -226,6 +235,9 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	case "auto", "on", "off":
 	default:
 		return cfg, fmt.Errorf("--isolate must be auto, on or off")
+	}
+	if !dockerNamespaceRE.MatchString(cfg.DockerNamespace) {
+		return cfg, fmt.Errorf("--docker-namespace must be up to 16 lowercase letters and digits")
 	}
 	for _, p := range []int{cfg.HTTPPort, cfg.HTTPSPort} {
 		if p < 1 || p > 65535 {

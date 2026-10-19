@@ -65,13 +65,13 @@ func TestMailWithDocker(t *testing.T) {
 	t.Cleanup(func() {
 		ctx := context.Background()
 		dc := docker.New(sock)
-		list, _ := dc.ContainerList(ctx, map[string]string{"basalt.app": aid})
+		list, _ := dc.ContainerList(ctx, appLabels(aid))
 		for _, c := range list {
 			dc.ContainerRemove(ctx, c.ID, true)
 		}
-		dc.NetworkRemove(ctx, "basalt-app-"+aid)
-		dc.VolumeRemove(ctx, "basalt-app-"+aid+"-etc")
-		dc.VolumeRemove(ctx, "basalt-app-"+aid+"-data")
+		dc.NetworkRemove(ctx, appNet(aid))
+		dc.VolumeRemove(ctx, appNet(aid)+"-etc")
+		dc.VolumeRemove(ctx, appNet(aid)+"-data")
 	})
 	if r["deployment"] == nil {
 		t.Fatalf("no deployment: %v", r)
@@ -273,7 +273,7 @@ func TestMailWithDocker(t *testing.T) {
 	dc := docker.New(sock)
 	var webmail string
 	for _, c := range func() []docker.ContainerSummary {
-		l, _ := dc.ContainerList(context.Background(), map[string]string{"basalt.app": wid})
+		l, _ := dc.ContainerList(context.Background(), appLabels(wid))
 		return l
 	}() {
 		if c.State == "running" {
@@ -330,7 +330,7 @@ echo $s ? fgets($s) : "error: $m";`
 	// Outgoing mail through a relay that requires STARTTLS and a login.
 	relayHost, listen := "host.docker.internal", "127.0.0.1:0"
 	if runtime.GOOS == "linux" {
-		ni, err := docker.New(sock).NetworkInspect(context.Background(), "basalt-app-"+aid)
+		ni, err := docker.New(sock).NetworkInspect(context.Background(), appNet(aid))
 		if err != nil || len(ni.IPAM.Config) == 0 {
 			t.Fatalf("app network: %v %v", ni, err)
 		}

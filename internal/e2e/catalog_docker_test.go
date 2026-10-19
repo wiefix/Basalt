@@ -54,12 +54,12 @@ func TestCatalogWithDocker(t *testing.T) {
 			base := "/api/v1/apps/" + aid
 			t.Cleanup(func() {
 				ctx := context.Background()
-				list, _ := dc.ContainerList(ctx, map[string]string{"basalt.app": aid})
+				list, _ := dc.ContainerList(ctx, appLabels(aid))
 				for _, c := range list {
 					dc.ContainerRemove(ctx, c.ID, true)
 				}
-				dc.NetworkRemove(ctx, "basalt-app-"+aid)
-				vols, _ := dc.VolumeList(ctx, map[string]string{"basalt.app": aid})
+				dc.NetworkRemove(ctx, appNet(aid))
+				vols, _ := dc.VolumeList(ctx, appLabels(aid))
 				for _, v := range vols {
 					dc.VolumeRemove(ctx, v.Name)
 				}

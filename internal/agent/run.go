@@ -76,6 +76,9 @@ type Config struct {
 	MySQLSocket string
 	// DockerSocket is the local Docker Engine socket ("" disables apps).
 	DockerSocket string
+	// DockerNamespace separates this agent's Docker resources from another
+	// panel's agent on the same daemon ("" for the usual names).
+	DockerNamespace string
 	// GitCAFile is an extra CA bundle trusted for https git remotes (a
 	// self-hosted git server with a private CA).
 	GitCAFile string

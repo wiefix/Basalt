@@ -265,7 +265,7 @@ docker exec basalt-node1 sh -c '
   ! id basalt-s'$SITE' 2>/dev/null && ! id basalt 2>/dev/null && ! id basalt-proxy 2>/dev/null || exit 2
   ! ls /etc/php/*/fpm/pool.d/basalt-site-* /etc/systemd/system/basalt-php-site-* 2>/dev/null && ! test -e /etc/basalt || exit 3
   ! systemctl list-units --all --plain --no-legend "basalt-php-site-*" | grep -q . || exit 7
-  [ -z "$(docker ps -aq --filter label=basalt.app)" ] && [ -z "$(docker volume ls -q --filter label=basalt.app)" ] || exit 4
+  [ -z "$(docker ps -aq --filter label=basalt.app)" ] && [ -z "$(docker volume ls -q --filter label=basalt.app)" ] && [ -z "$(docker network ls -q --filter label=basalt.app)" ] || exit 4
   [ -z "$(mariadb -N -e "SHOW DATABASES LIKE '"'"'s%\_%'"'"'")" ] || exit 5
   [ -z "$(mariadb -N -e "SELECT user FROM mysql.user WHERE user LIKE '"'"'s%\_%'"'"'")" ] || exit 6
 ' || { echo "purge left something behind (code $?)"; exit 1; }

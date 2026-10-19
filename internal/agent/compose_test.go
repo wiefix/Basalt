@@ -51,3 +51,37 @@ func TestServiceConfig(t *testing.T) {
 		t.Fatal("a change of environment or image keeps the hash")
 	}
 }
+
+// TestDockerNamespace: an agent with a Docker namespace names and labels
+// its resources apart, and sees only its own; without one, the names are
+// the usual ones and namespaced resources are not its own.
+func TestDockerNamespace(t *testing.T) {
+	plain, ns := &appsManager{}, &appsManager{namespace: "e2e"}
+	if plain.container(3, 7) != "basalt-app-3-d7" || plain.volume(3, "data") != "basalt-app-3-data" {
+		t.Fatalf("usual names: %s %s", plain.container(3, 7), plain.volume(3, "data"))
+	}
+	if ns.network(3) != "basalt-e2e-app-3" || ns.container(3, 7) != "basalt-e2e-app-3-d7" ||
+		ns.serviceContainer(3, 7, "db") != "basalt-e2e-app-3-db-d7" || ns.volume(3, "data") != "basalt-e2e-app-3-data" {
+		t.Fatalf("namespaced names: %s %s %s", ns.network(3), ns.container(3, 7), ns.volume(3, "data"))
+	}
+	if l := plain.appLabels(3, labelVolume, "data"); len(l) != 2 || l[labelApp] != "3" || l[labelVolume] != "data" {
+		t.Fatalf("usual labels: %v", l)
+	}
+	l := ns.appLabels(3)
+	if l[labelApp] != "3" || l[labelNamespace] != "e2e" {
+		t.Fatalf("namespaced labels: %v", l)
+	}
+	if !ns.ours(l) || plain.ours(l) || ns.ours(plain.appLabels(3)) || !plain.ours(plain.appLabels(3)) {
+		t.Fatal("a resource is claimed by the wrong agent")
+	}
+	cfg := ns.serviceConfig(agentproto.AppSpec{AppID: 3, DeploymentID: 7},
+		agentproto.ServiceSpec{Name: "db", Image: "postgres:16", Mounts: []agentproto.ServiceMount{{Volume: "data", Path: "/d"}}}, "h")
+	if cfg.HostConfig.NetworkMode != "basalt-e2e-app-3" || cfg.HostConfig.Mounts[0].Source != "basalt-e2e-app-3-data" ||
+		cfg.Labels[labelNamespace] != "e2e" || cfg.NetworkingConfig.EndpointsConfig["basalt-e2e-app-3"] == nil {
+		t.Fatalf("compose service config: %+v %v", cfg.HostConfig, cfg.Labels)
+	}
+	if c := ns.containerConfig(agentproto.AppSpec{AppID: 3, DeploymentID: 7, Image: "nginx:1.27", Port: 80}); c.Labels[labelNamespace] != "e2e" ||
+		c.Labels[labelDeployment] != "7" || c.HostConfig.NetworkMode != "basalt-e2e-app-3" {
+		t.Fatalf("app container config: %v", c.Labels)
+	}
+}

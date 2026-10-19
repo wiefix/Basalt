@@ -154,12 +154,12 @@ volumes:
 	base := "/api/v1/apps/" + aid
 	t.Cleanup(func() {
 		ctx := context.Background()
-		list, _ := dc.ContainerList(ctx, map[string]string{"basalt.app": aid})
+		list, _ := dc.ContainerList(ctx, appLabels(aid))
 		for _, c := range list {
 			dc.ContainerRemove(ctx, c.ID, true)
 		}
-		dc.NetworkRemove(ctx, "basalt-app-"+aid)
-		dc.VolumeRemove(ctx, "basalt-app-"+aid+"-data")
+		dc.NetworkRemove(ctx, appNet(aid))
+		dc.VolumeRemove(ctx, appNet(aid)+"-data")
 	})
 	p.call(200, "PUT", base+"/env", map[string]any{"env": map[string]string{"GREETING": "one"}})
 	deploy := func(body map[string]any) (map[string]any, string) {
@@ -171,7 +171,7 @@ volumes:
 		return func() bool { _, body := h.get("stack.localhost", "/"); return strings.Contains(body, "Name: "+name) }
 	}
 	containerOf := func(service string) string {
-		list, _ := dc.ContainerList(context.Background(), map[string]string{"basalt.app": aid, "basalt.service": service})
+		list, _ := dc.ContainerList(context.Background(), appLabels(aid, "basalt.service", service))
 		for _, c := range list {
 			if c.State == "running" {
 				return c.ID
@@ -271,10 +271,10 @@ volumes:
 	}
 
 	p.call(200, "DELETE", base+"?volumes=1", nil)
-	if list, _ := dc.ContainerList(context.Background(), map[string]string{"basalt.app": aid}); len(list) != 0 {
+	if list, _ := dc.ContainerList(context.Background(), appLabels(aid)); len(list) != 0 {
 		t.Fatalf("%d containers left", len(list))
 	}
-	if vols, _ := dc.VolumeList(context.Background(), map[string]string{"basalt.app": aid}); len(vols) != 0 {
+	if vols, _ := dc.VolumeList(context.Background(), appLabels(aid)); len(vols) != 0 {
 		t.Fatalf("volumes left: %v", vols)
 	}
 }

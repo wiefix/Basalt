@@ -290,7 +290,7 @@ func TestAppBackupsWithDocker(t *testing.T) {
 		"volumes": []map[string]string{{"name": "html", "path": "/usr/share/nginx/html"}}})["app"].(map[string]any)["id"])
 	cleanup(web)
 	deploy(web)
-	vol := "basalt-app-" + web + "-html"
+	vol := appNet(web) + "-html"
 	inVolume := func(script string) string {
 		return docker("run", "--rm", "-v", vol+":/d", "busybox:1.37", "sh", "-c", script)
 	}
@@ -350,7 +350,7 @@ func TestAppBackupsWithDocker(t *testing.T) {
 	cleanup(pg)
 	deploy(pg)
 	pgContainer := func() string {
-		return docker("ps", "-q", "--filter", "label=basalt.app="+pg)
+		return docker("ps", "-q", "--filter", "label=basalt.namespace="+e2eNamespace, "--filter", "label=basalt.app="+pg)
 	}
 	psql := func(sql string) string {
 		return docker("exec", pgContainer(), "psql", "-U", "pg", "-d", "pg", "-tAc", sql)

@@ -113,7 +113,7 @@ if [ "$MODE" = uninstall ]; then
 		ids=$(docker ps -aq --filter label=basalt.app 2>/dev/null || true)
 		# shellcheck disable=SC2086
 		[ -z "$ids" ] || docker rm -f $ids >/dev/null 2>&1 || true
-		ids=$(docker network ls -q --filter name=^basalt-app- 2>/dev/null || true)
+		ids=$(docker network ls -q --filter label=basalt.app 2>/dev/null || true)
 		# shellcheck disable=SC2086
 		[ -z "$ids" ] || docker network rm $ids >/dev/null 2>&1 || true
 		ids=$(docker volume ls -q --filter label=basalt.app 2>/dev/null || true)

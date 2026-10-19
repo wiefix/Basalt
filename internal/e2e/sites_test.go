@@ -42,6 +42,24 @@ type host struct {
 func startHost(t *testing.T, p *panel) *host { return startHostWith(t, p, "") }
 
 // startHostWith runs a host whose agent uses the Docker daemon at
+// e2eNamespace keeps the containers, networks and volumes of the tests
+// apart from those of a dev panel using the same Docker daemon.
+const e2eNamespace = "e2e"
+
+// appNet is the name of an app's network, and the start of the names of
+// its containers and volumes.
+func appNet(appID string) string { return "basalt-" + e2eNamespace + "-app-" + appID }
+
+// appLabels selects the Docker resources of an app of the tests, with more
+// labels given as key, value pairs.
+func appLabels(appID string, kv ...string) map[string]string {
+	labels := map[string]string{"basalt.app": appID, "basalt.namespace": e2eNamespace}
+	for i := 0; i+1 < len(kv); i += 2 {
+		labels[kv[i]] = kv[i+1]
+	}
+	return labels
+}
+
 // dockerSocket ("" disables apps); configure adjusts the agent's settings.
 func startHostWith(t *testing.T, p *panel, dockerSocket string, configure ...func(*agent.Config)) *host {
 	t.Helper()
@@ -69,6 +87,8 @@ func startHostWith(t *testing.T, p *panel, dockerSocket string, configure ...fun
 	cfg := agent.Config{
 		DataDir: agentDir, ProxyDir: proxyDir, SitesRoot: sitesRoot,
 		HTTPPort: freePort(t), HTTPSPort: httpsPort, SFTPListen: "127.0.0.1:0", DockerSocket: dockerSocket,
+		// Apart from a dev panel's apps on the same Docker daemon.
+		DockerNamespace: e2eNamespace,
 		// Never ask real CAs for test domains (CI has a network): nothing
 		// listens here, so public certificates simply are not issued.
 		ACMEDirectory: "https://127.0.0.1:9/directory",
