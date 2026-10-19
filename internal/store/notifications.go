@@ -117,3 +117,98 @@ func nonNilStrings(s []string) []string {
 	}
 	return s
 }
+
+// QueuedNotification is a message waiting for delivery through a channel.
+type QueuedNotification struct {
+	ID        int64
+	ChannelID int64
+	Message   []byte // JSON
+	Attempts  int
+	LastError string
+}
+
+// QueueNotification stores message for each channel, held until next (the
+// caller delivers it at once). A channel with perChannel messages waiting
+// already gets none: a channel that keeps failing must not grow the queue
+// without end. It returns the rows stored.
+func (db *DB) QueueNotification(ctx context.Context, channels []int64, message []byte, next time.Time, perChannel int) ([]QueuedNotification, error) {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var out []QueuedNotification
+	for _, ch := range channels {
+		var n int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM notification_queue WHERE channel_id = ?`, ch).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n >= perChannel {
+			continue
+		}
+		q := QueuedNotification{ChannelID: ch, Message: message}
+		if err := tx.QueryRowContext(ctx,
+			`INSERT INTO notification_queue (channel_id, message, next_at) VALUES (?, ?, ?) RETURNING id`,
+			ch, string(message), next.Unix()).Scan(&q.ID); err != nil {
+			return nil, err
+		}
+		out = append(out, q)
+	}
+	return out, tx.Commit()
+}
+
+// ClaimDueNotifications returns up to limit messages due by now and holds
+// them until until, so that one attempt runs at a time.
+func (db *DB) ClaimDueNotifications(ctx context.Context, now, until time.Time, limit int) ([]QueuedNotification, error) {
+	rows, err := db.W.QueryContext(ctx,
+		`UPDATE notification_queue SET next_at = ?
+		 WHERE id IN (SELECT id FROM notification_queue WHERE next_at <= ? ORDER BY next_at, id LIMIT ?)
+		 RETURNING id, channel_id, message, attempts, last_error`, until.Unix(), now.Unix(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []QueuedNotification
+	for rows.Next() {
+		var q QueuedNotification
+		var msg string
+		if err := rows.Scan(&q.ID, &q.ChannelID, &msg, &q.Attempts, &q.LastError); err != nil {
+			return nil, err
+		}
+		q.Message = []byte(msg)
+		out = append(out, q)
+	}
+	return out, rows.Err()
+}
+
+// RetryNotification records a failed attempt; the next one is not before next.
+func (db *DB) RetryNotification(ctx context.Context, id int64, attempts int, next time.Time, errMsg string) error {
+	_, err := db.W.ExecContext(ctx, `UPDATE notification_queue SET attempts = ?, next_at = ?, last_error = ? WHERE id = ?`,
+		attempts, next.Unix(), errMsg, id)
+	return err
+}
+
+// DropNotification removes a delivered (or given up) message.
+func (db *DB) DropNotification(ctx context.Context, id int64) error {
+	_, err := db.W.ExecContext(ctx, `DELETE FROM notification_queue WHERE id = ?`, id)
+	return err
+}
+
+// QueuedNotifications counts the messages waiting per channel.
+func (db *DB) QueuedNotifications(ctx context.Context) (map[int64]int, error) {
+	rows, err := db.R.QueryContext(ctx, `SELECT channel_id, COUNT(*) FROM notification_queue GROUP BY channel_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int{}
+	for rows.Next() {
+		var id int64
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, err
+		}
+		out[id] = n
+	}
+	return out, rows.Err()
+}

@@ -59,7 +59,8 @@ type Options struct {
 	// Catalog replaces the built-in app catalog (tests).
 	Catalog func() ([]*catalog.Template, error)
 	// TelegramAPI replaces https://api.telegram.org, and NotifyRetries the
-	// pauses before delivery attempts (tests). With TelegramAPI set, Slack,
+	// pauses before delivery attempts (tests; at most a minute each is
+	// waited for in place, longer ones by the notification loop). With TelegramAPI set, Slack,
 	// Discord and Telegram deliveries may reach private addresses.
 	TelegramAPI   string
 	NotifyRetries []time.Duration
@@ -472,6 +473,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	}
 
 	go s.cleanupLoop(ctx)
+	go s.notifyLoop(ctx)
 	go s.backupLoop(ctx)
 	go s.dnsLoop(ctx)
 	go s.refreshMailLoop(ctx)

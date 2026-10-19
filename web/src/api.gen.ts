@@ -302,6 +302,7 @@ export interface ChannelView {
   last_error_at?: string;
   last_sent_at: string | null;
   name: string;
+  queued: number;
   secret?: string;
   smtp_host?: string;
   smtp_insecure?: boolean;

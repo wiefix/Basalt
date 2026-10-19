@@ -637,6 +637,7 @@ export interface NotificationChannel {
   last_sent_at: string | null;
   last_error?: string;
   last_error_at?: string;
+  queued: number; // messages waiting for another attempt
 }
 
 // ChannelInput: secret fields left empty keep the current value.

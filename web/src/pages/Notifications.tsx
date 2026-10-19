@@ -116,6 +116,11 @@ export function NotificationsPage({ user }: { user: User }) {
                         {c.last_error}
                       </div>
                     )}
+                    {c.queued > 0 && (
+                      <div className="small muted" title="Tried again until about 2.5 hours after the first attempt">
+                        {c.queued === 1 ? "1 message waits" : `${c.queued} messages wait`} to be tried again
+                      </div>
+                    )}
                   </td>
                   <td className="num">
                     <div className="row" style={{ justifyContent: "flex-end" }}>
@@ -138,7 +143,7 @@ export function NotificationsPage({ user }: { user: User }) {
       )}
       <PanelURLCard url={panel_url} />
       <p className="faint small">
-        A failed delivery is tried twice more (after 10 seconds and a minute). A health check notifies when it goes down
+        A failed delivery is tried again after 10 seconds, a minute, 5 and 30 minutes and 2 hours, also after a restart of the panel. A health check notifies when it goes down
         and when it comes back.
       </p>
       {editing && (

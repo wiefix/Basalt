@@ -60,14 +60,24 @@ func validEvent(e string) bool {
 	})
 }
 
-// Delivery: attempts and the pauses before them; at most notifyWorkers
-// deliveries at once (more wait).
-var notifyRetries = []time.Duration{0, 10 * time.Second, time.Minute}
+// Delivery: attempts and the pauses before them (about 2.5 hours in all);
+// at most notifyWorkers deliveries at once (more wait). Messages wait in
+// the database (notification_queue), so a restart of the panel resumes
+// them.
+var notifyRetries = []time.Duration{0, 10 * time.Second, time.Minute, 5 * time.Minute, 30 * time.Minute, 2 * time.Hour}
 
 const (
 	notifyWorkers = 8
 	notifyTimeout = 30 * time.Second
-	telegramAPI   = "https://api.telegram.org"
+	// notifyLease holds a message while an attempt runs, past which another
+	// may start (after a crash).
+	notifyLease = notifyTimeout + 30*time.Second
+	// notifyWait: a delivery waits this long for its next attempt itself;
+	// longer pauses are left to notifyLoop.
+	notifyWait = time.Minute
+	// notifyQueued messages may wait per channel; more are dropped.
+	notifyQueued = 1000
+	telegramAPI  = "https://api.telegram.org"
 )
 
 // channelConfig is a channel's settings, stored encrypted as a whole: the
@@ -116,6 +126,8 @@ type channelView struct {
 	LastSentAt  *time.Time `json:"last_sent_at"`
 	LastError   string     `json:"last_error,omitempty"`
 	LastErrorAt *time.Time `json:"last_error_at,omitempty"`
+	// Queued messages are waiting for another attempt.
+	Queued int `json:"queued"`
 }
 
 func (s *Server) viewChannel(c *store.NotificationChannel) channelView {
@@ -287,9 +299,15 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request, p *
 		s.internalError(w, r, "list notification channels", err)
 		return
 	}
+	queued, err := s.db.QueuedNotifications(r.Context())
+	if err != nil {
+		s.internalError(w, r, "count queued notifications", err)
+		return
+	}
 	out := make([]channelView, len(list))
 	for i, c := range list {
 		out[i] = s.viewChannel(c)
+		out[i].Queued = queued[c.ID]
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"channels": out, "events": notificationEvents, "panel_url": s.panelURL(r.Context())})
 }
@@ -522,30 +540,113 @@ func (s *Server) notify(m notify.Message) {
 			s.log.Error("list notification channels", "err", err)
 			return
 		}
+		var ids []int64
 		for _, c := range list {
-			if !slices.Contains(c.Events, m.Event) {
-				continue
+			if slices.Contains(c.Events, m.Event) {
+				ids = append(ids, c.ID)
 			}
-			go s.deliverWithRetries(c, m)
+		}
+		if len(ids) == 0 {
+			return
+		}
+		body, _ := json.Marshal(m)
+		queued, err := s.db.QueueNotification(ctx, ids, body, s.now().Add(notifyLease), notifyQueued)
+		if err != nil {
+			s.log.Error("queue notification", "event", m.Event, "err", err)
+			return
+		}
+		if len(queued) < len(ids) {
+			s.log.Warn("notification dropped: too many waiting for a channel", "event", m.Event, "channels", len(ids)-len(queued))
+		}
+		for _, q := range queued {
+			go s.runQueued(q)
 		}
 	}()
 }
 
-func (s *Server) deliverWithRetries(c *store.NotificationChannel, m notify.Message) {
-	var err error
-	for _, pause := range s.notifyRetries {
-		time.Sleep(pause)
+// runQueued delivers a queued message, retrying after the pauses of
+// notifyRetries. A long pause ends the goroutine: notifyLoop picks the
+// message up when it is due (also after a restart of the panel).
+func (s *Server) runQueued(q store.QueuedNotification) {
+	ctx := context.Background()
+	var m notify.Message
+	if err := json.Unmarshal(q.Message, &m); err != nil {
+		s.log.Error("unreadable queued notification", "id", q.ID, "err", err)
+		s.db.DropNotification(ctx, q.ID)
+		return
+	}
+	for {
+		// Every attempt uses the channel as it is now: changed settings
+		// apply, and a deleted channel (whose messages went with it) stops.
+		c, err := s.db.NotificationChannel(ctx, q.ChannelID)
+		if errors.Is(err, store.ErrNotFound) {
+			return
+		} else if err != nil {
+			s.log.Error("load notification channel", "err", err)
+			s.db.RetryNotification(ctx, q.ID, q.Attempts, s.now().Add(notifyWait), q.LastError)
+			return
+		}
 		s.notifySem <- struct{}{}
-		ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
-		err = s.deliver(ctx, c, m)
+		actx, cancel := context.WithTimeout(ctx, notifyTimeout)
+		err = s.deliver(actx, c, m)
 		cancel()
 		<-s.notifySem
+		s.recordDelivery(c.ID, err)
 		if err == nil {
-			break
+			if err := s.db.DropNotification(ctx, q.ID); err != nil {
+				s.log.Error("drop delivered notification", "err", err)
+			}
+			return
+		}
+		q.Attempts++
+		q.LastError = truncate(err.Error(), 500)
+		if q.Attempts >= len(s.notifyRetries) {
+			s.log.Warn("notification given up", "channel", c.Name, "event", m.Event, "attempts", q.Attempts, "err", err)
+			s.db.DropNotification(ctx, q.ID)
+			return
 		}
 		s.log.Warn("notification failed", "channel", c.Name, "event", m.Event, "err", err)
+		pause := s.notifyRetries[q.Attempts]
+		if pause > notifyWait {
+			if err := s.db.RetryNotification(ctx, q.ID, q.Attempts, s.now().Add(pause), q.LastError); err != nil {
+				s.log.Error("reschedule notification", "err", err)
+			}
+			return
+		}
+		if err := s.db.RetryNotification(ctx, q.ID, q.Attempts, s.now().Add(pause+notifyLease), q.LastError); err != nil {
+			s.log.Error("reschedule notification", "err", err)
+		}
+		time.Sleep(pause)
 	}
-	s.recordDelivery(c.ID, err)
+}
+
+// notifyLoop delivers queued messages that are due: retries after a long
+// pause, and messages a restart of the panel interrupted.
+func (s *Server) notifyLoop(ctx context.Context) {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for {
+		s.resumeNotifications(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+func (s *Server) resumeNotifications(ctx context.Context) {
+	now := s.now()
+	due, err := s.db.ClaimDueNotifications(ctx, now, now.Add(notifyLease), 100)
+	if err != nil {
+		if ctx.Err() == nil {
+			s.log.Error("load queued notifications", "err", err)
+		}
+		return
+	}
+	for _, q := range due {
+		go s.runQueued(q)
+	}
 }
 
 // resourceName names what a backup is of, for messages, with the page of
