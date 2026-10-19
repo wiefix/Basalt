@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate, useParams } from "react-router";
 import { api, can, roleRank, type Project, type ProjectMember, type ProjectRole, type User } from "../api";
 import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useConfirm, useToast } from "../components/ui";
@@ -196,6 +196,7 @@ export function ProjectPage({ user }: { user: User }) {
           ))}
         </div>
         <MembersCard project={p} members={members} manage={manage} me={user} />
+        {manage && <ActivityCard projectId={p.id} />}
       </div>
       {editing && <ProjectModal project={p} onClose={() => setEditing(false)} />}
     </>
@@ -317,6 +318,68 @@ function MembersCard({ project, members, manage, me }: { project: Project; membe
             works only in projects).
           </p>
         </form>
+      )}
+    </div>
+  );
+}
+
+// detailText shows an entry's details as key: value pairs.
+const detailText = (d: Record<string, unknown>) =>
+  Object.entries(d)
+    .filter(([k, v]) => v !== "" && v !== null && k !== "project_id")
+    .map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : String(v)}`)
+    .join(" · ");
+
+// ActivityCard is the audit log of the project's resources (its admins).
+function ActivityCard({ projectId }: { projectId: number }) {
+  const log = useInfiniteQuery({
+    queryKey: ["project-audit", projectId],
+    queryFn: ({ pageParam }) => api.projectAudit(projectId, pageParam),
+    initialPageParam: 0,
+    getNextPageParam: (last) => (last.more && last.entries.length ? last.entries[last.entries.length - 1].id : undefined),
+  });
+  const entries = log.data?.pages.flatMap((p) => p.entries) ?? [];
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Activity</h2>
+      </div>
+      {log.isPending ? (
+        <Loading />
+      ) : log.error ? (
+        <div className="card-body">
+          <ErrorBox error={log.error} />
+        </div>
+      ) : entries.length === 0 ? (
+        <div className="empty small">Nothing recorded yet.</div>
+      ) : (
+        <div className="table-wrap">
+          <table className="table">
+            <tbody>
+              {entries.map((e) => (
+                <tr key={e.id}>
+                  <td className="muted small" style={{ whiteSpace: "nowrap" }}>
+                    {formatDate(e.at)}
+                  </td>
+                  <td className="small">{e.actor ? e.actor.name || `user #${e.actor.id}` : <span className="faint">panel</span>}</td>
+                  <td className="mono small" style={{ whiteSpace: "nowrap" }}>
+                    {e.action}
+                  </td>
+                  <td className="small muted" style={{ overflowWrap: "anywhere" }}>
+                    {detailText(e.details)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {log.hasNextPage && (
+        <div className="card-body" style={{ textAlign: "center" }}>
+          <button className="btn sm" onClick={() => log.fetchNextPage()} disabled={log.isFetchingNextPage}>
+            {log.isFetchingNextPage ? "Loading…" : "Load older"}
+          </button>
+        </div>
       )}
     </div>
   );

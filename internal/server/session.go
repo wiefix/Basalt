@@ -28,6 +28,12 @@ type principal struct {
 	// projects are the user's roles in the projects they belong to, loaded
 	// on first use (roleIn).
 	projects map[int64]store.Role
+	// userRole is the user's own global role (user.Role is capped by a
+	// token's).
+	userRole store.Role
+	// project is the project of the resource the request is about, once a
+	// resolver or checkCreate found it; audit entries carry it.
+	project int64
 }
 
 type principalKey struct{}
@@ -240,6 +246,20 @@ func (s *Server) roleIn(ctx context.Context, p *principal, project int64) (store
 		}
 		p.projects = m
 	}
+	// A token limited to a project reaches only it, with at most its role.
+	if p.token != nil && p.token.ProjectID != 0 {
+		if project != p.token.ProjectID {
+			return store.RoleUser, nil
+		}
+		role := p.userRole
+		if pr, ok := p.projects[project]; ok && !role.AtLeast(pr) {
+			role = pr
+		}
+		if !p.token.Role.AtLeast(role) {
+			role = p.token.Role
+		}
+		return role, nil
+	}
 	role := p.user.Role
 	if pr, ok := p.projects[project]; ok {
 		if p.token != nil && !p.token.Role.AtLeast(pr) {
@@ -267,7 +287,11 @@ func (s *Server) checkProject(w http.ResponseWriter, r *http.Request, project in
 		s.internalError(w, r, "load project roles", err)
 		return false
 	}
-	return roleAllows(w, role, min, notFound)
+	if !roleAllows(w, role, min, notFound) {
+		return false
+	}
+	p.project = project
+	return true
 }
 
 // checkGlobal is checkProject for a resource of no project (the mail

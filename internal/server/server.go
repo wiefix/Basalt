@@ -276,6 +276,7 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("GET /api/v1/projects/{id}", s.requireRole(store.RoleUser, s.handleGetProject))
 	rt.Handle("PUT /api/v1/projects/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateProject))
 	rt.Handle("DELETE /api/v1/projects/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteProject))
+	rt.Handle("GET /api/v1/projects/{id}/audit", s.requireRole(store.RoleUser, s.handleProjectAudit))
 	rt.Handle("POST /api/v1/projects/{id}/members", s.requireRole(store.RoleUser, s.handleAddProjectMember))
 	rt.Handle("PUT /api/v1/projects/{id}/members/{uid}", s.requireRole(store.RoleUser, s.handleSetProjectMember))
 	rt.Handle("DELETE /api/v1/projects/{id}/members/{uid}", s.requireRole(store.RoleUser, s.handleRemoveProjectMember))

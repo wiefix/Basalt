@@ -417,6 +417,7 @@ export interface CreateTokenRequest {
   expires_days?: number;
   name?: string;
   password?: string;
+  project_id?: number;
   role?: string;
 }
 
@@ -1199,6 +1200,7 @@ export interface TokenView {
   last_used_ip?: string;
   name: string;
   prefix: string;
+  project_id?: number;
   role: string;
   user?: TokenOwner;
 }
@@ -1562,6 +1564,12 @@ export type GetProjectsResponse = {
 export type GetProjectsIdResponse = {
   members: ProjectMemberView[];
   project: ProjectView;
+};
+
+export type GetProjectsIdAuditResponse = {
+  actions: string[];
+  entries: AuditView[];
+  more: boolean;
 };
 
 export type GetRegistriesResponse = {

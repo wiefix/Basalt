@@ -89,11 +89,15 @@ var apiDocs = map[string]apiDoc{
 	"GET /api/v1/audit/verify": {summary: "Verify the audit log's hash chain", resp: auditCheckView{}},
 
 	// Projects.
-	"GET /api/v1/projects":                       {summary: "Projects (the default one first)", resp: obj("projects", []projectView{})},
-	"POST /api/v1/projects":                      {summary: "Create a project", body: projectRequest{}, resp: obj("project", projectView{})},
-	"GET /api/v1/projects/{id}":                  {summary: "A project with its members", resp: obj("project", projectView{}, "members", []projectMemberView{})},
-	"PUT /api/v1/projects/{id}":                  {summary: "Rename a project or change its description", body: projectRequest{}, resp: obj("project", projectView{})},
-	"DELETE /api/v1/projects/{id}":               {summary: "Delete an empty project (not the default one)", resp: noContent},
+	"GET /api/v1/projects":         {summary: "Projects (the default one first)", resp: obj("projects", []projectView{})},
+	"POST /api/v1/projects":        {summary: "Create a project", body: projectRequest{}, resp: obj("project", projectView{})},
+	"GET /api/v1/projects/{id}":    {summary: "A project with its members", resp: obj("project", projectView{}, "members", []projectMemberView{})},
+	"PUT /api/v1/projects/{id}":    {summary: "Rename a project or change its description", body: projectRequest{}, resp: obj("project", projectView{})},
+	"DELETE /api/v1/projects/{id}": {summary: "Delete an empty project (not the default one)", resp: noContent},
+	"GET /api/v1/projects/{id}/audit": {summary: "The audit log of a project's resources, newest first (its admins)", query: []queryParam{
+		q("before", "only entries with a smaller ID (paging)"), q("limit", "1 to 200, default 50"),
+		q("actor", `a user ID, or "system"`), q("action", "an action prefix, e.g. app.")},
+		resp: obj("entries", []auditView{}, "actions", []string{}, "more", false)},
 	"POST /api/v1/projects/{id}/members":         {summary: "Add a user, by email, to a project (or change their role)", body: addMemberRequest{}, resp: obj("member", projectMemberView{})},
 	"PUT /api/v1/projects/{id}/members/{uid}":    {summary: "Add a user to a project or change their role there", body: projectMemberRequest{}, resp: noContent},
 	"DELETE /api/v1/projects/{id}/members/{uid}": {summary: "Remove a user from a project", resp: noContent},

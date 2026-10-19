@@ -101,6 +101,8 @@ type AuditQuery struct {
 	ActorID int64  // only this user's (0: anyone's)
 	System  bool   // only entries without a user (scheduled and automatic actions)
 	Action  string // only actions with this prefix, e.g. "app." ("" for all)
+	// Project: only entries about this project's resources (0: all).
+	Project int64
 	Limit   int
 }
 
@@ -118,6 +120,10 @@ func (db *DB) AuditEntries(ctx context.Context, q AuditQuery) ([]AuditEntry, err
 	case q.ActorID > 0:
 		where = append(where, "a.actor_id = ?")
 		args = append(args, q.ActorID)
+	}
+	if q.Project > 0 {
+		where = append(where, "json_extract(a.details, '$.project_id') = ?")
+		args = append(args, q.Project)
 	}
 	if q.Action != "" {
 		esc := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q.Action)
@@ -155,9 +161,15 @@ func (db *DB) RecentAudit(ctx context.Context, limit int) ([]AuditEntry, error) 
 	return db.AuditEntries(ctx, AuditQuery{Limit: limit})
 }
 
-// AuditActions lists the distinct actions in the log.
-func (db *DB) AuditActions(ctx context.Context) ([]string, error) {
-	rows, err := db.R.QueryContext(ctx, `SELECT DISTINCT action FROM audit_log ORDER BY action`)
+// AuditActions lists the distinct actions in the log (project > 0: in the
+// entries about that project).
+func (db *DB) AuditActions(ctx context.Context, project int64) ([]string, error) {
+	q, args := `SELECT DISTINCT action FROM audit_log ORDER BY action`, []any{}
+	if project > 0 {
+		q = `SELECT DISTINCT action FROM audit_log WHERE json_extract(details, '$.project_id') = ? ORDER BY action`
+		args = append(args, project)
+	}
+	rows, err := db.R.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}

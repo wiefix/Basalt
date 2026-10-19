@@ -166,6 +166,13 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 	}
 	spec.DeploymentID = dep.ID
 	details := map[string]any{"app_id": app.ID, "deployment_id": dep.ID, "image": spec.Image, "trigger": o.trigger}
+	project := app.ProjectID
+	if app.Source == store.SourceMail {
+		project = 0 // the mail server is in no project
+	}
+	if project != 0 {
+		details["project_id"] = project
+	}
 	if spec.Git != nil {
 		details["commit"] = spec.Git.Commit
 	}
@@ -187,7 +194,7 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 	live.append(notes)
 	stop := s.trackDeployment(dep.ID)
 	go s.runDeployment(targets, dep.ID, spec, live, stop, deploymentExtras{
-		commitMessage: keepMessage, compose: composeContent, notes: notes})
+		commitMessage: keepMessage, compose: composeContent, notes: notes, projectID: project})
 	return dep, nil
 }
 
@@ -236,6 +243,7 @@ type deploymentExtras struct {
 	commitMessage string // of the commit a rollback rebuilds
 	compose       []byte // the compose file deployed, kept for rollbacks
 	notes         string // shown before the agent's log
+	projectID     int64  // of the app, for the audit log (0: none)
 }
 
 // gitSource prepares what the agent needs to build a git app: the
@@ -372,9 +380,11 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 	if resp.OK {
 		action = "app.deployed"
 	}
-	if err := s.db.Audit(context.Background(), nil, action, "", map[string]any{
-		"app_id": spec.AppID, "deployment_id": depID, "error": resp.Error,
-	}); err != nil {
+	details := map[string]any{"app_id": spec.AppID, "deployment_id": depID, "error": resp.Error}
+	if x.projectID != 0 {
+		details["project_id"] = x.projectID
+	}
+	if err := s.db.Audit(context.Background(), nil, action, "", details); err != nil {
 		s.log.Error("write audit log", "err", err)
 	}
 	s.log.Info("deployment finished", "app_id", spec.AppID, "deployment_id", depID, "ok", resp.OK)

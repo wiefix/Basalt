@@ -10,12 +10,14 @@ import (
 
 // APIToken is a user's credential for the API (scripts, CI).
 type APIToken struct {
-	ID         int64
-	UserID     int64
-	UserEmail  string // in listings
-	Name       string
-	Prefix     string
-	Role       Role // the most the token may do (its user's role caps it)
+	ID        int64
+	UserID    int64
+	UserEmail string // in listings
+	Name      string
+	Prefix    string
+	Role      Role // the most the token may do (its user's role caps it)
+	// ProjectID limits the token to one project's resources (0: none).
+	ProjectID  int64
 	ExpiresAt  *time.Time
 	LastUsedAt *time.Time
 	LastUsedIP string
@@ -32,13 +34,13 @@ const MaxAPITokens = 50
 
 var ErrTooManyTokens = errors.New("too many API tokens; delete some first")
 
-const tokenColumns = `t.id, t.user_id, u.email, t.name, t.prefix, t.role, t.expires_at, t.last_used_at, t.last_used_ip, t.created_at`
+const tokenColumns = `t.id, t.user_id, u.email, t.name, t.prefix, t.role, COALESCE(t.project_id, 0), t.expires_at, t.last_used_at, t.last_used_ip, t.created_at`
 
 func scanAPIToken(row interface{ Scan(...any) error }) (*APIToken, error) {
 	var t APIToken
 	var expires, used sql.NullInt64
 	var created int64
-	err := row.Scan(&t.ID, &t.UserID, &t.UserEmail, &t.Name, &t.Prefix, &t.Role, &expires, &used, &t.LastUsedIP, &created)
+	err := row.Scan(&t.ID, &t.UserID, &t.UserEmail, &t.Name, &t.Prefix, &t.Role, &t.ProjectID, &expires, &used, &t.LastUsedIP, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -69,8 +71,8 @@ func (db *DB) CreateAPIToken(ctx context.Context, t *APIToken, hash []byte) erro
 	}
 	var created int64
 	err = tx.QueryRowContext(ctx,
-		`INSERT INTO api_tokens (user_id, name, token_hash, prefix, role, expires_at) VALUES (?, ?, ?, ?, ?, ?)
-		 RETURNING id, created_at`, t.UserID, t.Name, hash, t.Prefix, t.Role, expires).Scan(&t.ID, &created)
+		`INSERT INTO api_tokens (user_id, name, token_hash, prefix, role, expires_at, project_id) VALUES (?, ?, ?, ?, ?, ?, ?)
+		 RETURNING id, created_at`, t.UserID, t.Name, hash, t.Prefix, t.Role, expires, nullID(t.ProjectID)).Scan(&t.ID, &created)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: api_tokens.user_id, api_tokens.name") {
 			return ErrNameTaken

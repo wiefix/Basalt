@@ -53,8 +53,15 @@ func (s *Server) internalError(w http.ResponseWriter, r *http.Request, what stri
 // audit records an action. Failures are logged, not returned: the action
 // itself already happened.
 func (s *Server) audit(r *http.Request, actorID *int64, action string, details map[string]any) {
-	if p := principalFrom(r.Context()); p != nil && p.token != nil {
-		d := map[string]any{"api_token": p.token.Name}
+	if p := principalFrom(r.Context()); p != nil && (p.token != nil || p.project != 0) {
+		d := map[string]any{}
+		if p.token != nil {
+			d["api_token"] = p.token.Name
+		}
+		// The project of the resource acted on: its admins see the entry.
+		if p.project != 0 {
+			d["project_id"] = p.project
+		}
 		for k, v := range details {
 			d[k] = v
 		}

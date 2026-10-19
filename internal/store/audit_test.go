@@ -56,7 +56,7 @@ func TestAuditChain(t *testing.T) {
 	if len(page) != 2 || page[0].ID != 4 || page[1].ID != 3 {
 		t.Fatalf("page: %+v", page)
 	}
-	if acts, _ := db.AuditActions(ctx); strings.Join(acts, " ") != "app.created app.deleted app.deploy_started legacy.one legacy.two site.created" {
+	if acts, _ := db.AuditActions(ctx, 0); strings.Join(acts, " ") != "app.created app.deleted app.deploy_started legacy.one legacy.two site.created" {
 		t.Fatal(acts)
 	}
 

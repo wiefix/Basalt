@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import { api, roleRank, type APIToken, type Role, type User } from "../api";
 import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
+import { useProjects } from "../components/projects";
 
 const roleText: Record<Exclude<Role, "user">, string> = {
   viewer: "Read only (viewer)",
@@ -25,6 +26,8 @@ function Expiry({ t }: { t: APIToken }) {
 }
 
 function TokenTable({ tokens, showUser, onRevoke }: { tokens: APIToken[]; showUser?: boolean; onRevoke: (t: APIToken) => void }) {
+  const projects = useProjects();
+  const projectName = (id: number) => projects.data?.projects.find((p) => p.id === id)?.name ?? `project #${id}`;
   return (
     <div className="table-wrap">
       <table className="table">
@@ -48,6 +51,7 @@ function TokenTable({ tokens, showUser, onRevoke }: { tokens: APIToken[]; showUs
               {showUser && <td className="small">{t.user?.email}</td>}
               <td>
                 <span className="badge plain">{t.role}</span>
+                {t.project_id ? <div className="faint small">only in {projectName(t.project_id)}</div> : null}
               </td>
               <td className="muted small hide-sm">
                 {t.last_used_at ? (
@@ -133,7 +137,12 @@ function NewTokenModal({ user, onClose }: { user: User; onClose: () => void }) {
   const qc = useQueryClient();
   // A user with no role on the panel may give a token up to their role in a
   // project (the panel checks it).
-  const max = user.role === "user" ? "admin" : user.role;
+  const projects = useProjects();
+  const [projectId, setProjectId] = useState(0);
+  const inProject = projects.data?.projects.find((p) => p.id === projectId);
+  // At most the user's role: on the panel or in a project, or in the
+  // project the token is limited to.
+  const max: Role = inProject ? inProject.role : user.role === "user" ? "admin" : user.role;
   const roles = (Object.keys(roleText) as Exclude<Role, "user">[]).filter((r) => roleRank[r] <= roleRank[max]);
   const [name, setName] = useState("");
   const [role, setRole] = useState<Role>(roleRank[max] >= roleRank.member ? "member" : "viewer");
@@ -141,7 +150,7 @@ function NewTokenModal({ user, onClose }: { user: User; onClose: () => void }) {
   const [password, setPassword] = useState("");
   const [secret, setSecret] = useState<string | null>(null);
   const create = useMutation({
-    mutationFn: () => api.createToken({ name: name.trim(), role, expires_days: days, password }),
+    mutationFn: () => api.createToken({ name: name.trim(), role: roleRank[role] <= roleRank[max] ? role : roles[roles.length - 1], expires_days: days, password, project_id: projectId }),
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["my-tokens"] });
       setSecret(r.secret);
@@ -204,6 +213,18 @@ function NewTokenModal({ user, onClose }: { user: User; onClose: () => void }) {
             ))}
           </select>
         </Field>
+        {(projects.data?.projects.length ?? 0) > 0 && (
+          <Field label="Reach" help="A token limited to a project sees and changes only that project's sites, apps, zones and checks.">
+            <select className="input" value={projectId} onChange={(e) => setProjectId(Number(e.target.value))}>
+              <option value={0}>Everything your access allows</option>
+              {projects.data!.projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  Only the project {p.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
         <Field label="Expires">
           <select className="input" value={days} onChange={(e) => setDays(Number(e.target.value))}>
             {expiryChoices.map(([d, label]) => (

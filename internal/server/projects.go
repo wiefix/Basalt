@@ -382,6 +382,7 @@ func (s *Server) checkCreate(w http.ResponseWriter, r *http.Request, p *principa
 		writeError(w, http.StatusForbidden, "insufficient permissions in this project")
 		return 0, false
 	}
+	p.project = project
 	return project, true
 }
 

@@ -697,6 +697,7 @@ export interface APIToken {
   name: string;
   prefix: string;
   role: Role;
+  project_id?: number; // limited to this project
   user?: { id: number; email: string }; // in the list of all tokens
   expires_at: string | null;
   expired: boolean;
@@ -899,7 +900,7 @@ export const api = {
   passkeyLoginOptions: () => post<{ challenge_id: string; options: any }>("/api/v1/auth/passkey/options"),
   passkeyLogin: (b: Record<string, string>) => post<{ user: User }>("/api/v1/auth/passkey", b),
   myTokens: () => get<{ tokens: APIToken[] }>("/api/v1/account/tokens"),
-  createToken: (b: { name: string; role: Role; expires_days: number; password: string }) =>
+  createToken: (b: { name: string; role: Role; expires_days: number; password: string; project_id?: number }) =>
     post<{ token: APIToken; secret: string }>("/api/v1/account/tokens", b),
   deleteMyToken: (id: number) => del<void>(`/api/v1/account/tokens/${id}`),
   allTokens: () => get<{ tokens: APIToken[] }>("/api/v1/tokens"),
@@ -916,6 +917,8 @@ export const api = {
     post<{ member: ProjectMember }>(`/api/v1/projects/${id}/members`, { email, role }),
   setProjectMember: (id: number, userId: number, role: ProjectRole) => put<void>(`/api/v1/projects/${id}/members/${userId}`, { role }),
   removeProjectMember: (id: number, userId: number) => del<void>(`/api/v1/projects/${id}/members/${userId}`),
+  projectAudit: (id: number, before?: number) =>
+    get<{ entries: AuditEntry[]; actions: string[]; more: boolean }>(`/api/v1/projects/${id}/audit${before ? `?before=${before}` : ""}`),
   moveToProject: (kind: ProjectResource, id: number, projectId: number) =>
     put<void>(`/api/v1/${kind}/${id}/project`, { project_id: projectId }),
 

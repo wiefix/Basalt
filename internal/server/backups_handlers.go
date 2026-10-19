@@ -338,6 +338,18 @@ type backupTarget struct {
 	app      *store.App
 }
 
+// projectID is the project of the target, for the audit log (0: none —
+// the mail server).
+func (t *backupTarget) projectID() int64 {
+	if t.site != nil {
+		return t.site.ProjectID
+	}
+	if t.app.Source == store.SourceMail {
+		return 0
+	}
+	return t.app.ProjectID
+}
+
 func (t *backupTarget) resource() string {
 	if t.site != nil {
 		return "site-" + strconv.FormatInt(t.site.ID, 10)
@@ -677,11 +689,11 @@ func (s *Server) startBackup(ctx context.Context, t *backupTarget, policy *store
 		return nil, err
 	}
 	live := s.backupLive.start(b.ID)
-	go s.runBackup(b, req, live)
+	go s.runBackup(b, req, live, t.projectID())
 	return b, nil
 }
 
-func (s *Server) runBackup(b *store.Backup, req agentproto.BackupRequest, live *liveLog) {
+func (s *Server) runBackup(b *store.Backup, req agentproto.BackupRequest, live *liveLog, project int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), backupTimeout)
 	defer cancel()
 	var resp agentproto.BackupResponse
@@ -718,9 +730,9 @@ func (s *Server) runBackup(b *store.Backup, req agentproto.BackupRequest, live *
 		s.notify(notify.Message{Event: EventBackupFailed, Title: "Backup of " + name + " failed",
 			Text: truncate(resp.Error, 1000), Link: link})
 	}
-	if err := s.db.Audit(context.Background(), nil, action, "", map[string]any{
+	if err := s.db.Audit(context.Background(), nil, action, "", withProject(map[string]any{
 		"backup_id": b.ID, "resource": req.Resource, "error": truncate(resp.Error, 500),
-	}); err != nil {
+	}, project)); err != nil {
 		s.log.Error("write audit log", "err", err)
 	}
 	s.log.Info("backup finished", "backup_id", b.ID, "resource", req.Resource, "ok", resp.OK)
@@ -933,12 +945,12 @@ func (s *Server) handleRestore(resolve targetResolver) handler {
 		}
 		s.audit(r, &p.user.ID, "restore.started", map[string]any{"resource": t.resource(), "backup_id": b.ID, "snapshots": req.Snapshots})
 		live := s.backupLive.start(b.ID)
-		go s.runRestore(b, agentproto.RestoreRequest{Repo: repo, Resource: t.resource(), Items: items}, live)
+		go s.runRestore(b, agentproto.RestoreRequest{Repo: repo, Resource: t.resource(), Items: items}, live, t.projectID())
 		writeJSON(w, http.StatusAccepted, map[string]any{"backup": viewBackup(b, false)})
 	}
 }
 
-func (s *Server) runRestore(b *store.Backup, req agentproto.RestoreRequest, live *liveLog) {
+func (s *Server) runRestore(b *store.Backup, req agentproto.RestoreRequest, live *liveLog, project int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), backupTimeout)
 	defer cancel()
 	var resp agentproto.RestoreResponse
@@ -960,11 +972,19 @@ func (s *Server) runRestore(b *store.Backup, req agentproto.RestoreRequest, live
 	if resp.OK {
 		action = "restore.succeeded"
 	}
-	if err := s.db.Audit(context.Background(), nil, action, "", map[string]any{
+	if err := s.db.Audit(context.Background(), nil, action, "", withProject(map[string]any{
 		"backup_id": b.ID, "resource": req.Resource, "error": truncate(resp.Error, 500),
-	}); err != nil {
+	}, project)); err != nil {
 		s.log.Error("write audit log", "err", err)
 	}
+}
+
+// withProject adds the project an entry is about to its details.
+func withProject(d map[string]any, project int64) map[string]any {
+	if project != 0 {
+		d["project_id"] = project
+	}
+	return d
 }
 
 // --- schedule ---

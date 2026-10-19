@@ -68,6 +68,7 @@ export const checks = [
   fits<Returns<A["createProject"]>>()<G.PostProjectsResponse>(),
   fits<Returns<A["updateProject"]>>()<G.PutProjectsIdResponse>(),
   fits<Returns<A["deleteProject"]>>()<G.DeleteProjectsIdResponse>(),
+  fits<Returns<A["projectAudit"]>>()<G.GetProjectsIdAuditResponse>(),
   fits<Returns<A["addProjectMember"]>>()<G.PostProjectsIdMembersResponse>(),
   fits<Returns<A["setProjectMember"]>>()<G.PutProjectsIdMembersUidResponse>(),
   fits<Returns<A["removeProjectMember"]>>()<G.DeleteProjectsIdMembersUidResponse>(),

@@ -56,12 +56,15 @@ func (s *Server) tokenPrincipal(r *http.Request, raw string) (*principal, error)
 	if !t.Role.AtLeast(u.Role) {
 		capped.Role = t.Role
 	}
+	if t.ProjectID != 0 {
+		capped.Role = store.RoleUser // nothing outside its project (roleIn)
+	}
 	if t.LastUsedAt == nil || now.Sub(*t.LastUsedAt) >= tokenTouchInterval {
 		if err := s.db.TouchAPIToken(r.Context(), t.ID, clientIP(r), now); err != nil {
 			s.log.Warn("record API token use", "err", err)
 		}
 	}
-	return &principal{user: &capped, token: t}, nil
+	return &principal{user: &capped, token: t, userRole: u.Role}, nil
 }
 
 type tokenView struct {
@@ -69,7 +72,8 @@ type tokenView struct {
 	Name       string      `json:"name"`
 	Prefix     string      `json:"prefix"`
 	Role       store.Role  `json:"role"`
-	User       *tokenOwner `json:"user,omitempty"` // in the list of all tokens
+	ProjectID  int64       `json:"project_id,omitempty"` // limited to this project
+	User       *tokenOwner `json:"user,omitempty"`       // in the list of all tokens
 	ExpiresAt  *time.Time  `json:"expires_at"`
 	Expired    bool        `json:"expired"`
 	LastUsedAt *time.Time  `json:"last_used_at"`
@@ -83,7 +87,7 @@ type tokenOwner struct {
 }
 
 func (s *Server) viewToken(t *store.APIToken, owner bool) tokenView {
-	v := tokenView{ID: t.ID, Name: t.Name, Prefix: t.Prefix, Role: t.Role, ExpiresAt: t.ExpiresAt,
+	v := tokenView{ID: t.ID, Name: t.Name, Prefix: t.Prefix, Role: t.Role, ProjectID: t.ProjectID, ExpiresAt: t.ExpiresAt,
 		Expired: t.Expired(s.now()), LastUsedAt: t.LastUsedAt, LastUsedIP: t.LastUsedIP, CreatedAt: t.CreatedAt}
 	if owner {
 		v.User = &tokenOwner{ID: t.UserID, Email: t.UserEmail}
@@ -116,7 +120,9 @@ type createTokenRequest struct {
 	Name        string     `json:"name"`
 	Role        store.Role `json:"role"`
 	ExpiresDays int        `json:"expires_days"` // 0: no expiry
-	Password    string     `json:"password"`
+	// ProjectID limits the token to one project (0: all the user may do).
+	ProjectID int64  `json:"project_id"`
+	Password  string `json:"password"`
 }
 
 func validTokenName(n string) bool {
@@ -145,18 +151,33 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request, p *pr
 	case !req.Role.AtLeast(store.RoleViewer):
 		writeError(w, http.StatusUnprocessableEntity, "role must be viewer, member, admin or owner")
 		return
-	case !s.highestRole(r, p).AtLeast(req.Role):
+	case req.ProjectID == 0 && !s.highestRole(r, p).AtLeast(req.Role):
 		writeError(w, http.StatusUnprocessableEntity, "a token cannot do more than your own role ("+string(s.highestRole(r, p))+")")
 		return
 	case req.ExpiresDays < 0 || req.ExpiresDays > maxTokenDays:
 		writeError(w, http.StatusUnprocessableEntity, "expires_days must be 0 (never) to "+strconv.Itoa(maxTokenDays))
 		return
 	}
+	if req.ProjectID != 0 {
+		role, err := s.roleIn(r.Context(), p, req.ProjectID)
+		if err != nil {
+			s.internalError(w, r, "load project roles", err)
+			return
+		}
+		switch {
+		case !role.AtLeast(store.RoleViewer):
+			writeError(w, http.StatusUnprocessableEntity, "project not found")
+			return
+		case !role.AtLeast(req.Role):
+			writeError(w, http.StatusUnprocessableEntity, "a token cannot do more than your role in the project ("+string(role)+")")
+			return
+		}
+	}
 	if !s.checkPassword(w, r, p, req.Password) {
 		return
 	}
 	secret := apiTokenPrefix + auth.NewToken()
-	t := &store.APIToken{UserID: p.user.ID, UserEmail: p.user.Email, Name: req.Name, Role: req.Role,
+	t := &store.APIToken{UserID: p.user.ID, UserEmail: p.user.Email, Name: req.Name, Role: req.Role, ProjectID: req.ProjectID,
 		Prefix: secret[:len(apiTokenPrefix)+6]}
 	if req.ExpiresDays > 0 {
 		exp := s.now().Add(time.Duration(req.ExpiresDays) * 24 * time.Hour)
@@ -174,7 +195,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request, p *pr
 		return
 	}
 	s.audit(r, &p.user.ID, "token.created", map[string]any{"token_id": t.ID, "name": t.Name, "role": t.Role,
-		"expires_days": req.ExpiresDays})
+		"expires_days": req.ExpiresDays, "token_project_id": req.ProjectID})
 	writeJSON(w, http.StatusCreated, map[string]any{"token": s.viewToken(t, false), "secret": secret})
 }
 

@@ -198,3 +198,109 @@ func TestProjectRoles(t *testing.T) {
 		t.Fatalf("member token deletes an app: %v %v", r.StatusCode, err)
 	}
 }
+
+// bearer calls the API with an API token.
+func (e *projectEnv) bearer(secret, method, path string) int {
+	e.t.Helper()
+	req, _ := http.NewRequest(method, e.ts.URL+path, strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+secret)
+	r, err := http.DefaultClient.Do(req)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	r.Body.Close()
+	return r.StatusCode
+}
+
+// TestProjectTokens: a token limited to a project reaches only that
+// project's resources, with at most the role given and the user's there.
+func TestProjectTokens(t *testing.T) {
+	e := newProjectEnv(t)
+	b := e.owner.want(http.StatusCreated, "POST", "/api/v1/projects", map[string]any{"name": "B"}).body["project"].(map[string]any)["id"].(float64)
+	tok := func(c *client, role string, project float64) resp {
+		return c.do("POST", "/api/v1/account/tokens", map[string]any{"name": "t" + role + num(project), "role": role, "expires_days": 0,
+			"project_id": project, "password": ownerPass})
+	}
+	// The owner's token for project A, as a member.
+	r := tok(e.owner, "member", e.a)
+	if r.status != http.StatusCreated || r.body["token"].(map[string]any)["project_id"] != e.a {
+		t.Fatalf("project token: %d %v", r.status, r.body)
+	}
+	secret := r.body["secret"].(string)
+	site := "/api/v1/sites/" + num(e.site)
+	if s := e.bearer(secret, "GET", site); s != http.StatusOK {
+		t.Fatalf("token reads its project's site: %d", s)
+	}
+	if s := e.bearer(secret, "DELETE", site); s != http.StatusForbidden {
+		t.Fatalf("member token deletes a site: %d", s)
+	}
+	// Nothing outside its project: not the default project, not the panel.
+	other := e.owner.want(http.StatusCreated, "POST", "/api/v1/sites", map[string]any{"server_id": e.serverID, "name": "main",
+		"domains": []string{"main.example.test"}, "tls": "internal"}).body["site"].(map[string]any)
+	if s := e.bearer(secret, "GET", "/api/v1/sites/"+num(other["id"].(float64))); s != http.StatusNotFound {
+		t.Fatalf("token reads another project's site: %d", s)
+	}
+	for _, path := range []string{"/api/v1/servers/" + num(e.serverID), "/api/v1/users", "/api/v1/audit"} {
+		if s := e.bearer(secret, "GET", path); s != http.StatusForbidden {
+			t.Fatalf("project token GET %s: %d", path, s)
+		}
+	}
+	// A project admin cannot give a token more than their role there, nor
+	// a token for a project they are not in.
+	pass := "user password 1234"
+	u := e.owner.want(http.StatusCreated, "POST", "/api/v1/users", map[string]any{"email": "m@example.com", "name": "M", "password": pass, "role": "user"}).body["user"].(map[string]any)
+	e.owner.want(http.StatusNoContent, "PUT", "/api/v1/projects/"+num(e.a)+"/members/"+num(u["id"].(float64)), map[string]any{"role": "member"})
+	m := e.client()
+	m.login("m@example.com", pass)
+	body := func(role string, project float64) map[string]any {
+		return map[string]any{"name": "x" + role + num(project), "role": role, "expires_days": 0, "project_id": project, "password": pass}
+	}
+	m.want(http.StatusUnprocessableEntity, "POST", "/api/v1/account/tokens", body("admin", e.a))
+	m.want(http.StatusUnprocessableEntity, "POST", "/api/v1/account/tokens", body("viewer", b))
+	m.want(http.StatusCreated, "POST", "/api/v1/account/tokens", body("viewer", e.a))
+	// A deleted project takes its tokens along.
+	if s := e.bearer(tok(e.owner, "viewer", b).body["secret"].(string), "GET", "/api/v1/projects"); s != http.StatusOK {
+		t.Fatalf("project B token: %d", s)
+	}
+	bt := tok(e.owner, "admin", b).body["secret"].(string)
+	e.owner.want(http.StatusNoContent, "DELETE", "/api/v1/projects/"+num(b), nil)
+	if s := e.bearer(bt, "GET", "/api/v1/projects"); s != http.StatusUnauthorized {
+		t.Fatalf("token of a deleted project: %d", s)
+	}
+}
+
+// TestProjectAudit: entries about a project's resources carry it, and its
+// admins read them; nobody else does.
+func TestProjectAudit(t *testing.T) {
+	e := newProjectEnv(t)
+	adm := e.user("adm@example.com", store.RoleUser, map[float64]store.Role{e.a: store.RoleAdmin})
+	view := e.user("v@example.com", store.RoleUser, map[float64]store.Role{e.a: store.RoleViewer})
+	out := e.user("o@example.com", store.RoleUser, nil)
+	adm.want(http.StatusNotFound, "DELETE", "/api/v1/dns/zones/"+num(e.zone)+"/records/999", nil) // fails: not audited
+	adm.want(http.StatusOK, "PUT", "/api/v1/sites/"+num(e.site)+"/domains", map[string]any{"domains": []string{"blog2.a.test"}})
+	adm.want(http.StatusAccepted, "POST", "/api/v1/apps/"+num(e.app)+"/deploy", map[string]any{})
+	e.owner.want(http.StatusCreated, "POST", "/api/v1/dns/zones", map[string]any{"name": "default.test"})
+
+	path := "/api/v1/projects/" + num(e.a) + "/audit"
+	got := adm.want(http.StatusOK, "GET", path, nil).body
+	var actions []string
+	for _, x := range got["entries"].([]any) {
+		en := x.(map[string]any)
+		if en["details"].(map[string]any)["project_id"] != e.a {
+			t.Fatalf("entry of another project: %v", en)
+		}
+		actions = append(actions, en["action"].(string))
+	}
+	joined := strings.Join(actions, " ")
+	for _, want := range []string{"site.domains_changed", "app.deploy_started", "site.created", "app.created", "dns_zone.created", "health.created"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("project audit lacks %s: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "default.test") || len(got["actions"].([]any)) == 0 {
+		t.Fatalf("actions: %v", got["actions"])
+	}
+	view.want(http.StatusForbidden, "GET", path, nil)
+	out.want(http.StatusNotFound, "GET", path, nil)
+}

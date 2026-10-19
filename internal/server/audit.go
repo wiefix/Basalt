@@ -35,7 +35,20 @@ type auditView struct {
 // handleAudit lists the audit log, newest first: ?before=<id> pages,
 // ?actor=<user id>|system and ?action=<prefix> filter.
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, p *principal) {
-	q := store.AuditQuery{Limit: auditPageDefault}
+	s.auditPage(w, r, store.AuditQuery{Limit: auditPageDefault})
+}
+
+// handleProjectAudit is the audit log of a project's resources, for its
+// admins.
+func (s *Server) handleProjectAudit(w http.ResponseWriter, r *http.Request, p *principal) {
+	pr, ok := s.pathProject(w, r, p, store.RoleAdmin)
+	if !ok {
+		return
+	}
+	s.auditPage(w, r, store.AuditQuery{Limit: auditPageDefault, Project: pr.ID})
+}
+
+func (s *Server) auditPage(w http.ResponseWriter, r *http.Request, q store.AuditQuery) {
 	v := r.URL.Query()
 	num := func(name string) (int64, bool) {
 		if v.Get(name) == "" {
@@ -70,7 +83,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, p *principa
 		s.internalError(w, r, "list audit log", err)
 		return
 	}
-	actions, err := s.db.AuditActions(r.Context())
+	actions, err := s.db.AuditActions(r.Context(), q.Project)
 	if err != nil {
 		s.internalError(w, r, "list audit actions", err)
 		return
