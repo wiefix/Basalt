@@ -137,6 +137,8 @@ type Server struct {
 	usageEvery        time.Duration
 	siteSyncEvery     time.Duration
 	syncs             siteSyncs
+	peers             peerState
+	dbReplRun         sync.Mutex // one round of database replication at a time
 	updates           updater
 	respCheck         func(string)
 

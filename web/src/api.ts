@@ -124,6 +124,8 @@ export interface SitePlacement {
   synced_at?: string;
   sync_error?: string;
   syncing?: boolean;
+  // How the copy's databases follow the primary's (sites with databases).
+  databases?: { running: boolean; lag: number; error?: string; copied: string[]; waiting: string[]; updated_at: string };
 }
 
 export interface PHPSettings {

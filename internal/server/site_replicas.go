@@ -42,18 +42,63 @@ type sitePlacementView struct {
 	SyncedAt    *time.Time `json:"synced_at,omitempty"`
 	SyncError   string     `json:"sync_error,omitempty"`
 	Syncing     bool       `json:"syncing,omitempty"`
+	// Databases is how the replica copies the site's databases (a site
+	// without databases: none).
+	Databases *dbCopyView `json:"databases,omitempty"`
 }
 
-func (s *Server) viewSitePlacements(siteID int64, ps []store.Placement) []sitePlacementView {
+// dbCopyView is how a replica copies a site's databases from its primary.
+type dbCopyView struct {
+	Running   bool      `json:"running"`
+	Lag       int64     `json:"lag"` // seconds behind (-1: unknown)
+	Error     string    `json:"error,omitempty"`
+	Copied    []string  `json:"copied"` // of the site's databases
+	Waiting   []string  `json:"waiting"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (s *Server) viewSitePlacements(ctx context.Context, site *store.Site, ps []store.Placement) ([]sitePlacementView, error) {
+	dbs, err := s.db.Databases(ctx, site.ID)
+	if err != nil {
+		return nil, err
+	}
+	var repl []store.DBReplication
+	if len(dbs) > 0 && len(ps) > 1 {
+		if repl, err = s.db.DBReplications(ctx); err != nil {
+			return nil, err
+		}
+	}
 	out := make([]sitePlacementView, len(ps))
 	for i, p := range ps {
 		out[i] = sitePlacementView{ServerID: p.ServerID, Primary: p.Primary, HealthCheck: p.HealthCheck, Status: p.CheckStatus,
 			SyncedAt: p.SyncedAt, SyncError: p.SyncError}
-		if !p.Primary {
-			out[i].Syncing = s.siteSyncing(siteID)
+		if p.Primary {
+			continue
 		}
+		out[i].Syncing = s.siteSyncing(site.ID)
+		if len(dbs) == 0 {
+			continue
+		}
+		v := &dbCopyView{Lag: -1, Copied: []string{}, Waiting: []string{}}
+		var row *store.DBReplication
+		for j := range repl {
+			if repl[j].ReplicaID == p.ServerID && repl[j].SourceID == site.ServerID {
+				row = &repl[j]
+			}
+		}
+		if row != nil {
+			v.Running, v.Lag, v.Error, v.UpdatedAt = row.Running, row.Lag, row.Error, row.UpdatedAt
+		}
+		for _, d := range dbs {
+			if row != nil && slices.Contains(row.Databases, d.Name) {
+				v.Copied = append(v.Copied, d.Name)
+			} else {
+				v.Waiting = append(v.Waiting, d.Name)
+			}
+		}
+		out[i].Databases = v
 	}
-	return out
+	return out, nil
 }
 
 // siteReplicaProblem says why a site cannot be served by several servers
@@ -61,17 +106,6 @@ func (s *Server) viewSitePlacements(siteID int64, ps []store.Placement) []sitePl
 func (s *Server) siteReplicaProblem(ctx context.Context, site *store.Site, domains []string) (string, error) {
 	if len(domains) == 0 {
 		return "add the site's domains first: traffic reaches the servers through them", nil
-	}
-	dbs, err := s.db.Databases(ctx, site.ID)
-	if err != nil {
-		return "", err
-	}
-	if len(dbs) > 0 {
-		names := make([]string, len(dbs))
-		for i, d := range dbs {
-			names[i] = d.Name
-		}
-		return "the site's databases (" + strings.Join(names, ", ") + ") live on its server: a site with databases is served by one server", nil
 	}
 	return s.domainsOutsideZones(ctx, domains)
 }
@@ -107,6 +141,21 @@ func (s *Server) handleAddSiteReplica(w http.ResponseWriter, r *http.Request, p 
 	if msg := checkPHP(srv, site.PHPVersion); msg != "" {
 		writeError(w, http.StatusUnprocessableEntity, srv.Name+": "+msg)
 		return
+	}
+	// The site's databases are copied there from its server.
+	if dbs, err := s.db.Databases(r.Context(), site.ID); err != nil {
+		s.internalError(w, r, "list databases", err)
+		return
+	} else if len(dbs) > 0 {
+		primary, err := s.db.ServerByID(r.Context(), site.ServerID)
+		if err != nil {
+			s.internalError(w, r, "load server", err)
+			return
+		}
+		if msg := replicaDBProblem(primary, srv); msg != "" {
+			writeError(w, http.StatusUnprocessableEntity, msg)
+			return
+		}
 	}
 	if !s.agents.Connected(srv.ID) {
 		writeError(w, http.StatusConflict, srv.Name+" is offline; try again when it reconnects")
@@ -160,6 +209,7 @@ func (s *Server) handleAddSiteReplica(w http.ResponseWriter, r *http.Request, p 
 	s.PushProxy(r.Context(), srv.ID)
 	s.syncAutoDNS(r.Context())
 	s.startSiteSync(site.ID)
+	s.startDBReplication()
 	s.writeSite(w, r, http.StatusCreated, site.ID)
 }
 
@@ -185,6 +235,7 @@ func (s *Server) handleRemoveSiteReplica(w http.ResponseWriter, r *http.Request,
 	s.syncAutoDNS(r.Context())
 	s.PushProxy(r.Context(), sid)
 	s.PushProxy(r.Context(), site.ServerID)
+	s.startDBReplication()
 	var cleanup string
 	if err := s.deleteSiteOn(r.Context(), site.ID, sid); err != nil {
 		cleanup = err.Error()
@@ -204,6 +255,7 @@ func (s *Server) handleSyncSite(w http.ResponseWriter, r *http.Request, p *princ
 		return
 	}
 	s.startSiteSync(site.ID)
+	s.startDBReplication()
 	s.writeSite(w, r, http.StatusAccepted, site.ID)
 }
 
@@ -220,7 +272,12 @@ func (s *Server) writeSite(w http.ResponseWriter, r *http.Request, status int, i
 		s.internalError(w, r, "load site placements", err)
 		return
 	}
-	resp := map[string]any{"site": viewSite(site), "placements": s.viewSitePlacements(id, ps)}
+	pv, err := s.viewSitePlacements(r.Context(), site, ps)
+	if err != nil {
+		s.internalError(w, r, "load site placements", err)
+		return
+	}
+	resp := map[string]any{"site": viewSite(site), "placements": pv}
 	for i := 0; i+1 < len(extra); i += 2 {
 		if extra[i+1] != "" {
 			resp[extra[i]] = extra[i+1]
@@ -321,6 +378,7 @@ func (s *Server) siteSyncLoop(ctx context.Context) {
 		for _, site := range sites {
 			s.startSiteSync(site.ID)
 		}
+		go s.syncDBReplication(ctx)
 	}
 }
 

@@ -77,8 +77,11 @@ func (s *Server) handleCreateDatabase(w http.ResponseWriter, r *http.Request, p 
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if len(site.Replicas) > 0 {
-		writeError(w, http.StatusUnprocessableEntity, "the site is served by several servers and a database would live on one: remove the other servers first")
+	if msg, err := s.replicatedDBProblem(r, site); err != nil {
+		s.internalError(w, r, "check servers", err)
+		return
+	} else if msg != "" {
+		writeError(w, http.StatusUnprocessableEntity, msg)
 		return
 	}
 	// Prefixing with the site id keeps names unique per server and makes the
@@ -116,6 +119,9 @@ func (s *Server) handleCreateDatabase(w http.ResponseWriter, r *http.Request, p 
 		return
 	}
 	s.audit(r, &p.user.ID, "database.created", map[string]any{"site_id": site.ID, "database": name})
+	if len(site.Replicas) > 0 {
+		s.startDBReplication()
+	}
 	// The password is shown once, never stored.
 	writeJSON(w, http.StatusCreated, map[string]any{"database": viewDatabase(d), "credentials": dbConnection(name, name, password)})
 }
@@ -167,6 +173,9 @@ func (s *Server) handleDeleteDatabase(w http.ResponseWriter, r *http.Request, p 
 		return
 	}
 	s.audit(r, &p.user.ID, "database.deleted", map[string]any{"site_id": site.ID, "database": d.Name})
+	if len(site.Replicas) > 0 {
+		s.startDBReplication()
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -193,8 +202,11 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 		writeError(w, http.StatusUnprocessableEntity, "WordPress needs PHP: switch the site to a PHP version first")
 		return
 	}
-	if len(site.Replicas) > 0 {
-		writeError(w, http.StatusUnprocessableEntity, "the site is served by several servers and a database would live on one: remove the other servers first")
+	if msg, err := s.replicatedDBProblem(r, site); err != nil {
+		s.internalError(w, r, "check servers", err)
+		return
+	} else if msg != "" {
+		writeError(w, http.StatusUnprocessableEntity, msg)
 		return
 	}
 	if v, _ := s.db.ServerMariaDB(r.Context(), site.ServerID); v == "" {
@@ -245,6 +257,9 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 		return
 	}
 	s.audit(r, &p.user.ID, "site.app_installed", map[string]any{"site_id": site.ID, "app": req.App, "version": resp.Version, "database": d.Name})
+	if len(site.Replicas) > 0 {
+		s.startDBReplication()
+	}
 	out := map[string]any{"app": req.App, "version": resp.Version, "files": resp.Files, "database": viewDatabase(d)}
 	if len(site.Domains) > 0 {
 		out["url"] = "https://" + site.Domains[0] + "/"

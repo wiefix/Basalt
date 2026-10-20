@@ -96,6 +96,7 @@ func (s *Server) SyncSites(ctx context.Context, serverID int64) {
 		}
 	}
 	s.PushProxy(ctx, serverID)
+	s.PushPeers(ctx, serverID, true)
 	if err := s.PushSFTP(ctx, serverID); err != nil {
 		s.log.Warn("push sftp accounts", "server_id", serverID, "err", err)
 	}
@@ -217,8 +218,13 @@ func (s *Server) handleGetSite(w http.ResponseWriter, r *http.Request, p *princi
 		s.internalError(w, r, "load site placements", err)
 		return
 	}
+	pv, err := s.viewSitePlacements(r.Context(), site, ps)
+	if err != nil {
+		s.internalError(w, r, "load site placements", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site), "sync": s.proxySync(r.Context(), site.ServerID),
-		"placements": s.viewSitePlacements(site.ID, ps)})
+		"placements": pv})
 }
 
 type siteDomainsRequest struct {
@@ -291,6 +297,7 @@ func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request, p *pri
 	if len(servers) > 1 {
 		s.healthChanged(r.Context())
 		s.syncAutoDNS(r.Context())
+		s.startDBReplication()
 	}
 	// Stop serving and revoke SFTP access first, then move the files to the trash.
 	for _, sid := range servers {

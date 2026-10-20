@@ -443,6 +443,15 @@ export interface DatabaseView {
   username: string;
 }
 
+export interface DbCopyView {
+  copied: string[];
+  error?: string;
+  lag: number;
+  running: boolean;
+  updated_at: string;
+  waiting: string[];
+}
+
 export interface DbCredentialsView {
   database: string;
   host: string;
@@ -1092,6 +1101,7 @@ export interface SitePHPRequest {
 }
 
 export interface SitePlacementView {
+  databases?: DbCopyView;
   health_check?: number;
   primary: boolean;
   server_id: number;

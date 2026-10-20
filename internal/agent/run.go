@@ -77,6 +77,11 @@ type Config struct {
 	PHPRunDir string
 	// MySQLSocket is the local MariaDB/MySQL socket ("" disables databases).
 	MySQLSocket string
+	// MariaDBConf is the option file database replication writes (default
+	// /etc/mysql/mariadb.conf.d/90-basalt.cnf); RestartMariaDB replaces,
+	// in tests, restarting MariaDB to turn its binary log on.
+	MariaDBConf    string
+	RestartMariaDB func() error
 	// DockerSocket is the local Docker Engine socket ("" disables apps).
 	DockerSocket string
 	// DockerNamespace separates this agent's Docker resources from another
@@ -105,18 +110,22 @@ type Config struct {
 }
 
 type Agent struct {
-	dir     string
-	log     *slog.Logger
-	proxy   *proxyManager
-	sites   *sitesManager
-	sftp    *sftpManager
-	dns     *dnsManager
-	tunnel  *tunnelManager
-	acme    *acmeRelay
-	apps    *appsManager
-	backups *backupManager
-	mysql   string
-	docker  string
+	dir    string
+	log    *slog.Logger
+	proxy  *proxyManager
+	sites  *sitesManager
+	sftp   *sftpManager
+	dns    *dnsManager
+	tunnel *tunnelManager
+	dbrepl dbRepl
+	// mariadbConf and restartDB: see Config.
+	mariadbConf string
+	restartDB   func() error
+	acme        *acmeRelay
+	apps        *appsManager
+	backups     *backupManager
+	mysql       string
+	docker      string
 
 	health      *healthManager
 	mailCheck   *mailcheck.Checker
@@ -178,6 +187,10 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		collector:       newCollector(),
 		updater:         newUpdater(cfg, log.With("subsystem", "update")),
 		wordpressURL:    cfg.WordPressURL,
+	}
+	a.mariadbConf, a.restartDB = cfg.MariaDBConf, cfg.RestartMariaDB
+	if a.mariadbConf == "" {
+		a.mariadbConf = defaultMariaDBConf
 	}
 	a.tunnel = newTunnelManager(cfg, func() tls.Certificate { return a.identity().tlsCertificate() },
 		func() *x509.Certificate { return a.identity().ca }, log.With("subsystem", "tunnel"))
@@ -383,6 +396,24 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return a.MailCert(ctx, req)
+	case agentproto.TypeDBReplSetup:
+		var req agentproto.DBReplSetup
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.dbReplSetup(ctx, req)
+	case agentproto.TypeDBReplApply:
+		var req agentproto.DBReplApply
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.dbReplApply(ctx, req)
+	case agentproto.TypeDBUserHashes:
+		var req agentproto.DBUserHashes
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.dbUserHashes(ctx, req)
 	case agentproto.TypePeerApply:
 		var req agentproto.PeerApply
 		if err := json.Unmarshal(payload, &req); err != nil {

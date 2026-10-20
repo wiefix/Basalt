@@ -58,6 +58,7 @@ export function SitePage({ user: me }: { user: User }) {
         <div className="alert" style={{ marginBottom: 16 }}>
           Served by {s.replicas.length + 1} servers: the files here are copied to the others every minute. Change them here (or over SFTP to
           this server) only — changes made on another server are undone.
+          {site.data.placements?.some((p) => p.databases) && " The copies of its databases on the other servers can only be read for now: pages that write to the database work only on this server."}
         </div>
       )}
       <div className="tabs">
@@ -191,6 +192,23 @@ function SiteServersCard({ site, placements, user, me }: { site: Site; placement
                     ) : (
                       <span className="muted">first copy…</span>
                     ))}
+                  {!p.primary && p.databases && (
+                    <div>
+                      {p.databases.error ? (
+                        <span className="err" title={p.databases.error}>
+                          databases: {p.databases.error}
+                        </span>
+                      ) : p.databases.waiting.length > 0 ? (
+                        <span className="muted">databases: copying {p.databases.waiting.join(", ")}…</span>
+                      ) : p.databases.running ? (
+                        <span className="muted" title="Copied from the primary's MariaDB as it changes; read-only here">
+                          databases: {p.databases.lag > 0 ? `${p.databases.lag} s behind` : "up to date"}
+                        </span>
+                      ) : (
+                        <span className="muted">databases: starting…</span>
+                      )}
+                    </div>
+                  )}
                 </td>
                 <td>
                   {p.health_check ? (
@@ -218,8 +236,8 @@ function SiteServersCard({ site, placements, user, me }: { site: Site; placement
       <div className="card-body stack">
         <p className="faint small" style={{ margin: 0 }}>
           {list.length > 1
-            ? "The files are copied from the primary to the others every minute (not the logs). DNS answers with the servers whose copy passes its health check (HTTPS on /, editable under Monitoring); certificates come through DNS."
-            : "Serve the site from more servers for failover: its files are copied there every minute and DNS answers only with the servers whose copy is up. It needs domains in a zone under DNS and no databases (they live on one server)."}
+            ? "The files are copied from the primary to the others every minute (not the logs), and its MariaDB databases as they change (read-only there). DNS answers with the servers whose copy passes its health check (HTTPS on /, editable under Monitoring); certificates come through DNS."
+            : "Serve the site from more servers for failover: its files are copied there every minute, its databases as they change, and DNS answers only with the servers whose copy is up. It needs domains in a zone under DNS; databases also need MariaDB on both servers and the servers' tunnel (port 8444 open between them)."}
         </p>
         {admin &&
           (candidates.length === 0 ? (
