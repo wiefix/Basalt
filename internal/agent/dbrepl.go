@@ -358,6 +358,8 @@ func (a *Agent) seed(ctx context.Context, db *mariadb.Server, s agentproto.DBRep
 	if err != nil {
 		return err
 	}
+	all, _ := mariadb.DumpGTIDs(head)
+	a.log.Info("seeding database copies", "source", s.ServerID, "databases", add, "copying", cur, "position", pos)
 	if len(cur) > 0 {
 		// Copies already flowing catch up to the dump's position.
 		if pos != "" {
@@ -365,16 +367,19 @@ func (a *Agent) seed(ctx context.Context, db *mariadb.Server, s agentproto.DBRep
 				return err
 			}
 			wctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-			err := db.WaitStopped(wctx, conn)
+			err := db.WaitPos(wctx, pos)
 			cancel()
 			if err != nil {
+				if st, _ := db.Status(ctx, conn); st != nil && st.SQLError != "" {
+					err = errors.New(st.SQLError)
+				}
 				return fmt.Errorf("catch up to the dump: %w", err)
 			}
 			if err := db.Stop(ctx, conn); err != nil {
 				return err
 			}
 		}
-	} else if err := db.SetSlavePos(ctx, s.ServerID, pos); err != nil {
+	} else if err := db.SetSlavePos(ctx, s.ServerID, all); err != nil {
 		return err
 	}
 	if err := a.importDump(ctx, file); err != nil {

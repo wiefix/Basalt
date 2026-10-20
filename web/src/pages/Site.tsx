@@ -58,7 +58,8 @@ export function SitePage({ user: me }: { user: User }) {
         <div className="alert" style={{ marginBottom: 16 }}>
           Served by {s.replicas.length + 1} servers: the files here are copied to the others every minute. Change them here (or over SFTP to
           this server) only — changes made on another server are undone.
-          {site.data.placements?.some((p) => p.databases) && " The copies of its databases on the other servers can only be read for now: pages that write to the database work only on this server."}
+          {site.data.placements?.some((p) => p.databases) &&
+            " Its databases live here too: the copies on the other servers use them through the servers' tunnel (with “localhost” as the database host), and keep read-only copies for a switch-over."}
         </div>
       )}
       <div className="tabs">

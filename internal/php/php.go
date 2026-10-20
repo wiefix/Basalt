@@ -161,6 +161,9 @@ type Pool struct {
 	User        string // site system user (also its group)
 	SocketGroup string // group allowed to connect (the proxy's group)
 	SiteDir     string // /srv/basalt/sites/<id>
+	// DBSocket, if set, is the MariaDB socket the site's PHP uses by
+	// default (a copy of the site reaching its server's databases).
+	DBSocket string
 	Settings
 }
 
@@ -172,7 +175,11 @@ func (h *Host) Render(p Pool) (string, error) {
 	if !versionRE.MatchString(p.Version) {
 		return "", fmt.Errorf("invalid PHP version %q", p.Version)
 	}
-	for _, v := range []string{p.User, p.SocketGroup, p.SiteDir, h.Socket(p.SiteID)} {
+	check := []string{p.User, p.SocketGroup, p.SiteDir, h.Socket(p.SiteID)}
+	if p.DBSocket != "" {
+		check = append(check, p.DBSocket)
+	}
+	for _, v := range check {
 		if !safeValue.MatchString(v) {
 			return "", fmt.Errorf("unsafe value %q in PHP pool", v)
 		}
@@ -217,6 +224,11 @@ func (h *Host) Render(p Pool) (string, error) {
 	line("php_admin_flag[log_errors]", "on")
 	line("php_admin_value[disable_functions]", strings.Join(disabledFunctions, ","))
 	line("php_admin_flag[allow_url_include]", "off")
+	if p.DBSocket != "" {
+		// "localhost" in the site's database settings goes here.
+		line("php_admin_value[mysqli.default_socket]", p.DBSocket)
+		line("php_admin_value[pdo_mysql.default_socket]", p.DBSocket)
+	}
 	line("php_admin_value[memory_limit]", strconv.Itoa(p.MemoryMB)+"M")
 	line("php_value[upload_max_filesize]", strconv.Itoa(p.UploadMB)+"M")
 	line("php_value[post_max_size]", strconv.Itoa(p.UploadMB)+"M")

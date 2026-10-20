@@ -61,6 +61,7 @@ func TestLinuxDBReplication(t *testing.T) {
 		return startHostWith(t, p, "", func(c *agent.Config) {
 			c.MySQLSocket = socket
 			c.PeerListen = "127.0.0.1:0"
+			c.SiteDBDir = filepath.Join(confDir, conf+".db")
 			c.MariaDBConf = filepath.Join(confDir, conf)
 			c.RestartMariaDB = func() error { t.Error("MariaDB restart asked for: its binary log is on"); return nil }
 		})
@@ -133,6 +134,20 @@ func TestLinuxDBReplication(t *testing.T) {
 	if out, err := sqlOn(t, dst, user, pw, "INSERT INTO "+db+".t VALUES (3, 'x')"); err == nil {
 		t.Fatalf("wrote on the copy: %s", out)
 	}
+	// The copy of the site on the second server reaches the database on
+	// the first through its socket there: what it writes lands on the
+	// source and comes back as a copy.
+	siteSock := filepath.Join(confDir, "two.cnf.db", "site-"+shop+".sock")
+	waitFor(t, "the copy's database socket", 30*time.Second, func() bool { return mariadbUp(siteSock) }, nil)
+	mustSQL(siteSock, user, pw, "INSERT INTO "+db+".t VALUES (10, 'from-copy')")
+	if got := mustSQL(src, "root", "", "SELECT v FROM "+db+".t WHERE id = 10"); got != "from-copy" {
+		t.Fatalf("written through the copy: %q", got)
+	}
+	waitFor(t, "the copy's write copied back", 30*time.Second, func() bool {
+		out, _ := sqlOn(t, dst, "root", "", "SELECT v FROM "+db+".t WHERE id = 10")
+		return out == "from-copy"
+	}, nil)
+	mustSQL(src, "root", "", "DELETE FROM "+db+".t WHERE id = 10")
 	// Another site's database is not copied.
 	if out, _ := sqlOn(t, dst, "root", "", "SHOW DATABASES LIKE '"+otherDB+"'"); out != "" {
 		t.Fatalf("another site's database was copied: %q", out)
@@ -149,7 +164,13 @@ func TestLinuxDBReplication(t *testing.T) {
 		a, _ := sqlOn(t, dst, "root", "", "SELECT COUNT(*) FROM "+db+".t")
 		b, _ := sqlOn(t, dst, "root", "", "SELECT SUM(v) FROM "+db2+".l")
 		return a == "3" && b == "7"
-	}, nil)
+	}, func() string {
+		a, _ := sqlOn(t, dst, "root", "", "SELECT GROUP_CONCAT(id) FROM "+db+".t")
+		b, _ := sqlOn(t, dst, "root", "", "SELECT SUM(v) FROM "+db2+".l")
+		srcRows, _ := sqlOn(t, src, "root", "", "SELECT GROUP_CONCAT(id), @@gtid_binlog_pos FROM "+db+".t")
+		pos, _ := sqlOn(t, dst, "root", "", "SELECT @@gtid_slave_pos, @@gtid_current_pos")
+		return a + " / " + b + " / source " + srcRows + " / replica pos " + pos + " / " + jsonString(copyState())
+	})
 	// The replica's option file keeps what it copies over a restart.
 	if b, _ := os.ReadFile(filepath.Join(confDir, "two.cnf")); !strings.Contains(string(b), "basalt_"+h1.id+".replicate_do_db = "+db+"\n") ||
 		!strings.Contains(string(b), "basalt_"+h1.id+".replicate_do_db = "+db2+"\n") || !strings.Contains(string(b), "server_id = "+h2.id) {

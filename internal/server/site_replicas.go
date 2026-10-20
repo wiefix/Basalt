@@ -289,10 +289,20 @@ func (s *Server) writeSite(w http.ResponseWriter, r *http.Request, status int, i
 // ensureSiteOn makes sure a server has the site (its user, folders and PHP
 // pool).
 func (s *Server) ensureSiteOn(ctx context.Context, site *store.Site, serverID int64) error {
+	req := agentproto.SiteRequest{SiteID: site.ID, PHPVersion: site.PHPVersion, PHP: site.PHP}
+	if serverID != site.ServerID {
+		// A copy's PHP reaches the databases on the site's server.
+		primary, err := s.db.ServerByID(ctx, site.ServerID)
+		if err != nil {
+			return err
+		}
+		if addr := peerAddr(primary); addr != "" {
+			req.DB = &agentproto.SiteDBRoute{ServerID: primary.ID, Addr: addr}
+		}
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	return s.agents.Call(ctx, serverID, agentproto.TypeSiteEnsure,
-		agentproto.SiteRequest{SiteID: site.ID, PHPVersion: site.PHPVersion, PHP: site.PHP}, nil)
+	return s.agents.Call(ctx, serverID, agentproto.TypeSiteEnsure, req, nil)
 }
 
 // ensureReplicas applies a site's PHP setup on its connected replicas (the

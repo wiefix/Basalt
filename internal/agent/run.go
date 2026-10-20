@@ -75,6 +75,9 @@ type Config struct {
 	ProxyUser string
 	// PHPRunDir holds PHP-FPM pool sockets.
 	PHPRunDir string
+	// SiteDBDir holds the database sockets of copies of sites (default
+	// /run/basalt/db).
+	SiteDBDir string
 	// MySQLSocket is the local MariaDB/MySQL socket ("" disables databases).
 	MySQLSocket string
 	// MariaDBConf is the option file database replication writes (default
@@ -117,6 +120,7 @@ type Agent struct {
 	sftp   *sftpManager
 	dns    *dnsManager
 	tunnel *tunnelManager
+	siteDB *siteDBs
 	dbrepl dbRepl
 	// mariadbConf and restartDB: see Config.
 	mariadbConf string
@@ -194,6 +198,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	}
 	a.tunnel = newTunnelManager(cfg, func() tls.Certificate { return a.identity().tlsCertificate() },
 		func() *x509.Certificate { return a.identity().ca }, log.With("subsystem", "tunnel"))
+	a.siteDB = newSiteDBs(cfg, a.tunnel, log.With("subsystem", "sitedb"))
 	return a, nil
 }
 
@@ -219,6 +224,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.sftp.run(ctx)
 	go a.dns.run(ctx)
 	go a.tunnel.run(ctx, a.tunnel.open())
+	a.siteDB.start(ctx)
 	go a.acme.run(ctx)
 	go a.apps.run(ctx)
 	defer a.health.stop()
@@ -357,8 +363,22 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		if typ == agentproto.TypeSiteEnsure {
-			return struct{}{}, publicError(a.sites.Ensure(ctx, req.SiteID, req.PHPVersion, req.PHP))
+			if req.SiteID <= 0 {
+				return nil, errors.New("site_id required")
+			}
+			// The site's user comes first: its database socket belongs to it.
+			if req.DB != nil && !a.sites.hasUser(req.SiteID) {
+				if err := a.sites.Ensure(ctx, req.SiteID, "", req.PHP, ""); err != nil {
+					return nil, publicError(err)
+				}
+			}
+			sock, err := a.siteDB.set(req.SiteID, req.DB)
+			if err != nil {
+				return nil, fmt.Errorf("the site's database socket: %w", publicError(err))
+			}
+			return struct{}{}, publicError(a.sites.Ensure(ctx, req.SiteID, req.PHPVersion, req.PHP, sock))
 		}
+		a.siteDB.set(req.SiteID, nil)
 		return struct{}{}, publicError(a.sites.Delete(ctx, req.SiteID))
 	case agentproto.TypeSFTPApply:
 		var st agentproto.SFTPApply

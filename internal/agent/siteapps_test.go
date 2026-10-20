@@ -59,7 +59,7 @@ func TestSiteInstallWordPress(t *testing.T) {
 	cfg := Config{DataDir: t.TempDir(), SitesRoot: root, WordPressURL: srv.URL + "/wp.tar.gz"}
 	a := &Agent{dir: cfg.DataDir, sites: newSitesManager(cfg, slog.New(slog.NewTextHandler(io.Discard, nil))), wordpressURL: cfg.WordPressURL}
 	ctx := context.Background()
-	if err := a.sites.Ensure(ctx, 5, "", php.Settings{}); err != nil {
+	if err := a.sites.Ensure(ctx, 5, "", php.Settings{}, ""); err != nil {
 		t.Fatal(err)
 	}
 	req := agentproto.SiteInstall{SiteID: 5, App: agentproto.AppWordPress, DBName: "s5_wp", DBUser: "s5_wp", DBPassword: "ABCDEFGHIJKLMNOP234567"}

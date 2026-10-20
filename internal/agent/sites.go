@@ -107,7 +107,19 @@ func (m *sitesManager) hostIdentity(ctx context.Context) error {
 
 // Ensure creates the site's directories, system user and PHP pool
 // (idempotent). A new, empty public directory gets a placeholder page.
-func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string, settings php.Settings) error {
+// hasUser reports whether the site's system user exists (always, without
+// isolation).
+func (m *sitesManager) hasUser(id int64) bool {
+	if !m.isolate {
+		return true
+	}
+	_, _, err := sysuser.LookupUser(sysuser.SiteUser(id))
+	return err == nil
+}
+
+// Ensure makes the site exist: user, folders, PHP pool (with dbSocket, if
+// set, as its default MariaDB socket).
+func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string, settings php.Settings, dbSocket string) error {
 	d, err := m.dir(id)
 	if err != nil {
 		return err
@@ -181,7 +193,7 @@ func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string, 
 	}
 	return m.php.Apply(ctx, php.Pool{
 		SiteID: id, Version: phpVersion, User: sysuser.SiteUser(id),
-		SocketGroup: m.wwwGroup, SiteDir: d, Settings: settings,
+		SocketGroup: m.wwwGroup, SiteDir: d, Settings: settings, DBSocket: dbSocket,
 	})
 }
 

@@ -28,6 +28,16 @@ func TestRenderPool(t *testing.T) {
 			t.Errorf("pool lacks %q", want)
 		}
 	}
+	if strings.Contains(conf, "default_socket") {
+		t.Error("a database socket without one asked for")
+	}
+	// A copy of a site reaches its server's databases through its socket.
+	conf, err = h.Render(Pool{SiteID: 7, Version: "8.4", User: "basalt-s7", SocketGroup: "basalt-www", SiteDir: "/srv/basalt/sites/7",
+		DBSocket: "/run/basalt/db/site-7.sock"})
+	if err != nil || !strings.Contains(conf, "php_admin_value[mysqli.default_socket] = /run/basalt/db/site-7.sock\n") ||
+		!strings.Contains(conf, "php_admin_value[pdo_mysql.default_socket] = /run/basalt/db/site-7.sock\n") {
+		t.Fatalf("pool with a database socket: %v\n%s", err, conf)
+	}
 }
 
 func TestRenderRejectsInjection(t *testing.T) {
@@ -38,6 +48,7 @@ func TestRenderRejectsInjection(t *testing.T) {
 		{SiteID: 1, Version: "8.4", User: "basalt-s1", SocketGroup: "g", SiteDir: "/srv/x;rm"},
 		{SiteID: 1, Version: "8.4", User: "basalt-s1", SocketGroup: "g", SiteDir: "relative"},
 		{SiteID: 0, Version: "8.4", User: "basalt-s1", SocketGroup: "g", SiteDir: "/srv/x"},
+		{SiteID: 1, Version: "8.4", User: "basalt-s1", SocketGroup: "g", SiteDir: "/srv/x", DBSocket: "/run/x.sock\nuser = root"},
 	}
 	for i, p := range bad {
 		if _, err := h.Render(p); err == nil {

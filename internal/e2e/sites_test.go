@@ -99,7 +99,11 @@ func startHostWith(t *testing.T, p *panel, dockerSocket string, configure ...fun
 	for _, f := range configure {
 		f(&cfg)
 	}
-	a, err := agent.New(cfg, quiet)
+	agentLog := quiet
+	if os.Getenv("BASALT_E2E_AGENT_LOG") != "" {
+		agentLog = slog.New(slog.NewTextHandler(os.Stderr, nil)).With("agent", name)
+	}
+	a, err := agent.New(cfg, agentLog)
 	if err != nil {
 		t.Fatal(err)
 	}

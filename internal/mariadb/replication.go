@@ -61,9 +61,11 @@ func (s *Server) BinlogOn(ctx context.Context) (bool, error) {
 }
 
 // SetIdentity sets the server's id and GTID domain now (the option file
-// keeps them over restarts). A binary log holding events of another domain
-// (written before Basalt set it up) is started over: replicas would
-// otherwise replay those.
+// keeps them over restarts). The first time (the binary log has no event
+// of the server's domain yet), a binary log holding events of other
+// domains, written before Basalt set it up, is started over: replicas
+// would otherwise replay those. Never after: starting the sequence numbers
+// over would make replicas skip new events as seen.
 func (s *Server) SetIdentity(ctx context.Context, id int64) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
@@ -83,11 +85,17 @@ func (s *Server) SetIdentity(ctx context.Context, id int64) error {
 	if err := conn.QueryRowContext(ctx, "SELECT @@gtid_binlog_state").Scan(&state); err != nil {
 		return mapError(err)
 	}
+	own, other := false, false
 	for _, g := range splitGTIDs(state) {
-		if g.domain != id {
-			_, err := conn.ExecContext(ctx, "RESET MASTER")
-			return mapError(err)
+		if g.domain == id {
+			own = true
+		} else {
+			other = true
 		}
+	}
+	if other && !own {
+		_, err := conn.ExecContext(ctx, "RESET MASTER")
+		return mapError(err)
 	}
 	return nil
 }
@@ -108,10 +116,13 @@ func (s *Server) SourceSetup(ctx context.Context, password string, dbs []string)
 		return mapError(err)
 	}
 	defer conn.Close()
+	// Not in the binary log: replicas have no use for this server's
+	// replication user.
 	steps := []struct {
 		q    string
 		args []any
 	}{
+		{"SET SESSION sql_log_bin = 0", nil},
 		{"CREATE USER IF NOT EXISTS ?@'localhost' IDENTIFIED BY ?", []any{ReplUser, password}},
 		{"ALTER USER ?@'localhost' IDENTIFIED BY ?", []any{ReplUser, password}},
 		{"GRANT REPLICATION SLAVE, BINLOG MONITOR, RELOAD ON *.* TO ?@'localhost'", []any{ReplUser}},
@@ -379,10 +390,11 @@ func (s *Server) Remove(ctx context.Context, conn string) error {
 	return mapError(err)
 }
 
-// SetSlavePos sets the position of one GTID domain (all connections stop
-// meanwhile: the position is shared; those that ran start again), leaving
-// the other domains alone.
-// An empty pos forgets the domain.
+// SetSlavePos sets, for a new connection from the source of domain, the
+// GTID position of a dump of it: its domain's entry (none: forgotten), and
+// entries of other domains this server has none of (events the source
+// wrote outside its domain, already in the dump). The position is shared by
+// all connections: they stop meanwhile, those that ran start again.
 func (s *Server) SetSlavePos(ctx context.Context, domain int64, pos string) error {
 	c, err := s.db.Conn(ctx)
 	if err != nil {
@@ -394,13 +406,15 @@ func (s *Server) SetSlavePos(ctx context.Context, domain int64, pos string) erro
 		return mapError(err)
 	}
 	var keep []string
+	have := map[int64]bool{}
 	for _, g := range splitGTIDs(cur) {
 		if g.domain != domain {
 			keep = append(keep, g.text)
+			have[g.domain] = true
 		}
 	}
 	for _, g := range splitGTIDs(pos) {
-		if g.domain == domain {
+		if g.domain == domain || !have[g.domain] {
 			keep = append(keep, g.text)
 		}
 	}
@@ -451,6 +465,15 @@ func splitGTIDs(s string) []gtid {
 }
 
 var dumpGTIDRE = regexp.MustCompile(`(?m)^-- SET GLOBAL gtid_slave_pos='([0-9,\-]*)';`)
+
+// DumpGTIDs returns the whole GTID position of a dump (every domain).
+func DumpGTIDs(head []byte) (string, error) {
+	m := dumpGTIDRE.FindSubmatch(head)
+	if m == nil {
+		return "", errors.New("the dump has no GTID position")
+	}
+	return string(m[1]), nil
+}
 
 // DumpGTID finds, in the start of a dump made with --gtid --master-data=2,
 // the position of domain the dump matches ("" if the domain wrote nothing).
@@ -504,4 +527,21 @@ func (s *Server) Connections(ctx context.Context) ([]Connection, error) {
 		}
 	}
 	return out, rows.Err()
+}
+
+// WaitPos waits until this server has applied events up to pos (a GTID
+// position) or ctx ends.
+func (s *Server) WaitPos(ctx context.Context, pos string) error {
+	for {
+		var r sql.NullInt64
+		if err := s.db.QueryRowContext(ctx, "SELECT MASTER_GTID_WAIT(?, 2)", pos).Scan(&r); err != nil {
+			return mapError(err)
+		}
+		if r.Valid && r.Int64 == 0 {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 }

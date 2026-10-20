@@ -174,6 +174,16 @@ type SiteRequest struct {
 	PHPVersion string `json:"php_version,omitempty"`
 	// PHP are the site's PHP options.
 	PHP php.Settings `json:"php,omitzero"`
+	// DB, on a server serving a copy of the site, is where the site's
+	// databases live: its PHP reaches them through the tunnel.
+	DB *SiteDBRoute `json:"db,omitempty"`
+}
+
+// SiteDBRoute is the server whose MariaDB a site uses, and where its
+// tunnel listens.
+type SiteDBRoute struct {
+	ServerID int64  `json:"server_id"`
+	Addr     string `json:"addr"`
 }
 
 // File-manager operations.
