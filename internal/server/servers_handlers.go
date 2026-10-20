@@ -54,6 +54,10 @@ type serverView struct {
 	Restic         string           `json:"restic"`
 	MariaDB        string           `json:"mariadb"`
 	PHPLimits      bool             `json:"php_limits"`
+	// PeerPort is the port of the agent's tunnel to other servers (0: off);
+	// PeerError, why it could not listen.
+	PeerPort  int    `json:"peer_port"`
+	PeerError string `json:"peer_error,omitempty"`
 	// Addresses for automatic DNS records: found on the host, set by an
 	// admin, and the ones in use.
 	DetectedIPs []string  `json:"detected_ips"`
@@ -81,6 +85,7 @@ func (s *Server) viewServer(srv *store.Server) serverView {
 		CertExpires: srv.CertExpires, EnrollExpires: srv.EnrollExpires, CreatedAt: srv.CreatedAt,
 		PHPVersions: srv.PHPVersions, Isolated: srv.Isolated, Docker: srv.Docker,
 		DockerSecurity: srv.DockerSecurity, Restic: srv.Restic, MariaDB: srv.MariaDB, PHPLimits: srv.PHPLimits,
+		PeerPort: srv.PeerPort, PeerError: srv.PeerError,
 		DetectedIPs: nonNil(srv.DetectedIPs), PublicIPs: nonNil(srv.PublicIPs), DNSIPs: dnsIPs,
 	}
 }

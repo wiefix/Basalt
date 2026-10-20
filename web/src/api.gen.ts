@@ -1033,6 +1033,8 @@ export interface ServerView {
   mem_total?: number;
   name: string;
   os?: string;
+  peer_error?: string;
+  peer_port: number;
   php_limits: boolean;
   php_versions: string[];
   public_ips: string[];

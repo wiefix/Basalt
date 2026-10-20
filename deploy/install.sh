@@ -513,6 +513,9 @@ if [ "$WITH_DNS" = keep ]; then
 	grep -q -- '--dns-listen' "$UNITS/basalt-agent.service" 2>/dev/null && WITH_DNS=1
 fi
 [ "$WITH_DNS" -eq 1 ] && AGENT_FLAGS="$AGENT_FLAGS --dns-listen :53"
+# Other servers' agents reach this one here for database replication; it
+# lets in only what the panel allows, with the panel's certificates.
+AGENT_FLAGS="$AGENT_FLAGS --peer-listen :8444"
 cat >"$UNITS/basalt-agent.service" <<EOF
 [Unit]
 Description=Basalt agent
@@ -603,8 +606,8 @@ if [ "$MODE" = panel ]; then
 	echo "                directly, not through a proxy such as Cloudflare's (use a DNS-only name"
 	echo "                or the IP: re-run with --agent-host)."
 	echo
-	echo "  Open these ports: 80/tcp, 443/tcp+udp (sites), 8443/tcp (other servers' agents), 2222/tcp (SFTP)"
+	echo "  Open these ports: 80/tcp, 443/tcp+udp (sites), 8443/tcp (other servers' agents), 2222/tcp (SFTP), 8444/tcp between your servers (database replication)"
 else
 	say "This server is connected. Manage it in the panel."
-	echo "  Open these ports: 80/tcp, 443/tcp+udp (sites), 2222/tcp (SFTP)"
+	echo "  Open these ports: 80/tcp, 443/tcp+udp (sites), 2222/tcp (SFTP), 8444/tcp between your servers (database replication)"
 fi

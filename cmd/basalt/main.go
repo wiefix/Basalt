@@ -254,6 +254,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		Resolvers:       splitList(cfg.Resolvers),
 		SFTPListen:      cfg.SFTPListen,
 		DNSListen:       cfg.DNSListen,
+		PeerListen:      cfg.PeerListen,
 		Isolate:         cfg.Isolate == "on" || (cfg.Isolate == "auto" && runtime.GOOS == "linux" && os.Geteuid() == 0),
 		ProxyUser:       cfg.ProxyUser,
 		MySQLSocket:     cfg.MySQLSocket,

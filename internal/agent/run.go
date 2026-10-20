@@ -64,6 +64,9 @@ type Config struct {
 	// DNSListen is the authoritative DNS address (UDP and TCP); empty
 	// disables DNS.
 	DNSListen string
+	// PeerListen is the address other servers' agents reach this one's
+	// tunnel at (empty: none).
+	PeerListen string
 	// Isolate runs each site as its own system user (Linux, root only).
 	Isolate bool
 	// WWWGroup is the group shared by site directories and the proxy.
@@ -108,6 +111,7 @@ type Agent struct {
 	sites   *sitesManager
 	sftp    *sftpManager
 	dns     *dnsManager
+	tunnel  *tunnelManager
 	acme    *acmeRelay
 	apps    *appsManager
 	backups *backupManager
@@ -156,7 +160,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		defer cancel()
 		proxy.pushAppUpstreams(ctx)
 	}
-	return &Agent{
+	a := &Agent{
 		dir: cfg.DataDir, log: log, id: id,
 		sites:           sites,
 		sftp:            sftp,
@@ -174,7 +178,10 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		collector:       newCollector(),
 		updater:         newUpdater(cfg, log.With("subsystem", "update")),
 		wordpressURL:    cfg.WordPressURL,
-	}, nil
+	}
+	a.tunnel = newTunnelManager(cfg, func() tls.Certificate { return a.identity().tlsCertificate() },
+		func() *x509.Certificate { return a.identity().ca }, log.With("subsystem", "tunnel"))
+	return a, nil
 }
 
 func (a *Agent) ServerID() int64 { return a.identity().ServerID }
@@ -198,6 +205,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.sites.janitor(ctx)
 	go a.sftp.run(ctx)
 	go a.dns.run(ctx)
+	go a.tunnel.run(ctx, a.tunnel.open())
 	go a.acme.run(ctx)
 	go a.apps.run(ctx)
 	defer a.health.stop()
@@ -302,6 +310,7 @@ func (a *Agent) session(ctx context.Context) error {
 	hello.Updatable = a.updater.updatable()
 	hello.PHPLimits = a.sites.isolate && a.sites.php.Units
 	hello.DNSPort, hello.DNSError = a.dns.Status()
+	hello.PeerPort, hello.PeerError = a.tunnel.Status()
 	hello.HTTPSPort = a.proxy.opts.HTTPSPort
 	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
 		return err
@@ -374,6 +383,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return a.MailCert(ctx, req)
+	case agentproto.TypePeerApply:
+		var req agentproto.PeerApply
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.tunnel.apply(context.WithoutCancel(ctx), req)
 	case agentproto.TypeHealthApply:
 		var req agentproto.HealthApply
 		if err := json.Unmarshal(payload, &req); err != nil {

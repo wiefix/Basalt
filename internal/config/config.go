@@ -81,6 +81,7 @@ type Agent struct {
 	Resolvers     string
 	SFTPListen    string
 	DNSListen     string
+	PeerListen    string
 	Isolate       string // "auto", "on", "off"
 	ProxyUser     string
 	MySQLSocket   string
@@ -214,6 +215,7 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs.StringVar(&cfg.Resolvers, "resolvers", env("RESOLVERS", ""), "comma-separated recursive DNS servers (host:port) for mail deliverability checks (default: /etc/resolv.conf)")
 	fs.StringVar(&cfg.SFTPListen, "sftp-listen", env("SFTP_LISTEN", ":2222"), "SFTP listen address (empty disables SFTP)")
 	fs.StringVar(&cfg.DNSListen, "dns-listen", env("DNS_LISTEN", ""), "authoritative DNS listen address, UDP and TCP (e.g. :53; empty disables DNS)")
+	fs.StringVar(&cfg.PeerListen, "peer-listen", env("PEER_LISTEN", ""), "address other servers' agents reach this one's tunnel at, for database replication (e.g. :8444; empty disables it)")
 	fs.StringVar(&cfg.Isolate, "isolate", env("ISOLATE", "auto"), "per-site system users: auto (on when root on Linux), on, off")
 	fs.StringVar(&cfg.ProxyUser, "proxy-user", env("PROXY_USER", ""), "system user `basalt proxy` runs as (added to the web group)")
 	fs.StringVar(&cfg.PanelDomain, "panel-domain", env("PANEL_DOMAIN", ""), "publish the panel UI on this domain or IP through the local proxy (panel host only)")

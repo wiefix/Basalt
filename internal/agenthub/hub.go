@@ -330,6 +330,7 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 			PHPVersions: cleanVersions(m.PHPVersions), Isolated: m.Isolated, Docker: clean(m.Docker),
 			DockerSecurity: cleanSecurity(m.DockerSecurity), DetectedIPs: cleanIPs(m.PublicIPs),
 			HTTPSPort: max(0, min(m.HTTPSPort, 65535)), Updatable: m.Updatable, PHPLimits: m.PHPLimits,
+			PeerPort: max(0, min(m.PeerPort, 65535)), PeerError: clean(m.PeerError),
 		})
 	case agentproto.TypeMetrics:
 		var m agentproto.Metrics

@@ -40,6 +40,8 @@ export interface Server {
   cert_expires?: string;
   enroll_expires?: string;
   php_limits?: boolean;
+  peer_port?: number; // the agent's tunnel to other servers (0: off)
+  peer_error?: string;
   mariadb?: string;
   php_versions: string[];
   isolated: boolean;

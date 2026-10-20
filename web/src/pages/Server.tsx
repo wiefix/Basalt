@@ -203,6 +203,18 @@ export function ServerPage({ user }: { user: User }) {
               <dd>
                 <PublicIPs server={s} canEdit={can(user, "admin")} />
               </dd>
+              <dt>Tunnel to servers</dt>
+              <dd>
+                {s.peer_error ? (
+                  <span className="err">cannot listen: {s.peer_error}</span>
+                ) : s.peer_port ? (
+                  <span title="Other servers' agents reach this one here (TLS with the panel's certificates) for database replication; keep it open between your servers">
+                    port {s.peer_port}
+                  </span>
+                ) : (
+                  <span className="muted">off</span>
+                )}
+              </dd>
               <dt>Certificate</dt>
               <dd>renews automatically · expires {formatDate(s.cert_expires)}</dd>
               <dt>Added</dt>

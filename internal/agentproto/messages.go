@@ -104,6 +104,10 @@ type Hello struct {
 	// disabled); DNSError says why it could not listen.
 	DNSPort  int    `json:"dns_port,omitempty"`
 	DNSError string `json:"dns_error,omitempty"`
+	// PeerPort is the port other servers' agents reach this one's tunnel
+	// on (0: disabled); PeerError says why it could not listen.
+	PeerPort  int    `json:"peer_port,omitempty"`
+	PeerError string `json:"peer_error,omitempty"`
 	// PublicIPs are the public addresses on the host's interfaces; the
 	// panel publishes them in automatic DNS records.
 	PublicIPs []string `json:"public_ips,omitempty"`
