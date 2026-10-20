@@ -83,7 +83,8 @@ func (db *DB) Routes(ctx context.Context, serverID int64) ([]*ProxyRoute, error)
 	rows, err := db.R.QueryContext(ctx,
 		`SELECT r.id, r.kind, r.root, r.upstream, r.tls, r.hsts, r.created_at, COALESCE(r.site_id, 0), COALESCE(r.app_id, 0),
 		        COALESCE(s.php_version, '') != '',
-		        r.app_id IS NOT NULL AND (SELECT count(*) FROM proxy_routes o WHERE o.app_id = r.app_id) > 1, d.domain
+		        (r.app_id IS NOT NULL AND (SELECT count(*) FROM proxy_routes o WHERE o.app_id = r.app_id) > 1) OR
+		        (r.site_id IS NOT NULL AND (SELECT count(*) FROM proxy_routes o WHERE o.site_id = r.site_id) > 1), d.domain
 		 FROM proxy_routes r JOIN proxy_route_domains d ON d.route_id = r.id
 		 LEFT JOIN sites s ON s.id = r.site_id
 		 WHERE r.server_id = ? ORDER BY r.id, d.domain`, serverID)

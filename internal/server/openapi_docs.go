@@ -125,9 +125,15 @@ var apiDocs = map[string]apiDoc{
 	"DELETE /api/v1/servers/{id}/routes/{rid}": {summary: "Remove a proxy route", resp: obj("sync", proxySyncView{})},
 
 	// Sites, files, SFTP, MariaDB.
-	"GET /api/v1/sites":                   {summary: "List sites", resp: obj("sites", []siteView{})},
-	"POST /api/v1/sites":                  {summary: "Create a static or PHP site", body: createSiteRequest{}, resp: obj("site", siteView{}, "sync", proxySyncView{}, "provision_error?", "")},
-	"GET /api/v1/sites/{id}":              {summary: "A site", resp: siteResp},
+	"GET /api/v1/sites":      {summary: "List sites", resp: obj("sites", []siteView{})},
+	"POST /api/v1/sites":     {summary: "Create a static or PHP site", body: createSiteRequest{}, resp: obj("site", siteView{}, "sync", proxySyncView{}, "provision_error?", "")},
+	"GET /api/v1/sites/{id}": {summary: "A site and the servers serving it", resp: obj("site", siteView{}, "sync", proxySyncView{}, "placements", []sitePlacementView{})},
+	"POST /api/v1/sites/{id}/replicas": {summary: "Serve a site from another server too (its files are copied there every minute)", body: replicaRequest{},
+		resp: obj("site", siteView{}, "placements", []sitePlacementView{})},
+	"DELETE /api/v1/sites/{id}/replicas/{sid}": {summary: "Stop serving a site from a server (its copy goes to that server's trash)",
+		resp: obj("site", siteView{}, "placements", []sitePlacementView{}, "cleanup_error?", "")},
+	"POST /api/v1/sites/{id}/sync": {summary: "Copy a site's files to the other servers now (in the background)",
+		resp: obj("site", siteView{}, "placements", []sitePlacementView{})},
 	"PUT /api/v1/sites/{id}/domains":      {summary: "Set a site's domains", body: siteDomainsRequest{}, resp: siteResp},
 	"PUT /api/v1/sites/{id}/php":          {summary: "Switch a site between static and a PHP version", body: sitePHPRequest{}, resp: siteResp},
 	"PUT /api/v1/sites/{id}/php-settings": {summary: "Change a site's PHP options (memory, upload size, time limits, errors, timezone)", body: php.Settings{}, resp: obj("site", siteView{})},

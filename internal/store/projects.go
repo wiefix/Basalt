@@ -81,7 +81,7 @@ var (
 	ErrDefaultProject   = errors.New("the default project cannot be deleted")
 	ErrNoProject        = errors.New("no such project")
 	ErrProjectMismatch  = errors.New("a database and the apps linked to it must be in the same project")
-	ErrReplicaCheckMove = errors.New("this health check belongs to an app on several servers: it moves with the app")
+	ErrReplicaCheckMove = errors.New("this health check belongs to a site or app on several servers: it moves with it")
 )
 
 // ValidProjectRole reports whether r is a role within a project.
@@ -423,7 +423,13 @@ func (db *DB) MoveToProject(ctx context.Context, kind ProjectResource, id, proje
 		if n > 0 {
 			return ErrReplicaCheckMove
 		}
-	case ResourceSite, ResourceDNSZone:
+	case ResourceSite:
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE health_checks SET project_id = ? WHERE id IN (SELECT health_check_id FROM proxy_routes WHERE site_id = ?)`,
+			projectID, id); err != nil {
+			return err
+		}
+	case ResourceDNSZone:
 	default:
 		return errors.New("unknown kind of resource")
 	}

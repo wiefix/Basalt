@@ -77,6 +77,10 @@ func (s *Server) handleCreateDatabase(w http.ResponseWriter, r *http.Request, p 
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if len(site.Replicas) > 0 {
+		writeError(w, http.StatusUnprocessableEntity, "the site is served by several servers and a database would live on one: remove the other servers first")
+		return
+	}
 	// Prefixing with the site id keeps names unique per server and makes the
 	// owner obvious in MariaDB tooling.
 	short := strings.ToLower(strings.TrimSpace(req.Name))
@@ -187,6 +191,10 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 	}
 	if site.PHPVersion == "" {
 		writeError(w, http.StatusUnprocessableEntity, "WordPress needs PHP: switch the site to a PHP version first")
+		return
+	}
+	if len(site.Replicas) > 0 {
+		writeError(w, http.StatusUnprocessableEntity, "the site is served by several servers and a database would live on one: remove the other servers first")
 		return
 	}
 	if v, _ := s.db.ServerMariaDB(r.Context(), site.ServerID); v == "" {

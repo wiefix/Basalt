@@ -108,7 +108,20 @@ export interface Site {
   usage: { disk_bytes: number; disk_files: number; db_bytes: number; at: string | null };
   quota_mb: number;
   over_quota: boolean;
+  replicas: number[]; // other servers serving a copy of the files
   created_at: string;
+}
+
+// SitePlacement is a server serving a site; a replica's copy of the files
+// is refreshed from the primary every minute.
+export interface SitePlacement {
+  server_id: number;
+  primary: boolean;
+  health_check?: number;
+  status?: "unknown" | "up" | "down";
+  synced_at?: string;
+  sync_error?: string;
+  syncing?: boolean;
 }
 
 export interface PHPSettings {
@@ -989,7 +1002,12 @@ export const api = {
     del<{ sync: Sync }>(`/api/v1/servers/${serverId}/routes/${routeId}`),
 
   sites: () => get<{ sites: Site[] }>("/api/v1/sites"),
-  site: (id: number) => get<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}`),
+  site: (id: number) => get<{ site: Site; sync: Sync; placements: SitePlacement[] }>(`/api/v1/sites/${id}`),
+  addSiteReplica: (id: number, serverId: number) =>
+    post<{ site: Site; placements: SitePlacement[] }>(`/api/v1/sites/${id}/replicas`, { server_id: serverId }),
+  removeSiteReplica: (id: number, serverId: number) =>
+    del<{ site: Site; placements: SitePlacement[]; cleanup_error?: string }>(`/api/v1/sites/${id}/replicas/${serverId}`),
+  syncSite: (id: number) => post<{ site: Site; placements: SitePlacement[] }>(`/api/v1/sites/${id}/sync`),
   createSite: (b: { server_id: number; name: string; domains: string[]; tls: string; php_version: string; project_id?: number }) =>
     post<{ site: Site; sync: Sync; provision_error?: string }>("/api/v1/sites", b),
   setSiteDomains: (id: number, domains: string[]) =>

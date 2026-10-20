@@ -1,9 +1,9 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { NavLink, Route, Routes, useNavigate, useParams } from "react-router";
-import { api, can, type DatabaseCredentials, type SFTPUser, type Site, type User } from "../api";
+import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
+import { api, can, type DatabaseCredentials, type SFTPUser, type Site, type SitePlacement, type User } from "../api";
 import { FileManager } from "../components/FileManager";
-import { CodeBox, CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useConfirm, useToast } from "../components/ui";
+import { CodeBox, CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
 import { LogView } from "../components/LogView";
 import { AccessLogCard } from "../components/AccessLog";
 import { SyncBadge } from "./Server";
@@ -54,6 +54,12 @@ export function SitePage({ user: me }: { user: User }) {
           The server is {server.status}. Files cannot be managed until its agent reconnects; the site itself keeps running.
         </div>
       )}
+      {s.replicas.length > 0 && (
+        <div className="alert" style={{ marginBottom: 16 }}>
+          Served by {s.replicas.length + 1} servers: the files here are copied to the others every minute. Change them here (or over SFTP to
+          this server) only — changes made on another server are undone.
+        </div>
+      )}
       <div className="tabs">
         {tab(`/sites/${id}`, "Files")}
         {tab(`/sites/${id}/domains`, "Domains")}
@@ -65,7 +71,15 @@ export function SitePage({ user: me }: { user: User }) {
       </div>
       <Routes>
         <Route index element={<FileManager siteId={id} canWrite={can(user, "member")} />} />
-        <Route path="domains" element={<DomainsTab site={s} user={user} />} />
+        <Route
+          path="domains"
+          element={
+            <>
+              <DomainsTab site={s} user={user} />
+              <SiteServersCard site={s} placements={site.data.placements ?? []} user={user} me={me} />
+            </>
+          }
+        />
         <Route path="sftp" element={<SFTPTab site={s} user={user} host={server?.last_ip} />} />
         <Route path="databases" element={<DatabasesTab site={s} user={user} />} />
         <Route path="backups" element={<BackupsTab target={{ base: `/api/v1/sites/${s.id}`, name: s.name, siteId: s.id }} user={user} />} />
@@ -79,6 +93,165 @@ export function SitePage({ user: me }: { user: User }) {
   );
 }
 
+const checkBadge: Record<string, string> = { up: "badge ok", down: "badge err", unknown: "badge plain" };
+
+// SiteServersCard lists the servers serving a site and lets admins add or
+// remove copies.
+function SiteServersCard({ site, placements, user, me }: { site: Site; placements: SitePlacement[]; user: User; me: User }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
+  const [target, setTarget] = useState<number | "">("");
+  const admin = can(user, "admin");
+  const list = placements.length > 0 ? placements : [{ server_id: site.server_id, primary: true } as SitePlacement];
+  const on = new Set(list.map((p) => p.server_id));
+  const candidates = (servers.data?.servers ?? []).filter(
+    (s) => !on.has(s.id) && (!site.php_version || s.php_versions.includes(site.php_version)),
+  );
+  const name = (id: number) => servers.data?.servers.find((s) => s.id === id)?.name ?? `server #${id}`;
+  const syncing = list.some((p) => p.syncing);
+  useQuery({
+    // While a copy runs, follow it.
+    queryKey: ["site", site.id, "syncing"],
+    queryFn: async () => {
+      const r = await api.site(site.id);
+      qc.setQueryData(["site", site.id], r);
+      return r.placements.some((p) => p.syncing);
+    },
+    enabled: syncing,
+    refetchInterval: 2000,
+  });
+  const refresh = (r?: { site: Site; placements: SitePlacement[] }) => {
+    qc.invalidateQueries({ queryKey: ["site", site.id] });
+    qc.invalidateQueries({ queryKey: ["sites"] });
+    qc.invalidateQueries({ queryKey: ["health-checks"] });
+    if (r) qc.setQueryData(["site", site.id], (old: object | undefined) => old && { ...old, ...r });
+  };
+  const add = useMutation({
+    mutationFn: () => api.addSiteReplica(site.id, Number(target || candidates[0]?.id)),
+    onSuccess: (r) => {
+      setTarget("");
+      refresh(r);
+      toast("Added; the files are being copied there");
+    },
+  });
+  const sync = useMutation({
+    mutationFn: () => api.syncSite(site.id),
+    onSuccess: (r) => refresh(r),
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  const remove = async (id: number) => {
+    const ok = await confirm({
+      title: `Stop serving ${site.name} from ${name(id)}?`,
+      body: <p>Its domains stop pointing at {name(id)}, and the copy of the files there goes to that server's trash.</p>,
+      confirm: "Remove",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      const r = await api.removeSiteReplica(site.id, id);
+      refresh(r);
+      if (r.cleanup_error) toast(`Removed; cleanup pending: ${r.cleanup_error}`, true);
+    } catch (e) {
+      toast(errorMessage(e), true);
+    }
+  };
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <div className="card-head">
+        <h2>Servers</h2>
+        {list.length > 1 && can(user, "member") && (
+          <button className="btn sm" onClick={() => sync.mutate()} disabled={sync.isPending || syncing}>
+            {syncing ? "Copying…" : "Copy now"}
+          </button>
+        )}
+      </div>
+      <div className="table-wrap">
+        <table className="table">
+          <tbody>
+            {list.map((p) => (
+              <tr key={p.server_id}>
+                <td>
+                  <strong>
+                    <ServerLink id={p.server_id} name={name(p.server_id)} user={me} />
+                  </strong>
+                  {list.length > 1 && <span className="faint small"> · {p.primary ? "primary: the files live here" : "copy"}</span>}
+                </td>
+                <td className="small">
+                  {!p.primary &&
+                    (p.sync_error ? (
+                      <span className="err" title={p.sync_error}>
+                        copy failed: {p.sync_error}
+                      </span>
+                    ) : p.synced_at ? (
+                      <span className="muted" title={formatDate(p.synced_at)}>
+                        files as of {timeAgo(p.synced_at)}
+                      </span>
+                    ) : (
+                      <span className="muted">first copy…</span>
+                    ))}
+                </td>
+                <td>
+                  {p.health_check ? (
+                    <Link
+                      to="/monitoring"
+                      className={checkBadge[p.status ?? "unknown"] ?? "badge"}
+                      title="Its health check: DNS leaves out a server whose copy is down (unless every copy is)"
+                    >
+                      {p.status ?? "unknown"}
+                    </Link>
+                  ) : null}
+                </td>
+                <td className="num">
+                  {admin && !p.primary && (
+                    <button className="btn sm icon ghost" title="Remove" onClick={() => remove(p.server_id)}>
+                      <Icon name="trash" size={14} />
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="card-body stack">
+        <p className="faint small" style={{ margin: 0 }}>
+          {list.length > 1
+            ? "The files are copied from the primary to the others every minute (not the logs). DNS answers with the servers whose copy passes its health check (HTTPS on /, editable under Monitoring); certificates come through DNS."
+            : "Serve the site from more servers for failover: its files are copied there every minute and DNS answers only with the servers whose copy is up. It needs domains in a zone under DNS and no databases (they live on one server)."}
+        </p>
+        {admin &&
+          (candidates.length === 0 ? (
+            <p className="faint small" style={{ margin: 0 }}>
+              No other server{site.php_version ? ` with PHP ${site.php_version}` : ""}.
+            </p>
+          ) : (
+            <form
+              className="row wrap"
+              onSubmit={(e: FormEvent) => {
+                e.preventDefault();
+                add.mutate();
+              }}
+            >
+              <select className="input" style={{ width: "auto", minWidth: 180 }} value={target || candidates[0].id} onChange={(e) => setTarget(Number(e.target.value))}>
+                {candidates.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} {s.status !== "online" ? `(${s.status})` : ""}
+                  </option>
+                ))}
+              </select>
+              <button className="btn sm" disabled={add.isPending}>
+                <Icon name="plus" size={14} /> Serve from here too
+              </button>
+            </form>
+          ))}
+        <ErrorBox error={add.error} />
+      </div>
+    </div>
+  );
+}
+
 function DomainsTab({ site, user }: { site: Site; user: User }) {
   const qc = useQueryClient();
   const toast = useToast();
@@ -86,7 +259,7 @@ function DomainsTab({ site, user }: { site: Site; user: User }) {
   const save = useMutation({
     mutationFn: () => api.setSiteDomains(site.id, text.split(/[\s,]+/).filter(Boolean)),
     onSuccess: (r) => {
-      qc.setQueryData(["site", site.id], { site: r.site, sync: r.sync });
+      qc.setQueryData(["site", site.id], (old: object | undefined) => ({ ...old, site: r.site, sync: r.sync }));
       qc.invalidateQueries({ queryKey: ["sites"] });
       toast(r.sync.in_sync ? "Domains updated" : "Saved; the server will apply it when it reconnects");
     },
@@ -453,7 +626,7 @@ function RuntimeCard({ site, phpVersions }: { site: Site; phpVersions: string[] 
   const save = useMutation({
     mutationFn: () => api.setSitePHP(site.id, version),
     onSuccess: (r) => {
-      qc.setQueryData(["site", site.id], { site: r.site, sync: r.sync });
+      qc.setQueryData(["site", site.id], (old: object | undefined) => ({ ...old, site: r.site, sync: r.sync }));
       qc.invalidateQueries({ queryKey: ["sites"] });
       toast(version ? `Switched to PHP ${version}` : "Switched to static");
     },

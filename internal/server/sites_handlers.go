@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -28,14 +29,16 @@ type siteView struct {
 	Usage      siteUsageView `json:"usage"`
 	QuotaMB    int           `json:"quota_mb"`
 	OverQuota  bool          `json:"over_quota"`
-	CreatedAt  time.Time     `json:"created_at"`
+	// Replicas are the other servers serving a copy of the files.
+	Replicas  []int64   `json:"replicas"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func viewSite(s *store.Site) siteView {
 	return siteView{ID: s.ID, ServerID: s.ServerID, ProjectID: s.ProjectID, Name: s.Name, Kind: s.Kind,
 		Domains: s.Domains, TLS: s.TLS, PHPVersion: s.PHPVersion, PHP: s.PHP, CreatedAt: s.CreatedAt,
 		Usage:   siteUsageView{DiskBytes: s.Usage.DiskBytes, DiskFiles: s.Usage.DiskFiles, DBBytes: s.Usage.DBBytes, At: s.Usage.At},
-		QuotaMB: s.QuotaMB, OverQuota: s.QuotaMB > 0 && s.Usage.Total() > int64(s.QuotaMB)<<20}
+		QuotaMB: s.QuotaMB, OverQuota: s.QuotaMB > 0 && s.Usage.Total() > int64(s.QuotaMB)<<20, Replicas: s.Replicas}
 }
 
 func (s *Server) pathSite(w http.ResponseWriter, r *http.Request) (*store.Site, bool) {
@@ -82,6 +85,16 @@ func (s *Server) SyncSites(ctx context.Context, serverID int64) {
 			s.log.Warn("ensure site", "site_id", site.ID, "err", err)
 		}
 	}
+	// The sites it serves copies of.
+	if replicas, err := s.db.SiteReplicasOn(ctx, serverID); err != nil {
+		s.log.Error("list site replicas for sync", "err", err, "server_id", serverID)
+	} else {
+		for _, site := range replicas {
+			if err := s.ensureSiteOn(ctx, site, serverID); err != nil {
+				s.log.Warn("ensure site replica", "site_id", site.ID, "err", err)
+			}
+		}
+	}
 	s.PushProxy(ctx, serverID)
 	if err := s.PushSFTP(ctx, serverID); err != nil {
 		s.log.Warn("push sftp accounts", "server_id", serverID, "err", err)
@@ -93,11 +106,9 @@ func (s *Server) SyncSites(ctx context.Context, serverID int64) {
 	}
 }
 
+// ensureSite makes sure the site's primary server has it.
 func (s *Server) ensureSite(ctx context.Context, site *store.Site) error {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	return s.agents.Call(ctx, site.ServerID, agentproto.TypeSiteEnsure,
-		agentproto.SiteRequest{SiteID: site.ID, PHPVersion: site.PHPVersion, PHP: site.PHP}, nil)
+	return s.ensureSiteOn(ctx, site, site.ServerID)
 }
 
 type createSiteRequest struct {
@@ -201,7 +212,13 @@ func (s *Server) handleGetSite(w http.ResponseWriter, r *http.Request, p *princi
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site), "sync": s.proxySync(r.Context(), site.ServerID)})
+	ps, err := s.db.SitePlacements(r.Context(), site.ID)
+	if err != nil {
+		s.internalError(w, r, "load site placements", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site), "sync": s.proxySync(r.Context(), site.ServerID),
+		"placements": s.viewSitePlacements(site.ID, ps)})
 }
 
 type siteDomainsRequest struct {
@@ -228,6 +245,16 @@ func (s *Server) handleSetSiteDomains(w http.ResponseWriter, r *http.Request, p 
 	if s.domainError(w, r, s.checkDomainProjects(r.Context(), domains, site.ProjectID)) {
 		return
 	}
+	if len(site.Replicas) > 0 {
+		// On several servers the domains stay in zones here.
+		if msg, err := s.siteReplicaProblem(r.Context(), site, domains); err != nil {
+			s.internalError(w, r, "check site", err)
+			return
+		} else if msg != "" {
+			writeError(w, http.StatusUnprocessableEntity, msg)
+			return
+		}
+	}
 	err = s.db.SetSiteDomains(r.Context(), site.ID, domains)
 	var taken *store.ErrDomainTaken
 	if errors.As(err, &taken) {
@@ -240,6 +267,9 @@ func (s *Server) handleSetSiteDomains(w http.ResponseWriter, r *http.Request, p 
 	}
 	s.audit(r, &p.user.ID, "site.domains_changed", map[string]any{"site_id": site.ID, "domains": domains})
 	s.PushProxy(r.Context(), site.ServerID)
+	for _, sid := range site.Replicas {
+		s.PushProxy(r.Context(), sid)
+	}
 	site.Domains = domains
 	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site), "sync": s.proxySync(r.Context(), site.ServerID)})
 }
@@ -249,7 +279,8 @@ func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request, p *pri
 	if !ok {
 		return
 	}
-	if err := s.db.DeleteSite(r.Context(), site.ID); errors.Is(err, store.ErrSiteHasDatabases) {
+	servers, err := s.db.DeleteSite(r.Context(), site.ID)
+	if errors.Is(err, store.ErrSiteHasDatabases) {
 		writeError(w, http.StatusConflict, "delete the site's databases first; they are not removed automatically to protect your data")
 		return
 	} else if err != nil {
@@ -257,22 +288,33 @@ func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request, p *pri
 		return
 	}
 	s.audit(r, &p.user.ID, "site.deleted", map[string]any{"site_id": site.ID, "name": site.Name})
+	if len(servers) > 1 {
+		s.healthChanged(r.Context())
+		s.syncAutoDNS(r.Context())
+	}
 	// Stop serving and revoke SFTP access first, then move the files to the trash.
-	s.PushProxy(r.Context(), site.ServerID)
+	for _, sid := range servers {
+		s.PushProxy(r.Context(), sid)
+	}
 	if err := s.db.BumpSFTPRevisionForServer(r.Context(), site.ServerID); err == nil {
 		if err := s.PushSFTP(r.Context(), site.ServerID); err != nil {
 			s.log.Warn("push sftp accounts", "err", err)
 		}
 	}
 	resp := map[string]any{"sync": s.proxySync(r.Context(), site.ServerID)}
-	if s.agents.Connected(site.ServerID) {
-		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-		defer cancel()
-		if err := s.agents.Call(ctx, site.ServerID, agentproto.TypeSiteDelete, agentproto.SiteRequest{SiteID: site.ID}, nil); err != nil {
-			resp["cleanup_error"] = err.Error()
+	var problems []string
+	for _, sid := range servers {
+		if err := s.deleteSiteOn(r.Context(), site.ID, sid); err != nil {
+			if len(servers) > 1 {
+				if srv, serr := s.db.ServerByID(r.Context(), sid); serr == nil {
+					err = fmt.Errorf("%s: %w", srv.Name, err)
+				}
+			}
+			problems = append(problems, err.Error())
 		}
-	} else {
-		resp["cleanup_error"] = "server offline: files were left in place"
+	}
+	if len(problems) > 0 {
+		resp["cleanup_error"] = strings.Join(problems, "; ")
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -317,6 +359,17 @@ func (s *Server) handleSetSitePHP(w http.ResponseWriter, r *http.Request, p *pri
 		writeError(w, http.StatusUnprocessableEntity, msg)
 		return
 	}
+	for _, sid := range site.Replicas {
+		rs, err := s.db.ServerByID(r.Context(), sid)
+		if err != nil {
+			s.internalError(w, r, "load server", err)
+			return
+		}
+		if msg := checkPHP(rs, req.Version); msg != "" {
+			writeError(w, http.StatusUnprocessableEntity, rs.Name+" (serving a copy): "+msg)
+			return
+		}
+	}
 	if !s.agents.Connected(site.ServerID) {
 		writeError(w, http.StatusConflict, "the server is offline; try again when it reconnects")
 		return
@@ -327,12 +380,19 @@ func (s *Server) handleSetSitePHP(w http.ResponseWriter, r *http.Request, p *pri
 		writeAgentError(w, err)
 		return
 	}
+	if err := s.ensureReplicas(r.Context(), site); err != nil {
+		writeAgentError(w, err)
+		return
+	}
 	if err := s.db.SetSitePHP(r.Context(), site.ID, req.Version); err != nil {
 		s.internalError(w, r, "set site php", err)
 		return
 	}
 	s.audit(r, &p.user.ID, "site.php_changed", map[string]any{"site_id": site.ID, "version": req.Version})
 	s.PushProxy(r.Context(), site.ServerID)
+	for _, sid := range site.Replicas {
+		s.PushProxy(r.Context(), sid)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site), "sync": s.proxySync(r.Context(), site.ServerID)})
 }
 
@@ -360,6 +420,10 @@ func (s *Server) handleSetSitePHPSettings(w http.ResponseWriter, r *http.Request
 		next := *site
 		next.PHP = req
 		if err := s.ensureSite(r.Context(), &next); err != nil {
+			writeAgentError(w, err)
+			return
+		}
+		if err := s.ensureReplicas(r.Context(), &next); err != nil {
 			writeAgentError(w, err)
 			return
 		}

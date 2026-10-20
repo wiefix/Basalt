@@ -96,6 +96,9 @@ export const checks = [
 
   fits<Returns<A["sites"]>>()<G.GetSitesResponse>(),
   fits<Returns<A["site"]>>()<G.GetSitesIdResponse>(),
+  fits<Returns<A["addSiteReplica"]>>()<G.PostSitesIdReplicasResponse>(),
+  fits<Returns<A["removeSiteReplica"]>>()<G.DeleteSitesIdReplicasSidResponse>(),
+  fits<Returns<A["syncSite"]>>()<G.PostSitesIdSyncResponse>(),
   fits<Returns<A["createSite"]>>()<G.PostSitesResponse>(),
   fits<Returns<A["setSiteDomains"]>>()<G.PutSitesIdDomainsResponse>(),
   fits<Returns<A["setSitePHP"]>>()<G.PutSitesIdPhpResponse>(),

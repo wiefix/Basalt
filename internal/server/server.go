@@ -74,6 +74,9 @@ type Options struct {
 	OfflineAfter time.Duration
 	// CertCheckEvery is how often certificates are checked (default 6 hours).
 	CertCheckEvery time.Duration
+	// SiteSyncEvery is how often the files of sites on several servers are
+	// copied to the replicas (default a minute).
+	SiteSyncEvery time.Duration
 	// AuditCheckEvery is how often the audit log's chain is verified
 	// (default daily).
 	AuditCheckEvery time.Duration
@@ -132,6 +135,8 @@ type Server struct {
 	auditWatch        auditWatch
 	rel               releaseOptions
 	usageEvery        time.Duration
+	siteSyncEvery     time.Duration
+	syncs             siteSyncs
 	updates           updater
 	respCheck         func(string)
 
@@ -184,6 +189,9 @@ func New(o Options) *Server {
 	if o.OfflineAfter <= 0 {
 		o.OfflineAfter = 5 * time.Minute
 	}
+	if o.SiteSyncEvery <= 0 {
+		o.SiteSyncEvery = siteSyncEvery
+	}
 	if o.CertCheckEvery <= 0 {
 		o.CertCheckEvery = 6 * time.Hour
 	}
@@ -223,6 +231,7 @@ func New(o Options) *Server {
 		certCheckEvery:  o.CertCheckEvery,
 		auditCheckEvery: o.AuditCheckEvery,
 		usageEvery:      usageEvery,
+		siteSyncEvery:   o.SiteSyncEvery,
 		respCheck:       o.CheckResponses,
 		rel:             releaseOptions{URL: o.ReleaseURL, Key: o.ReleaseKey, AllowPrivate: o.ReleaseAllowPrivate, Version: o.Version},
 		setupToken:      o.SetupToken,
@@ -426,6 +435,9 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("PUT /api/v1/apps/{id}/domains", s.requireProject(store.RoleAdmin, s.handleSetAppDomains))
 	rt.Handle("POST /api/v1/apps/{id}/replicas", s.requireProject(store.RoleAdmin, s.handleAddReplica))
 	rt.Handle("DELETE /api/v1/apps/{id}/replicas/{sid}", s.requireProject(store.RoleAdmin, s.handleRemoveReplica))
+	rt.Handle("POST /api/v1/sites/{id}/replicas", s.requireProject(store.RoleAdmin, s.handleAddSiteReplica))
+	rt.Handle("DELETE /api/v1/sites/{id}/replicas/{sid}", s.requireProject(store.RoleAdmin, s.handleRemoveSiteReplica))
+	rt.Handle("POST /api/v1/sites/{id}/sync", s.requireProject(store.RoleMember, s.handleSyncSite))
 	rt.Handle("POST /api/v1/apps/{id}/deploy-key", s.requireProject(store.RoleAdmin, s.handleRegenerateDeployKey))
 	rt.Handle("GET /api/v1/apps/{id}/webhook", s.requireProject(store.RoleAdmin, s.handleGetWebhook))
 	rt.Handle("PUT /api/v1/apps/{id}/webhook", s.requireProject(store.RoleAdmin, s.handleSetWebhook))
@@ -497,6 +509,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go s.healthLoop(ctx)
 	go s.updateLoop(ctx)
 	go s.usageLoop(ctx)
+	go s.siteSyncLoop(ctx)
 	go s.WatchServers(ctx)
 	go s.WatchCertificates(ctx)
 	go s.WatchAuditLog(ctx)

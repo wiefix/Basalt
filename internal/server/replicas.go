@@ -80,7 +80,7 @@ func (s *Server) domainsOutsideZones(ctx context.Context, domains []string) (str
 		}
 	}
 	if len(missing) > 0 {
-		return "an app on several servers needs its domains in a zone under DNS here (for failover and certificates): " +
+		return "on several servers the domains must be in a zone under DNS here (for failover and certificates): " +
 			strings.Join(missing, ", "), nil
 	}
 	return "", nil
@@ -89,11 +89,17 @@ func (s *Server) domainsOutsideZones(ctx context.Context, domains []string) (str
 // replicaCheck is the health check of an app's copy on srv: HTTPS through
 // that server's proxy, with the app's domain.
 func replicaCheck(app *store.App, srv *store.Server) (*store.HealthCheck, error) {
+	return placementCheck("app", app.ID, app.Name, app.Domains, srv)
+}
+
+// placementCheck is the health check of the copy of a site or app (kind)
+// on srv.
+func placementCheck(kind string, id int64, name string, domains []string, srv *store.Server) (*store.HealthCheck, error) {
 	addrs := srv.DNSAddrs()
 	if len(addrs) == 0 {
 		return nil, fmt.Errorf("%s has no known public address: set it on the server's page", srv.Name)
 	}
-	host := app.Domains[0]
+	host := domains[0]
 	if proxy.IsWildcard(host) {
 		host = "basalt-check" + strings.TrimPrefix(host, "*")
 	}
@@ -101,14 +107,14 @@ func replicaCheck(app *store.App, srv *store.Server) (*store.HealthCheck, error)
 	if port == 0 {
 		port = 443
 	}
-	name := fmt.Sprintf("app-%d-%s-on-%s", app.ID, app.Name, srv.Name)
-	if len(name) > 63 {
-		name = name[:63]
+	check := fmt.Sprintf("%s-%d-%s-on-%s", kind, id, name, srv.Name)
+	if len(check) > 63 {
+		check = check[:63]
 	}
-	name = strings.TrimRight(name, ".-_")
-	// Insecure: it checks that the app answers, not the certificate (a new
-	// replica has none yet).
-	return &store.HealthCheck{Name: name, Kind: agentproto.HealthHTTPS, Host: addrs[0].String(), Port: port, Path: "/",
+	check = strings.TrimRight(check, ".-_")
+	// Insecure: it checks that the copy answers, not the certificate (a
+	// new replica has none yet).
+	return &store.HealthCheck{Name: check, Kind: agentproto.HealthHTTPS, Host: addrs[0].String(), Port: port, Path: "/",
 		HostHeader: host, Insecure: true, Interval: 30, Timeout: 5}, nil
 }
 

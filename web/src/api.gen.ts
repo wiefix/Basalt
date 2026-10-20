@@ -1089,6 +1089,16 @@ export interface SitePHPRequest {
   version?: string;
 }
 
+export interface SitePlacementView {
+  health_check?: number;
+  primary: boolean;
+  server_id: number;
+  status?: string;
+  sync_error?: string;
+  synced_at?: string;
+  syncing?: boolean;
+}
+
 export interface SiteQuotaRequest {
   quota_mb?: number;
 }
@@ -1111,6 +1121,7 @@ export interface SiteView {
   php_version: string;
   project_id: number;
   quota_mb: number;
+  replicas: number[];
   server_id: number;
   tls: string;
   usage: SiteUsageView;
@@ -1384,6 +1395,12 @@ export type DeleteSitesIdBackupPolicyResponse = {
 
 export type DeleteSitesIdDatabasesDidResponse = void;
 
+export type DeleteSitesIdReplicasSidResponse = {
+  cleanup_error?: string;
+  placements: SitePlacementView[];
+  site: SiteView;
+};
+
 export type DeleteSitesIdSftpUsersUidResponse = {
   ok: boolean;
   sync_error?: string;
@@ -1651,6 +1668,7 @@ export type GetSitesResponse = {
 };
 
 export type GetSitesIdResponse = {
+  placements: SitePlacementView[];
   site: SiteView;
   sync: ProxySyncView;
 };
@@ -2055,6 +2073,13 @@ export type PostSitesIdInstallResponse = {
 
 export type PostSitesIdInstallBody = SiteInstallRequest;
 
+export type PostSitesIdReplicasResponse = {
+  placements: SitePlacementView[];
+  site: SiteView;
+};
+
+export type PostSitesIdReplicasBody = ReplicaRequest;
+
 export type PostSitesIdRestoreResponse = {
   backup: BackupView;
 };
@@ -2073,6 +2098,11 @@ export type PostSitesIdSftpUsersBody = CreateSFTPUserRequest;
 export type PostSitesIdSnapshotsSidRestoreCopyResponse = AgentprotoRestoreCopyResponse;
 
 export type PostSitesIdSnapshotsSidRestoreCopyBody = RestoreCopyRequest;
+
+export type PostSitesIdSyncResponse = {
+  placements: SitePlacementView[];
+  site: SiteView;
+};
 
 export type PostSitesIdUsageResponse = {
   site: SiteView;

@@ -202,7 +202,14 @@ func (m *sitesManager) Delete(ctx context.Context, id int64) error {
 		if err := os.MkdirAll(trash, 0o700); err != nil {
 			return err
 		}
-		dest := filepath.Join(trash, fmt.Sprintf("%d-%d", id, time.Now().Unix()))
+		// The same site deleted twice within a second (a copy removed from
+		// a server and the site deleted) takes the next free second.
+		ts := time.Now().Unix()
+		dest := filepath.Join(trash, fmt.Sprintf("%d-%d", id, ts))
+		for _, err := os.Lstat(dest); err == nil; _, err = os.Lstat(dest) {
+			ts++
+			dest = filepath.Join(trash, fmt.Sprintf("%d-%d", id, ts))
+		}
 		if err := os.Rename(d, dest); err != nil {
 			return err
 		}

@@ -500,6 +500,26 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return a.accessLog(req)
+	case agentproto.TypeSiteManifest:
+		var req agentproto.SiteManifestRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		resp, err := a.sites.manifest(ctx, req, agentproto.StreamSender(ctx))
+		return resp, publicError(err)
+	case agentproto.TypeSiteSyncRead:
+		var req agentproto.SiteSyncReadRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		resp, err := a.sites.syncRead(req)
+		return resp, publicError(err)
+	case agentproto.TypeSiteSyncWrite:
+		var req agentproto.SiteSyncWriteRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, publicError(a.sites.syncWrite(req))
 	case agentproto.TypeSiteTrash:
 		var req agentproto.SiteTrash
 		if err := json.Unmarshal(payload, &req); err != nil {

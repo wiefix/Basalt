@@ -28,7 +28,9 @@ type Site struct {
 	// over it was reported.
 	QuotaMB      int
 	QuotaAlerted bool
-	CreatedAt    time.Time
+	// Replicas are the other servers serving a copy of the site's files.
+	Replicas  []int64
+	CreatedAt time.Time
 }
 
 // SiteUsage is the disk space a site took when last measured.
@@ -54,7 +56,7 @@ func (db *DB) CreateSite(ctx context.Context, projectID, serverID int64, name st
 	if err := checkRoom(ctx, tx, projectID, "sites"); err != nil {
 		return nil, err
 	}
-	site := &Site{ServerID: serverID, ProjectID: projectID, Name: name, Kind: "static", Domains: domains, TLS: tls, PHPVersion: phpVersion}
+	site := &Site{ServerID: serverID, ProjectID: projectID, Name: name, Kind: "static", Domains: domains, TLS: tls, PHPVersion: phpVersion, Replicas: []int64{}}
 	var created int64
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO sites (project_id, server_id, name, kind, php_version) VALUES (?, ?, ?, 'static', ?) RETURNING id, created_at`,
@@ -103,32 +105,33 @@ func (db *DB) SetSiteDomains(ctx context.Context, siteID int64, domains []string
 		return err
 	}
 	defer tx.Rollback()
-	var serverID, routeID int64
-	err = tx.QueryRowContext(ctx,
-		`SELECT s.server_id, r.id FROM sites s JOIN proxy_routes r ON r.site_id = s.id WHERE s.id = ?`,
-		siteID).Scan(&serverID, &routeID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
+	routes, err := siteRoutes(ctx, tx, siteID)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_route_domains WHERE route_id = ?`, routeID); err != nil {
-		return err
+	if len(routes) == 0 {
+		return ErrNotFound
 	}
-	if err := insertDomains(ctx, tx, serverID, routeID, domains); err != nil {
-		return err
-	}
-	if err := bumpProxyRevision(ctx, tx, serverID); err != nil {
-		return err
+	for _, r := range routes {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_route_domains WHERE route_id = ?`, r.RouteID); err != nil {
+			return err
+		}
+		if err := insertDomains(ctx, tx, r.ServerID, r.RouteID, domains); err != nil {
+			return err
+		}
+		if err := bumpProxyRevision(ctx, tx, r.ServerID); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
 
 const siteQuery = `SELECT s.id, s.server_id, s.project_id, s.name, s.kind, s.php_version, s.php_settings,
 	s.disk_bytes, s.disk_files, s.db_bytes, s.usage_at, s.quota_mb, s.quota_alerted,
-	s.created_at, r.id, r.tls, COALESCE(d.domain, '')
-	FROM sites s JOIN proxy_routes r ON r.site_id = s.id
+	s.created_at, r.id, r.tls,
+	(SELECT json_group_array(o.server_id) FROM proxy_routes o WHERE o.site_id = s.id AND o.server_id != s.server_id),
+	COALESCE(d.domain, '')
+	FROM sites s JOIN proxy_routes r ON r.site_id = s.id AND r.server_id = s.server_id
 	LEFT JOIN proxy_route_domains d ON d.route_id = r.id`
 
 func (db *DB) scanSites(rows *sql.Rows) ([]*Site, error) {
@@ -137,11 +140,14 @@ func (db *DB) scanSites(rows *sql.Rows) ([]*Site, error) {
 	for rows.Next() {
 		var s Site
 		var created int64
-		var domain, settings string
+		var domain, settings, replicas string
 		var usageAt sql.NullInt64
 		if err := rows.Scan(&s.ID, &s.ServerID, &s.ProjectID, &s.Name, &s.Kind, &s.PHPVersion, &settings,
 			&s.Usage.DiskBytes, &s.Usage.DiskFiles, &s.Usage.DBBytes, &usageAt, &s.QuotaMB, &s.QuotaAlerted,
-			&created, &s.RouteID, &s.TLS, &domain); err != nil {
+			&created, &s.RouteID, &s.TLS, &replicas, &domain); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(replicas), &s.Replicas); err != nil {
 			return nil, err
 		}
 		s.Usage.At = timePtr(usageAt)
@@ -193,32 +199,36 @@ func (db *DB) SiteByID(ctx context.Context, id int64) (*Site, error) {
 	return sites[0], nil
 }
 
-// DeleteSite removes the site and its route (by cascade).
-func (db *DB) DeleteSite(ctx context.Context, id int64) error {
+// DeleteSite removes the site, its routes (by cascade) and the health
+// checks of its placements. It returns the servers that served it.
+func (db *DB) DeleteSite(ctx context.Context, id int64) ([]int64, error) {
 	tx, err := db.W.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 	var n int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM databases WHERE site_id = ?`, id).Scan(&n); err != nil {
-		return err
+		return nil, err
 	}
 	if n > 0 {
-		return ErrSiteHasDatabases
+		return nil, ErrSiteHasDatabases
 	}
-	var serverID int64
-	err = tx.QueryRowContext(ctx, `DELETE FROM sites WHERE id = ? RETURNING server_id`, id).Scan(&serverID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrNotFound
-	}
+	routes, err := siteRoutes(ctx, tx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := bumpProxyRevision(ctx, tx, serverID); err != nil {
-		return err
+	if len(routes) == 0 {
+		return nil, ErrNotFound
 	}
-	return tx.Commit()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sites WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	servers, err := dropRoutes(ctx, tx, routes)
+	if err != nil {
+		return nil, err
+	}
+	return servers, tx.Commit()
 }
 
 // SetSiteUsage records a measurement of a site's disk space.
@@ -257,6 +267,12 @@ func (db *DB) SetSitePHP(ctx context.Context, siteID int64, version string) erro
 	defer tx.Rollback()
 	var serverID int64
 	err = tx.QueryRowContext(ctx, `UPDATE sites SET php_version = ? WHERE id = ? RETURNING server_id`, version, siteID).Scan(&serverID)
+	if err == nil {
+		// The replicas serve it the same way.
+		_, err = tx.ExecContext(ctx,
+			`UPDATE servers SET proxy_revision = proxy_revision + 1 WHERE id IN (SELECT server_id FROM proxy_routes WHERE site_id = ? AND server_id != ?)`,
+			siteID, serverID)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
