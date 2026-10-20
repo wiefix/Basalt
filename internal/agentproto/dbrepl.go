@@ -18,7 +18,40 @@ const (
 	TypeDBReplApply = "db_repl_apply"
 	// TypeDBUserHashes returns the password hashes of database users.
 	TypeDBUserHashes = "db_user_hashes"
+	// TypeDBDemote leaves a primary's site databases only readable before a
+	// copy takes over (DBHandover); it answers its binary log position.
+	TypeDBDemote = "db_demote"
+	// TypeDBPromote makes the copies of a site's databases on a replica its
+	// own (DBHandover): they leave replication and get their rights back.
+	TypeDBPromote = "db_promote"
 )
+
+// DBHandover names the databases of a site changing primary server.
+type DBHandover struct {
+	// Source is the former primary (promote).
+	Source    int64    `json:"source,omitempty"`
+	Databases []DBCopy `json:"databases"` // Hash unused
+	// WaitPos, when promoting, is the former primary's position to reach
+	// first (a planned hand-over); "" when it is gone.
+	WaitPos string `json:"wait_pos,omitempty"`
+}
+
+type DBDemoteResponse struct {
+	Pos string `json:"pos"`
+}
+
+// Validate checks the names.
+func (h *DBHandover) Validate() error {
+	if len(h.Databases) == 0 || len(h.Databases) > 1000 {
+		return errors.New("1 to 1000 databases")
+	}
+	for _, d := range h.Databases {
+		if !dbNameRE.MatchString(d.Name) || !dbNameRE.MatchString(d.User) {
+			return fmt.Errorf("bad database %q", d.Name)
+		}
+	}
+	return nil
+}
 
 type DBReplSetup struct {
 	// Password of the replication user replicas connect as; "" on a server
@@ -102,4 +135,14 @@ func (r *DBReplApply) Validate() error {
 		}
 	}
 	return nil
+}
+
+// UserOf is the user of database name in s (its own name if not listed).
+func (s DBReplSource) UserOf(name string) string {
+	for _, d := range s.Databases {
+		if d.Name == name {
+			return d.User
+		}
+	}
+	return name
 }

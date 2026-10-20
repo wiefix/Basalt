@@ -382,6 +382,12 @@ func (a *Agent) seed(ctx context.Context, db *mariadb.Server, s agentproto.DBRep
 	} else if err := db.SetSlavePos(ctx, s.ServerID, all); err != nil {
 		return err
 	}
+	// A copy there before (a former primary coming back) starts over.
+	for _, d := range add {
+		if err := db.DropCopy(ctx, d, s.UserOf(d)); err != nil {
+			return err
+		}
+	}
 	if err := a.importDump(ctx, file); err != nil {
 		return err
 	}
@@ -466,4 +472,87 @@ func (l *limitWriter) Write(p []byte) (int, error) {
 		l.n -= k
 	}
 	return len(p), nil
+}
+
+// dbDemote leaves a primary's site databases only readable and returns the
+// position its replicas must reach to have everything.
+func (a *Agent) dbDemote(ctx context.Context, req agentproto.DBHandover) (agentproto.DBDemoteResponse, error) {
+	var resp agentproto.DBDemoteResponse
+	if err := req.Validate(); err != nil {
+		return resp, err
+	}
+	a.dbrepl.mu.Lock()
+	defer a.dbrepl.mu.Unlock()
+	db, err := a.mariaDB()
+	if err != nil {
+		return resp, err
+	}
+	defer db.Close()
+	for _, d := range req.Databases {
+		if err := db.ReadOnly(ctx, d.Name, d.User); err != nil {
+			return resp, err
+		}
+	}
+	resp.Pos, err = db.BinlogPos(ctx)
+	return resp, err
+}
+
+// dbPromote makes this server's copies of a site's databases its own:
+// caught up with the former primary if it says where to, out of the
+// replication from it, writable by the site's users.
+func (a *Agent) dbPromote(ctx context.Context, req agentproto.DBHandover) error {
+	if err := req.Validate(); err != nil {
+		return err
+	}
+	if req.Source <= 0 {
+		return errors.New("source required")
+	}
+	a.dbrepl.mu.Lock()
+	defer a.dbrepl.mu.Unlock()
+	db, err := a.mariaDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	conn := mariadb.ConnName(req.Source)
+	if req.WaitPos != "" {
+		wctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		err := db.WaitPos(wctx, req.WaitPos)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("the copies did not catch up with the primary: %w", err)
+		}
+	}
+	cur, err := db.Filter(ctx, conn)
+	if err != nil {
+		return err
+	}
+	var rest []string
+	for _, n := range cur {
+		if !slices.ContainsFunc(req.Databases, func(d agentproto.DBCopy) bool { return d.Name == n }) {
+			rest = append(rest, n)
+		}
+	}
+	if len(rest) == 0 {
+		if err := db.Remove(ctx, conn); err != nil {
+			return err
+		}
+		delete(a.dbrepl.sources, conn)
+	} else {
+		if err := db.Stop(ctx, conn); err != nil {
+			return err
+		}
+		if err := db.SetFilter(ctx, conn, rest); err != nil {
+			return err
+		}
+		if err := db.Start(ctx, conn, ""); err != nil {
+			return err
+		}
+	}
+	for _, d := range req.Databases {
+		if err := db.Owner(ctx, d.Name, d.User); err != nil {
+			return err
+		}
+	}
+	return a.writeMariaDBConf(ctx, db)
 }

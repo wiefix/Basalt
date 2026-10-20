@@ -184,6 +184,8 @@ func (s *Server) ReplicaUser(ctx context.Context, name, user, hash string) error
 		{"SET SESSION sql_log_bin = 0", nil},
 		{"CREATE USER IF NOT EXISTS ?@'localhost' IDENTIFIED BY PASSWORD ?", []any{user, hash}},
 		{"ALTER USER ?@'localhost' IDENTIFIED BY PASSWORD ?", []any{user, hash}},
+		// A former primary's user had every right.
+		{"REVOKE ALL PRIVILEGES, GRANT OPTION FROM ?@'localhost'", []any{user}},
 		{"GRANT SELECT, SHOW VIEW ON `" + name + "`.* TO ?@'localhost'", []any{user}},
 	} {
 		if _, err := conn.ExecContext(ctx, st.q, st.args...); err != nil {
@@ -544,4 +546,63 @@ func (s *Server) WaitPos(ctx context.Context, pos string) error {
 			return err
 		}
 	}
+}
+
+// ReadOnly leaves a site's database user only reading (a primary about to
+// hand over: nothing changes the data meanwhile).
+func (s *Server) ReadOnly(ctx context.Context, name, user string) error {
+	if !ValidName(name) || !ValidName(user) {
+		return ErrInvalidName
+	}
+	return s.grants(ctx, user, "REVOKE ALL PRIVILEGES, GRANT OPTION FROM ?@'localhost'", "GRANT SELECT, SHOW VIEW ON `"+name+"`.* TO ?@'localhost'")
+}
+
+// Owner gives a site's database user every right on its database again
+// (a copy that becomes the primary).
+func (s *Server) Owner(ctx context.Context, name, user string) error {
+	if !ValidName(name) || !ValidName(user) {
+		return ErrInvalidName
+	}
+	return s.grants(ctx, user, "REVOKE ALL PRIVILEGES, GRANT OPTION FROM ?@'localhost'", "GRANT ALL PRIVILEGES ON `"+name+"`.* TO ?@'localhost'")
+}
+
+// grants runs privilege statements for user, outside the binary log, and
+// ends the user's open connections so they take effect at once.
+func (s *Server) grants(ctx context.Context, user string, stmts ...string) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "SET SESSION sql_log_bin = 0"); err != nil {
+		return mapError(err)
+	}
+	for _, q := range stmts {
+		if _, err := conn.ExecContext(ctx, q, user); err != nil {
+			return mapError(err)
+		}
+	}
+	rows, err := conn.QueryContext(ctx, "SELECT id FROM information_schema.processlist WHERE user = ?", user)
+	if err != nil {
+		return mapError(err)
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		conn.ExecContext(ctx, "KILL CONNECTION "+strconv.FormatInt(id, 10))
+	}
+	return nil
+}
+
+// BinlogPos is the GTID position of this server's binary log.
+func (s *Server) BinlogPos(ctx context.Context) (string, error) {
+	var pos string
+	err := s.db.QueryRowContext(ctx, "SELECT @@gtid_binlog_pos").Scan(&pos)
+	return pos, mapError(err)
 }

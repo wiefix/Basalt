@@ -120,6 +120,10 @@ func (s *Server) handleCreateDatabase(w http.ResponseWriter, r *http.Request, p 
 	}
 	s.audit(r, &p.user.ID, "database.created", map[string]any{"site_id": site.ID, "database": name})
 	if len(site.Replicas) > 0 {
+		// The copies reach the databases on the site's server (or no longer).
+		if err := s.ensureReplicas(r.Context(), site); err != nil {
+			s.log.Warn("ensure site replicas", "site_id", site.ID, "err", err)
+		}
 		s.startDBReplication()
 	}
 	// The password is shown once, never stored.
@@ -174,6 +178,10 @@ func (s *Server) handleDeleteDatabase(w http.ResponseWriter, r *http.Request, p 
 	}
 	s.audit(r, &p.user.ID, "database.deleted", map[string]any{"site_id": site.ID, "database": d.Name})
 	if len(site.Replicas) > 0 {
+		// The copies reach the databases on the site's server (or no longer).
+		if err := s.ensureReplicas(r.Context(), site); err != nil {
+			s.log.Warn("ensure site replicas", "site_id", site.ID, "err", err)
+		}
 		s.startDBReplication()
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -258,6 +266,10 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 	}
 	s.audit(r, &p.user.ID, "site.app_installed", map[string]any{"site_id": site.ID, "app": req.App, "version": resp.Version, "database": d.Name})
 	if len(site.Replicas) > 0 {
+		// The copies reach the databases on the site's server (or no longer).
+		if err := s.ensureReplicas(r.Context(), site); err != nil {
+			s.log.Warn("ensure site replicas", "site_id", site.ID, "err", err)
+		}
 		s.startDBReplication()
 	}
 	out := map[string]any{"app": req.App, "version": resp.Version, "files": resp.Files, "database": viewDatabase(d)}

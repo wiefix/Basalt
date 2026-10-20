@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router";
-import { api, can, type DatabaseCredentials, type SFTPUser, type Site, type SitePlacement, type User } from "../api";
+import { api, ApiError, can, type DatabaseCredentials, type SFTPUser, type Site, type SitePlacement, type User } from "../api";
 import { FileManager } from "../components/FileManager";
 import { CodeBox, CopyButton, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, timeAgo, useConfirm, useToast } from "../components/ui";
 import { LogView } from "../components/LogView";
@@ -143,6 +143,45 @@ function SiteServersCard({ site, placements, user, me }: { site: Site; placement
     onSuccess: (r) => refresh(r),
     onError: (e) => toast(errorMessage(e), true),
   });
+  const makePrimary = async (id: number) => {
+    const ok = await confirm({
+      title: `Make ${name(id)} the primary of ${site.name}?`,
+      body: (
+        <p>
+          Its copy becomes the site: files are managed there and its databases take the writes. {name(site.server_id)} gets its files
+          and databases copied from it from then on (what it has is replaced). With {name(site.server_id)} online nothing is lost: its
+          files are copied a last time and its databases wait for the copy to catch up.
+        </p>
+      ),
+      confirm: "Make primary",
+    });
+    if (!ok) return;
+    const run = async (force: boolean) => {
+      const r = await api.setSitePrimary(site.id, id, force);
+      refresh(r);
+      toast(r.warning ? `Switched; ${r.warning}` : `${name(id)} is now the primary`, !!r.warning);
+    };
+    try {
+      await run(false);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409 && /offline/.test(e.message)) {
+        const force = await confirm({
+          title: `${name(site.server_id)} is offline`,
+          body: <p>{e.message}.</p>,
+          confirm: "Switch anyway",
+          danger: true,
+        });
+        if (!force) return;
+        try {
+          await run(true);
+        } catch (e2) {
+          toast(errorMessage(e2), true);
+        }
+        return;
+      }
+      toast(errorMessage(e), true);
+    }
+  };
   const remove = async (id: number) => {
     const ok = await confirm({
       title: `Stop serving ${site.name} from ${name(id)}?`,
@@ -222,11 +261,16 @@ function SiteServersCard({ site, placements, user, me }: { site: Site; placement
                     </Link>
                   ) : null}
                 </td>
-                <td className="num">
+                <td className="num" style={{ whiteSpace: "nowrap" }}>
                   {admin && !p.primary && (
-                    <button className="btn sm icon ghost" title="Remove" onClick={() => remove(p.server_id)}>
-                      <Icon name="trash" size={14} />
-                    </button>
+                    <>
+                      <button className="btn sm ghost" title="Make this copy the site's primary" onClick={() => makePrimary(p.server_id)}>
+                        Make primary
+                      </button>
+                      <button className="btn sm icon ghost" title="Remove" onClick={() => remove(p.server_id)}>
+                        <Icon name="trash" size={14} />
+                      </button>
+                    </>
                   )}
                 </td>
               </tr>

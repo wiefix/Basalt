@@ -132,6 +132,8 @@ var apiDocs = map[string]apiDoc{
 		resp: obj("site", siteView{}, "placements", []sitePlacementView{})},
 	"DELETE /api/v1/sites/{id}/replicas/{sid}": {summary: "Stop serving a site from a server (its copy goes to that server's trash)",
 		resp: obj("site", siteView{}, "placements", []sitePlacementView{}, "cleanup_error?", "")},
+	"PUT /api/v1/sites/{id}/primary": {summary: "Make a server serving a copy of a site its primary (with force while the primary is offline)",
+		body: sitePrimaryRequest{}, resp: obj("site", siteView{}, "placements", []sitePlacementView{}, "warning?", "")},
 	"POST /api/v1/sites/{id}/sync": {summary: "Copy a site's files to the other servers now (in the background)",
 		resp: obj("site", siteView{}, "placements", []sitePlacementView{})},
 	"PUT /api/v1/sites/{id}/domains":      {summary: "Set a site's domains", body: siteDomainsRequest{}, resp: siteResp},

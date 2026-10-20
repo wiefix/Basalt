@@ -202,9 +202,20 @@ func (s *Server) replPassword(ctx context.Context, serverID int64) (string, erro
 // records how it goes. A server offline is left for the next round.
 func (s *Server) syncDBReplication(ctx context.Context) {
 	if !s.dbReplRun.TryLock() {
-		return // a round is going on; the next one comes in a minute
+		s.dbReplAgain.Store(true) // the round going on runs once more
+		return
 	}
 	defer s.dbReplRun.Unlock()
+	for {
+		s.dbReplAgain.Store(false)
+		s.dbReplRound(ctx)
+		if !s.dbReplAgain.Load() || ctx.Err() != nil {
+			return
+		}
+	}
+}
+
+func (s *Server) dbReplRound(ctx context.Context) {
 	plan, err := s.dbReplPlan(ctx)
 	if err != nil {
 		s.log.Error("plan database replication", "err", err)

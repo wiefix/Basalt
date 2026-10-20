@@ -1111,6 +1111,11 @@ export interface SitePlacementView {
   syncing?: boolean;
 }
 
+export interface SitePrimaryRequest {
+  force?: boolean;
+  server_id?: number;
+}
+
 export interface SiteQuotaRequest {
   quota_mb?: number;
 }
@@ -2340,6 +2345,14 @@ export type PutSitesIdPhpSettingsResponse = {
 };
 
 export type PutSitesIdPhpSettingsBody = PhpSettings;
+
+export type PutSitesIdPrimaryResponse = {
+  placements: SitePlacementView[];
+  site: SiteView;
+  warning?: string;
+};
+
+export type PutSitesIdPrimaryBody = SitePrimaryRequest;
 
 export type PutSitesIdProjectResponse = void;
 

@@ -138,7 +138,8 @@ type Server struct {
 	siteSyncEvery     time.Duration
 	syncs             siteSyncs
 	peers             peerState
-	dbReplRun         sync.Mutex // one round of database replication at a time
+	dbReplRun         sync.Mutex  // one round of database replication at a time
+	dbReplAgain       atomic.Bool // a round was asked for while one ran
 	updates           updater
 	respCheck         func(string)
 
@@ -440,6 +441,7 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("POST /api/v1/sites/{id}/replicas", s.requireProject(store.RoleAdmin, s.handleAddSiteReplica))
 	rt.Handle("DELETE /api/v1/sites/{id}/replicas/{sid}", s.requireProject(store.RoleAdmin, s.handleRemoveSiteReplica))
 	rt.Handle("POST /api/v1/sites/{id}/sync", s.requireProject(store.RoleMember, s.handleSyncSite))
+	rt.Handle("PUT /api/v1/sites/{id}/primary", s.requireProject(store.RoleAdmin, s.handleSetSitePrimary))
 	rt.Handle("POST /api/v1/apps/{id}/deploy-key", s.requireProject(store.RoleAdmin, s.handleRegenerateDeployKey))
 	rt.Handle("GET /api/v1/apps/{id}/webhook", s.requireProject(store.RoleAdmin, s.handleGetWebhook))
 	rt.Handle("PUT /api/v1/apps/{id}/webhook", s.requireProject(store.RoleAdmin, s.handleSetWebhook))

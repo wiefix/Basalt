@@ -291,12 +291,16 @@ func (s *Server) writeSite(w http.ResponseWriter, r *http.Request, status int, i
 func (s *Server) ensureSiteOn(ctx context.Context, site *store.Site, serverID int64) error {
 	req := agentproto.SiteRequest{SiteID: site.ID, PHPVersion: site.PHPVersion, PHP: site.PHP}
 	if serverID != site.ServerID {
-		// A copy's PHP reaches the databases on the site's server.
+		// A copy reaches the databases on the site's server, if it has any.
+		dbs, err := s.db.Databases(ctx, site.ID)
+		if err != nil {
+			return err
+		}
 		primary, err := s.db.ServerByID(ctx, site.ServerID)
 		if err != nil {
 			return err
 		}
-		if addr := peerAddr(primary); addr != "" {
+		if addr := peerAddr(primary); addr != "" && len(dbs) > 0 {
 			req.DB = &agentproto.SiteDBRoute{ServerID: primary.ID, Addr: addr}
 		}
 	}
@@ -610,4 +614,185 @@ func (s *Server) copySite(ctx context.Context, siteID, src, dst int64) (syncStat
 		chmod = chmod[n:]
 	}
 	return st, nil
+}
+
+// --- switching the primary ---
+
+type sitePrimaryRequest struct {
+	ServerID int64 `json:"server_id"`
+	// Force switches while the primary is offline: what it had not copied
+	// yet is lost.
+	Force bool `json:"force"`
+}
+
+// holdSiteSync waits until no copy of the site's files runs and keeps any
+// from starting until release is called.
+func (s *Server) holdSiteSync(ctx context.Context, id int64) (release func(), err error) {
+	for {
+		s.syncs.mu.Lock()
+		if s.syncs.running == nil {
+			s.syncs.running = map[int64]bool{}
+		}
+		if !s.syncs.running[id] {
+			s.syncs.running[id] = true
+			s.syncs.mu.Unlock()
+			return func() {
+				s.syncs.mu.Lock()
+				delete(s.syncs.running, id)
+				s.syncs.mu.Unlock()
+			}, nil
+		}
+		s.syncs.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// handleSetSitePrimary makes a server serving a copy of a site its primary.
+// With the primary online the hand-over loses nothing: its files are
+// copied a last time, its databases only read while the copy catches up.
+// Offline (force), the copy takes over as it is.
+func (s *Server) handleSetSitePrimary(w http.ResponseWriter, r *http.Request, p *principal) {
+	site, ok := s.pathSite(w, r)
+	if !ok {
+		return
+	}
+	var req sitePrimaryRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !slices.Contains(site.Replicas, req.ServerID) {
+		writeError(w, http.StatusUnprocessableEntity, "the server does not serve a copy of the site")
+		return
+	}
+	if !s.agents.Connected(req.ServerID) {
+		writeError(w, http.StatusConflict, "the server is offline")
+		return
+	}
+	ctx := r.Context()
+	dbs, err := s.db.Databases(ctx, site.ID)
+	if err != nil {
+		s.internalError(w, r, "list databases", err)
+		return
+	}
+	oldOnline := s.agents.Connected(site.ServerID)
+	// No round of database replication meanwhile (one asked for then runs
+	// after).
+	s.dbReplRun.Lock()
+	unlocked := false
+	unlock := func() {
+		if !unlocked {
+			unlocked = true
+			s.dbReplRun.Unlock()
+		}
+	}
+	defer unlock()
+	var lag int64 = -1
+	if len(dbs) > 0 {
+		rows, err := s.db.DBReplications(ctx)
+		if err != nil {
+			s.internalError(w, r, "load database replication", err)
+			return
+		}
+		var row *store.DBReplication
+		for i := range rows {
+			if rows[i].ReplicaID == req.ServerID && rows[i].SourceID == site.ServerID {
+				row = &rows[i]
+			}
+		}
+		for _, d := range dbs {
+			if row == nil || !slices.Contains(row.Databases, d.Name) {
+				writeError(w, http.StatusConflict, "the server has no complete copy of the databases yet ("+d.Name+")")
+				return
+			}
+		}
+		lag = row.Lag
+	}
+	if !oldOnline && !req.Force {
+		msg := "the primary server is offline: switching keeps what the copy has, and changes it had not copied are lost"
+		if lag > 0 {
+			msg += " (the databases were " + strconv.FormatInt(lag, 10) + " s behind)"
+		}
+		writeError(w, http.StatusConflict, msg+"; confirm to switch anyway")
+		return
+	}
+	hand := agentproto.DBHandover{Source: site.ServerID}
+	for _, d := range dbs {
+		hand.Databases = append(hand.Databases, agentproto.DBCopy{Name: d.Name, User: d.Username})
+	}
+	release, err := s.holdSiteSync(ctx, site.ID)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "a copy of the files is still running")
+		return
+	}
+	defer release()
+	call := func(server int64, typ string, body, resp any, d time.Duration) error {
+		cctx, cancel := context.WithTimeout(ctx, d)
+		defer cancel()
+		return s.agents.Call(cctx, server, typ, body, resp)
+	}
+	if oldOnline {
+		cctx, cancel := context.WithTimeout(ctx, siteSyncTimeout)
+		_, err := s.copySite(cctx, site.ID, site.ServerID, req.ServerID)
+		cancel()
+		if err != nil {
+			writeError(w, http.StatusBadGateway, "the last copy of the files failed: "+err.Error())
+			return
+		}
+		if len(dbs) > 0 {
+			var demoted agentproto.DBDemoteResponse
+			if err := call(site.ServerID, agentproto.TypeDBDemote, hand, &demoted, time.Minute); err != nil {
+				writeAgentError(w, err)
+				return
+			}
+			hand.WaitPos = demoted.Pos
+		}
+	}
+	if len(dbs) > 0 {
+		if err := call(req.ServerID, agentproto.TypeDBPromote, hand, nil, 6*time.Minute); err != nil {
+			if oldOnline {
+				// The primary stays: its databases writable again.
+				undo := agentproto.DBHandover{Source: req.ServerID, Databases: hand.Databases}
+				if uerr := call(site.ServerID, agentproto.TypeDBPromote, undo, nil, time.Minute); uerr != nil {
+					s.log.Error("give the primary its databases back", "site_id", site.ID, "err", uerr)
+				}
+			}
+			writeAgentError(w, err)
+			return
+		}
+	}
+	old := site.ServerID
+	if err := s.db.SetSitePrimary(ctx, site.ID, req.ServerID); err != nil {
+		s.internalError(w, r, "set site primary", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "site.primary_changed", map[string]any{"site_id": site.ID, "from": old, "to": req.ServerID, "forced": !oldOnline})
+	site, err = s.db.SiteByID(ctx, site.ID)
+	if err != nil {
+		s.internalError(w, r, "load site", err)
+		return
+	}
+	// The new primary uses its own databases; the former one, back or not,
+	// reaches them through the tunnel.
+	var problems []string
+	if err := s.ensureSiteOn(ctx, site, req.ServerID); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if oldOnline {
+		if err := s.ensureSiteOn(ctx, site, old); err != nil {
+			problems = append(problems, err.Error())
+		}
+	}
+	for _, id := range []int64{old, req.ServerID} {
+		s.PushProxy(ctx, id)
+		if err := s.PushSFTP(ctx, id); err != nil {
+			s.log.Warn("push sftp accounts", "server_id", id, "err", err)
+		}
+	}
+	unlock()
+	s.startDBReplication()
+	s.writeSite(w, r, http.StatusOK, site.ID, "warning", strings.Join(problems, "; "))
 }

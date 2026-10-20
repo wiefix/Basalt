@@ -262,3 +262,50 @@ func (db *DB) SiteReplicasOn(ctx context.Context, serverID int64) ([]*Site, erro
 	}
 	return db.scanSites(rows)
 }
+
+// SetSitePrimary makes a server already serving a copy of a site its
+// primary: the site's files and databases are its from now on (the former
+// primary keeps its route, as a replica).
+func (db *DB) SetSitePrimary(ctx context.Context, siteID, serverID int64) error {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	routes, err := siteRoutes(ctx, tx, siteID)
+	if err != nil {
+		return err
+	}
+	var old int64
+	found := false
+	for _, r := range routes {
+		if r.Primary {
+			old = r.ServerID
+		}
+		if r.ServerID == serverID && !r.Primary {
+			found = true
+		}
+	}
+	if !found {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE sites SET server_id = ? WHERE id = ?`, serverID, siteID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE databases SET server_id = ? WHERE site_id = ?`, serverID, siteID); err != nil {
+		return err
+	}
+	// The former primary's copy of the files is copied over from now on.
+	if _, err := tx.ExecContext(ctx, `UPDATE proxy_routes SET synced_at = NULL, sync_error = '' WHERE site_id = ?`, siteID); err != nil {
+		return err
+	}
+	for _, id := range []int64{old, serverID} {
+		if err := bumpProxyRevision(ctx, tx, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE servers SET sftp_revision = sftp_revision + 1 WHERE id = ?`, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}

@@ -434,6 +434,15 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return a.dbUserHashes(ctx, req)
+	case agentproto.TypeDBDemote, agentproto.TypeDBPromote:
+		var req agentproto.DBHandover
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		if typ == agentproto.TypeDBDemote {
+			return a.dbDemote(ctx, req)
+		}
+		return struct{}{}, a.dbPromote(ctx, req)
 	case agentproto.TypePeerApply:
 		var req agentproto.PeerApply
 		if err := json.Unmarshal(payload, &req); err != nil {

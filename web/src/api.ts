@@ -1012,6 +1012,8 @@ export const api = {
   removeSiteReplica: (id: number, serverId: number) =>
     del<{ site: Site; placements: SitePlacement[]; cleanup_error?: string }>(`/api/v1/sites/${id}/replicas/${serverId}`),
   syncSite: (id: number) => post<{ site: Site; placements: SitePlacement[] }>(`/api/v1/sites/${id}/sync`),
+  setSitePrimary: (id: number, serverId: number, force: boolean) =>
+    put<{ site: Site; placements: SitePlacement[]; warning?: string }>(`/api/v1/sites/${id}/primary`, { server_id: serverId, force }),
   createSite: (b: { server_id: number; name: string; domains: string[]; tls: string; php_version: string; project_id?: number }) =>
     post<{ site: Site; sync: Sync; provision_error?: string }>("/api/v1/sites", b),
   setSiteDomains: (id: number, domains: string[]) =>

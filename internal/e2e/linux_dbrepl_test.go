@@ -182,6 +182,33 @@ func TestLinuxDBReplication(t *testing.T) {
 		return b == "8"
 	}, nil)
 
+	// A planned switch: the second server becomes the primary; its own
+	// MariaDB takes the writes, and the first copies from it.
+	r := p.call(200, "PUT", base+"/primary", map[string]any{"server_id": mustAtoi(h2.id)})
+	if jsonString(r["site"].(map[string]any)["server_id"]) != h2.id || r["warning"] != nil {
+		t.Fatalf("switch: %v", r)
+	}
+	mustSQL(dst, user, pw, "INSERT INTO "+db+".t VALUES (20, 'on-two')")
+	if out, err := sqlOn(t, src, user, pw, "INSERT INTO "+db+".t VALUES (21, 'x')"); err == nil {
+		t.Fatalf("the former primary still takes writes: %s", out)
+	}
+	back := func() bool {
+		out, _ := sqlOn(t, src, "root", "", "SELECT v FROM "+db+".t WHERE id = 20")
+		return out == "on-two"
+	}
+	waitFor(t, "the former primary copying from the new one", 60*time.Second, back, func() string { return jsonString(p.call(200, "GET", base, nil)["placements"]) })
+	// And back again.
+	p.call(200, "PUT", base+"/primary", map[string]any{"server_id": mustAtoi(h1.id)})
+	mustSQL(src, user, pw, "DELETE FROM "+db+".t WHERE id = 20")
+	waitFor(t, "the copy following the first server again", 60*time.Second, func() bool {
+		out, _ := sqlOn(t, dst, "root", "", "SELECT COUNT(*) FROM "+db+".t WHERE id = 20")
+		return out == "0"
+	}, func() string { return jsonString(p.call(200, "GET", base, nil)["placements"]) })
+	if out, err := sqlOn(t, dst, user, pw, "INSERT INTO "+db+".t VALUES (22, 'x')"); err == nil {
+		t.Fatalf("the copy takes writes again: %s", out)
+	}
+	p.call(http.StatusUnprocessableEntity, "PUT", base+"/primary", map[string]any{"server_id": mustAtoi(h1.id)})
+
 	// Taking the copy away drops the databases there.
 	p.call(200, "DELETE", base+"/replicas/"+h2.id, nil)
 	waitFor(t, "the copies dropped", 60*time.Second, func() bool {
