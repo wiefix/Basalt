@@ -32,7 +32,8 @@ var connRE = regexp.MustCompile(`^basalt_[1-9][0-9]{0,9}$`)
 // Config is the option file that keeps a server's replication setup over
 // restarts: its identity, the binary log, and what each connection copies
 // (filters set at run time do not survive a restart, and a connection
-// without its filter would copy every database of its source).
+// without its filter would copy every database of its source). In an
+// option file a backslash is written twice.
 func Config(serverID int64, filters map[string][]string) []byte {
 	var b bytes.Buffer
 	b.WriteString("# Written by Basalt (database replication between servers). Do not edit.\n[mariadbd]\n")
@@ -47,7 +48,7 @@ func Config(serverID int64, filters map[string][]string) []byte {
 		dbs := slices.Clone(filters[n])
 		slices.Sort(dbs)
 		for _, d := range dbs {
-			fmt.Fprintf(&b, "%s.replicate_do_db = %s\n", n, d)
+			fmt.Fprintf(&b, "%s.replicate_wild_do_table = %s\n", n, strings.ReplaceAll(wildPattern(d), `\`, `\\`))
 		}
 	}
 	return b.Bytes()
@@ -230,8 +231,10 @@ type ReplicaStatus struct {
 	IOError  string
 	SQLError string
 	GTIDPos  string
-	// DoDB is the connection's replicate_do_db filter.
-	DoDB string
+	// DoDB is the connection's replicate_do_db filter (before Basalt
+	// filtered by table), WildDoTable its replicate_wild_do_table.
+	DoDB        string
+	WildDoTable string
 }
 
 // Status reports a connection's state; nil if there is no such connection.
@@ -269,7 +272,8 @@ func (s *Server) Status(ctx context.Context, conn string) (*ReplicaStatus, error
 		return ""
 	}
 	st := &ReplicaStatus{IORunning: get("Slave_IO_Running") == "Yes", SQLRunning: get("Slave_SQL_Running") == "Yes",
-		Lag: -1, IOError: get("Last_IO_Error"), SQLError: get("Last_SQL_Error"), GTIDPos: get("Gtid_IO_Pos"), DoDB: get("Replicate_Do_DB")}
+		Lag: -1, IOError: get("Last_IO_Error"), SQLError: get("Last_SQL_Error"), GTIDPos: get("Gtid_IO_Pos"), DoDB: get("Replicate_Do_DB"),
+		WildDoTable: get("Replicate_Wild_Do_Table")}
 	if v := get("Seconds_Behind_Master"); v != "" {
 		st.Lag, _ = strconv.ParseInt(v, 10, 64)
 	}
@@ -293,6 +297,14 @@ func (s *Server) Source(ctx context.Context, conn string, port int, password str
 	return mapError(err)
 }
 
+// A connection copies the tables of its databases: replicate_wild_do_table
+// "db.%", not replicate_do_db, which judges a statement (CREATE TABLE,
+// ALTER TABLE...) by the session's current database: "CREATE TABLE
+// s1_app.t" sent with no or another current database would be skipped,
+// and the rows written to the table then stop the connection. In the
+// pattern "_" matches any character, so the names' underscores are escaped.
+func wildPattern(db string) string { return strings.ReplaceAll(db, "_", `\_`) + ".%" }
+
 // Filter returns the databases a connection copies (none for a missing
 // connection).
 func (s *Server) Filter(ctx context.Context, conn string) ([]string, error) {
@@ -300,13 +312,27 @@ func (s *Server) Filter(ctx context.Context, conn string) ([]string, error) {
 	if err != nil || st == nil {
 		return nil, err
 	}
+	return st.Filtered(), nil
+}
+
+// Filtered lists the databases the connection copies, from either filter.
+func (st *ReplicaStatus) Filtered() []string {
 	var out []string
+	for _, d := range strings.Split(st.WildDoTable, ",") {
+		d = strings.TrimSpace(d)
+		if name, ok := strings.CutSuffix(d, ".%"); ok {
+			name = strings.ReplaceAll(name, `\_`, "_")
+			if ValidName(name) && !slices.Contains(out, name) {
+				out = append(out, name)
+			}
+		}
+	}
 	for _, d := range strings.Split(st.DoDB, ",") {
-		if d = strings.TrimSpace(d); d != "" {
+		if d = strings.TrimSpace(d); d != "" && !slices.Contains(out, d) {
 			out = append(out, d)
 		}
 	}
-	return out, nil
+	return out
 }
 
 // SetFilter sets the databases a stopped connection copies.
@@ -327,7 +353,15 @@ func (s *Server) SetFilter(ctx context.Context, conn string, dbs []string) error
 	if _, err := c.ExecContext(ctx, "SET @@default_master_connection = '"+conn+"'"); err != nil {
 		return mapError(err)
 	}
-	_, err = c.ExecContext(ctx, "SET GLOBAL replicate_do_db = ?", strings.Join(dbs, ","))
+	pats := make([]string, len(dbs))
+	for i, d := range dbs {
+		pats[i] = wildPattern(d)
+	}
+	if _, err := c.ExecContext(ctx, "SET GLOBAL replicate_wild_do_table = ?", strings.Join(pats, ",")); err != nil {
+		return mapError(err)
+	}
+	// A connection set up before keeps its old filter until it goes.
+	_, err = c.ExecContext(ctx, "SET GLOBAL replicate_do_db = ''")
 	return mapError(err)
 }
 

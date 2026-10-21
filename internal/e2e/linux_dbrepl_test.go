@@ -157,9 +157,13 @@ func TestLinuxDBReplication(t *testing.T) {
 	// A new database of the site joins the copy, aligned with the first.
 	cred2 := p.call(http.StatusCreated, "POST", base+"/databases", map[string]any{"name": "logs"})["credentials"].(map[string]any)
 	db2 := cred2["database"].(string)
-	mustSQL(src, "root", "", "CREATE TABLE "+db2+".l (v INT); INSERT INTO "+db2+".l VALUES (7); INSERT INTO "+db+".t VALUES (4, 'during')")
+	mustSQL(src, "root", "", "INSERT INTO "+db+".t VALUES (4, 'during')")
 	p.call(http.StatusAccepted, "POST", base+"/sync", nil) // a round also comes with the database; this one makes sure
 	waitFor(t, "the second database", 60*time.Second, copied(db, db2), func() string { return jsonString(copyState()) })
+	// A table made naming its database, with no current database (as
+	// migration tools and consoles may), reaches the copy: filtering by
+	// database would judge the statement by the current one and skip it.
+	mustSQL(src, "root", "", "CREATE TABLE "+db2+".l (v INT); INSERT INTO "+db2+".l VALUES (7)")
 	waitFor(t, "both databases current", 30*time.Second, func() bool {
 		a, _ := sqlOn(t, dst, "root", "", "SELECT COUNT(*) FROM "+db+".t")
 		b, _ := sqlOn(t, dst, "root", "", "SELECT SUM(v) FROM "+db2+".l")
@@ -172,10 +176,31 @@ func TestLinuxDBReplication(t *testing.T) {
 		return a + " / " + b + " / source " + srcRows + " / replica pos " + pos + " / " + jsonString(copyState())
 	})
 	// The replica's option file keeps what it copies over a restart.
-	if b, _ := os.ReadFile(filepath.Join(confDir, "two.cnf")); !strings.Contains(string(b), "basalt_"+h1.id+".replicate_do_db = "+db+"\n") ||
-		!strings.Contains(string(b), "basalt_"+h1.id+".replicate_do_db = "+db2+"\n") || !strings.Contains(string(b), "server_id = "+h2.id) {
+	filter := func(d string) string {
+		return "basalt_" + h1.id + ".replicate_wild_do_table = " + strings.ReplaceAll(d, "_", `\\_`) + ".%\n"
+	}
+	if b, _ := os.ReadFile(filepath.Join(confDir, "two.cnf")); !strings.Contains(string(b), filter(db)) ||
+		!strings.Contains(string(b), filter(db2)) || !strings.Contains(string(b), "server_id = "+h2.id) {
 		t.Fatalf("two.cnf:\n%s", b)
 	}
+	// A connection made by an older Basalt (filtering by database) moves
+	// to table filters without copying its databases again.
+	conn := "basalt_" + h1.id
+	// A row only the copy has: a new seed would lose it.
+	mustSQL(dst, "root", "", "SET sql_log_bin = 0; INSERT INTO "+db2+".l VALUES (1000)")
+	mustSQL(dst, "root", "", "SET @@default_master_connection = '"+conn+"'; STOP SLAVE; SET GLOBAL replicate_wild_do_table = ''; "+
+		"SET GLOBAL replicate_do_db = '"+db+","+db2+"'; START SLAVE")
+	p.call(http.StatusAccepted, "POST", base+"/sync", nil)
+	waitFor(t, "the old filter replaced", 30*time.Second, func() bool {
+		out, _ := sqlOn(t, dst, "root", "", "SHOW SLAVE '"+conn+"' STATUS\\G")
+		// Values only (no names): the old filter's value gone, the new one there,
+		// both threads running.
+		return !strings.Contains(out, db+","+db2) && strings.Contains(out, `\_logs.%`) && strings.Count(out, "\nYes\n") >= 2
+	}, func() string { out, _ := sqlOn(t, dst, "root", "", "SHOW SLAVE '"+conn+"' STATUS\\G"); return out })
+	if got := mustSQL(dst, "root", "", "SELECT COUNT(*) FROM "+db2+".l WHERE v = 1000"); got != "1" {
+		t.Fatal("the databases were copied again")
+	}
+	mustSQL(dst, "root", "", "SET sql_log_bin = 0; DELETE FROM "+db2+".l WHERE v = 1000")
 	mustSQL(src, "root", "", "INSERT INTO "+db2+".l VALUES (1)")
 	waitFor(t, "the second database follows", 30*time.Second, func() bool {
 		b, _ := sqlOn(t, dst, "root", "", "SELECT SUM(v) FROM "+db2+".l")

@@ -13,9 +13,9 @@ log_bin = basalt-bin
 binlog_format = ROW
 binlog_expire_logs_seconds = 604800
 relay_log = basalt-relay
-basalt_1.replicate_do_db = s9_x
-basalt_3.replicate_do_db = s2_shop
-basalt_3.replicate_do_db = s5_wp
+basalt_1.replicate_wild_do_table = s9\\_x.%
+basalt_3.replicate_wild_do_table = s2\\_shop.%
+basalt_3.replicate_wild_do_table = s5\\_wp.%
 `
 	if !strings.HasSuffix(got, want) || !strings.Contains(got, "[mariadbd]\n") {
 		t.Fatalf("config:\n%s", got)
@@ -41,5 +41,14 @@ func TestDumpGTID(t *testing.T) {
 	}
 	if ConnName(12) != "basalt_12" || !connRE.MatchString("basalt_12") || connRE.MatchString("basalt_0") || connRE.MatchString("x'") {
 		t.Fatal("connection names")
+	}
+}
+
+// TestFiltered: the databases a connection copies, from table patterns
+// (escaped underscores) and from a filter set before them.
+func TestFiltered(t *testing.T) {
+	st := &ReplicaStatus{WildDoTable: `s1\_app.%,s1\_my\_db.%,bad.x,s1\_app.%`, DoDB: "s1_old,s1_app"}
+	if got := strings.Join(st.Filtered(), " "); got != "s1_app s1_my_db s1_old" {
+		t.Fatalf("filtered: %s", got)
 	}
 }

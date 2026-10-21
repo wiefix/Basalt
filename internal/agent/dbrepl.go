@@ -292,6 +292,16 @@ func (a *Agent) applySource(ctx context.Context, db *mariadb.Server, s agentprot
 		}
 		cur = append(cur, add...)
 	}
+	// A connection set up with database filters moves to table filters
+	// (mariadb.wildPattern); seeding and dropping above did already.
+	if status != nil && status.DoDB != "" && len(drop) == 0 && len(add) == 0 && len(cur) > 0 {
+		if err := db.Stop(ctx, conn); err != nil {
+			return fail(err)
+		}
+		if err := db.SetFilter(ctx, conn, cur); err != nil {
+			return fail(err)
+		}
+	}
 	// The users, read-only here (a changed password arrives as a new hash).
 	for _, n := range cur {
 		if d, ok := byName[n]; ok {
