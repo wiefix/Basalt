@@ -159,9 +159,18 @@ func TestMailWithDocker(t *testing.T) {
 	// The mail server logs to the container log (its default is a file
 	// inside the container).
 	// An SMTP connection is logged; logging switches over with the
-	// settings reload after the deployment, so give it time.
+	// settings reload after the deployment, so give it time. Stalwart
+	// refuses a reload while it cannot resolve external names; the panel's
+	// refreshMailLoop (not running here) retries it, saving the settings
+	// does too.
 	logged := false
-	for deadline := time.Now().Add(time.Minute); !logged && time.Now().Before(deadline); time.Sleep(time.Second) {
+	for i, deadline := 0, time.Now().Add(2*time.Minute); !logged && time.Now().Before(deadline); i++ {
+		if i > 0 {
+			time.Sleep(time.Second)
+		}
+		if i%15 == 14 {
+			p.call(200, "PUT", "/api/v1/mail/settings", map[string]any{})
+		}
 		if c, err := smtp.Dial("127.0.0.1:" + strconv.Itoa(smtpPort)); err == nil {
 			c.Hello("client.example.net")
 			c.Quit()
