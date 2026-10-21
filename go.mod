@@ -1,6 +1,6 @@
 module github.com/wiefix/basalt
 
-go 1.27.2
+go 1.27.3
 
 // node_modules may contain stray .go files; keep it out of ./...
 ignore ./web/node_modules
