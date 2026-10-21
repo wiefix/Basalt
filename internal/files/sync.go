@@ -199,3 +199,30 @@ func (s *Site) SyncRead(p string, off int64, n int) (data []byte, size int64, mt
 	}
 	return buf[:k], fi.Size(), fi.ModTime(), false, err
 }
+
+// RemoveTemps removes upload and copy temporaries last written before
+// before: ones left behind when the agent stopped mid-upload, or a copy
+// whose file vanished from the primary. It returns how many it removed.
+func (s *Site) RemoveTemps(before time.Time) (int, error) {
+	n := 0
+	err := fs.WalkDir(s.root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() || !d.Type().IsRegular() || !strings.HasPrefix(d.Name(), uploadPrefix) {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil || !fi.ModTime().Before(before) {
+			return nil
+		}
+		if s.root.Remove(p) == nil {
+			n++
+		}
+		return nil
+	})
+	return n, err
+}

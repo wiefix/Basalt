@@ -22,7 +22,12 @@ import (
 
 const (
 	uploadIdleTimeout = time.Hour
-	trashDir          = ".trash"
+	// Temporaries of uploads and copies not written for tempKeep were left
+	// behind (an upload idles out after uploadIdleTimeout); the janitor
+	// looks for them every tempSweepEvery.
+	tempKeep       = 6 * time.Hour
+	tempSweepEvery = 6 * time.Hour
+	trashDir       = ".trash"
 )
 
 var siteDirs = []string{"public", "logs", "tmp"}
@@ -393,10 +398,35 @@ func (m *sitesManager) abortUploads(siteID int64) {
 	}
 }
 
+// removeTemps removes the sites' upload and copy temporaries last written
+// before before.
+func (m *sitesManager) removeTemps(ctx context.Context, before time.Time) {
+	entries, err := os.ReadDir(m.root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		id, err := strconv.ParseInt(e.Name(), 10, 64)
+		if err != nil || id <= 0 || !e.IsDir() || ctx.Err() != nil {
+			continue
+		}
+		s, err := files.Open(filepath.Join(m.root, e.Name()))
+		if err != nil {
+			continue
+		}
+		n, err := s.RemoveTemps(before)
+		s.Close()
+		if n > 0 || err != nil {
+			m.log.Info("removed leftover temporary files", "site_id", id, "files", n, "err", err)
+		}
+	}
+}
+
 // janitor aborts uploads abandoned by the panel (e.g. browser closed).
 func (m *sitesManager) janitor(ctx context.Context) {
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
+	var swept time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -405,6 +435,10 @@ func (m *sitesManager) janitor(ctx context.Context) {
 		}
 		if m.root != "" {
 			m.cleanTrash(time.Now())
+			if time.Since(swept) >= tempSweepEvery {
+				swept = time.Now()
+				m.removeTemps(ctx, swept.Add(-tempKeep))
+			}
 		}
 		m.mu.Lock()
 		for id, u := range m.uploads {

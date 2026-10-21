@@ -176,3 +176,49 @@ func TestSiteSync(t *testing.T) {
 	}
 	_ = time.Now
 }
+
+// TestRemoveTemps: temporaries not written for a while go; fresh ones, a
+// site's own files and whatever a symlink points at stay.
+func TestRemoveTemps(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m := newSitesManager(Config{SitesRoot: t.TempDir()}, log)
+	sd := filepath.Join(m.root, "1")
+	os.MkdirAll(filepath.Join(sd, "public/sub"), 0o755)
+	outside := t.TempDir()
+	os.WriteFile(filepath.Join(outside, ".basalt-upload-x"), []byte("x"), 0o644)
+	os.Symlink(outside, filepath.Join(sd, "public/out"))
+	old := time.Now().Add(-7 * time.Hour)
+	for _, f := range []string{"public/.basalt-upload-abc", "public/sub/.basalt-upload-sync-0011", "public/.basalt-upload-fresh", "public/page.html"} {
+		os.WriteFile(filepath.Join(sd, f), []byte("x"), 0o644)
+		if !strings.Contains(f, "fresh") {
+			os.Chtimes(filepath.Join(sd, f), old, old)
+		}
+	}
+	os.Chtimes(filepath.Join(outside, ".basalt-upload-x"), old, old)
+	os.MkdirAll(filepath.Join(m.root, ".trash"), 0o755)
+	m.removeTemps(context.Background(), time.Now().Add(-tempKeep))
+	for f, want := range map[string]bool{
+		"public/.basalt-upload-abc":           false,
+		"public/sub/.basalt-upload-sync-0011": false,
+		"public/.basalt-upload-fresh":         true,
+		"public/page.html":                    true,
+	} {
+		if _, err := os.Stat(filepath.Join(sd, f)); (err == nil) != want {
+			t.Errorf("%s: exists %v, want %v", f, err == nil, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outside, ".basalt-upload-x")); err != nil {
+		t.Error("a file behind a symlink was removed")
+	}
+}
+
+// TestClearSeeds: dumps of seeds cut short are gone after a restart.
+func TestClearSeeds(t *testing.T) {
+	a := &Agent{dir: t.TempDir(), log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	os.MkdirAll(filepath.Join(a.dir, seedDir), 0o700)
+	os.WriteFile(filepath.Join(a.dir, seedDir, "ab.sql"), []byte("x"), 0o600)
+	a.clearSeeds()
+	if entries, _ := os.ReadDir(filepath.Join(a.dir, seedDir)); len(entries) != 0 {
+		t.Errorf("left %d dumps", len(entries))
+	}
+}

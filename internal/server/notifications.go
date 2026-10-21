@@ -33,6 +33,7 @@ const (
 	EventSiteQuota    = "site.quota"
 	EventCertMissing  = "cert.missing"
 	EventProjectDisk  = "project.disk"
+	EventReplication  = "site.replication"
 )
 
 // notificationEvent is an event a channel can receive; Project: it is
@@ -57,6 +58,7 @@ var notificationEvents = []notificationEvent{
 	{EventAuditBroken, "The audit log was changed outside the panel", false},
 	{EventSiteQuota, "A site goes over its disk quota", true},
 	{EventProjectDisk, "A project's sites go over its disk limit", true},
+	{EventReplication, "A site's databases stop being copied to another server, or are copied again", true},
 }
 
 // findEvent returns the event e, or false if there is none.

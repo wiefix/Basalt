@@ -37,16 +37,22 @@ type DBReplication struct {
 	Error     string
 	Databases []string
 	UpdatedAt time.Time
+	// FailingSince: when copying stopped working (zero: it works); Alerted:
+	// that was notified.
+	FailingSince time.Time
+	Alerted      bool
 }
 
 // SetDBReplication records the state of a replica's copying from a source.
 func (db *DB) SetDBReplication(ctx context.Context, r DBReplication) error {
 	dbs, _ := json.Marshal(r.Databases)
 	_, err := db.W.ExecContext(ctx,
-		`INSERT INTO db_replication (replica_id, source_id, running, lag, error, databases, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO db_replication (replica_id, source_id, running, lag, error, databases, updated_at, failing_since, alerted)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (replica_id, source_id) DO UPDATE SET running = excluded.running, lag = excluded.lag,
-		 error = excluded.error, databases = excluded.databases, updated_at = excluded.updated_at`,
-		r.ReplicaID, r.SourceID, r.Running, r.Lag, r.Error, string(dbs), r.UpdatedAt.Unix())
+		 error = excluded.error, databases = excluded.databases, updated_at = excluded.updated_at,
+		 failing_since = excluded.failing_since, alerted = excluded.alerted`,
+		r.ReplicaID, r.SourceID, r.Running, r.Lag, r.Error, string(dbs), r.UpdatedAt.Unix(), unixOrZero(r.FailingSince), r.Alerted)
 	return err
 }
 
@@ -80,7 +86,8 @@ func containsID(ids []int64, id int64) bool {
 // DBReplications lists every replica's copying.
 func (db *DB) DBReplications(ctx context.Context) ([]DBReplication, error) {
 	rows, err := db.R.QueryContext(ctx,
-		`SELECT replica_id, source_id, running, lag, error, databases, updated_at FROM db_replication ORDER BY replica_id, source_id`)
+		`SELECT replica_id, source_id, running, lag, error, databases, updated_at, failing_since, alerted
+		 FROM db_replication ORDER BY replica_id, source_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -89,15 +96,26 @@ func (db *DB) DBReplications(ctx context.Context) ([]DBReplication, error) {
 	for rows.Next() {
 		var r DBReplication
 		var dbs string
-		var at int64
-		if err := rows.Scan(&r.ReplicaID, &r.SourceID, &r.Running, &r.Lag, &r.Error, &dbs, &at); err != nil {
+		var at, since int64
+		if err := rows.Scan(&r.ReplicaID, &r.SourceID, &r.Running, &r.Lag, &r.Error, &dbs, &at, &since, &r.Alerted); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(dbs), &r.Databases); err != nil {
 			return nil, err
 		}
 		r.UpdatedAt = time.Unix(at, 0)
+		if since != 0 {
+			r.FailingSince = time.Unix(since, 0)
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// unixOrZero is t in Unix seconds, 0 for the zero time.
+func unixOrZero(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.Unix()
 }

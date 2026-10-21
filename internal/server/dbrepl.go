@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/notify"
 	"github.com/wiefix/basalt/internal/store"
 )
 
@@ -31,7 +32,14 @@ const (
 	maxReplSource  = 65535 - replPortBase
 	dbReplTimeout  = 2 * time.Hour
 	peerApplyEvery = 10 * time.Minute
+	// Copying that has not worked for replAlertAfter is notified (a
+	// reconnect or a seed under way is not).
+	replAlertAfter = 5 * time.Minute
 )
+
+// errReplSourceOffline: the source cannot be reached through the panel
+// (notified as the server being offline, not as replication).
+const errReplSourceOffline = "the source server is offline"
 
 func replPasswordAD(serverID int64) []byte {
 	return []byte("mariadb-repl:" + strconv.FormatInt(serverID, 10))
@@ -231,6 +239,13 @@ func (s *Server) dbReplRound(ctx context.Context) {
 		s.log.Error("list database replication", "err", err)
 		return
 	}
+	prev := map[[2]int64]store.DBReplication{}
+	for _, k := range known {
+		prev[[2]int64{k.ReplicaID, k.SourceID}] = k
+	}
+	record := func(r int64, st agentproto.DBReplState) {
+		s.recordDBRepl(ctx, r, st, prev[[2]int64{r, st.ServerID}], plan.copies[r][st.ServerID], servers)
+	}
 	// Who takes part: sources, replicas, and replicas that copied before
 	// (they drop what they no longer copy).
 	involved := map[int64]bool{}
@@ -302,7 +317,7 @@ func (s *Server) dbReplRound(ctx context.Context) {
 			case setupErr[r] != "":
 				st.Error = setupErr[r]
 			case !s.agents.Connected(src) || !ready[src]:
-				st.Error = "the source server is offline"
+				st.Error = errReplSourceOffline
 			case src > maxReplSource || peerAddr(servers[src]) == "":
 				st.Error = "the source server's tunnel is off or has no address"
 			}
@@ -319,7 +334,7 @@ func (s *Server) dbReplRound(ctx context.Context) {
 			problems = append(problems, st)
 		}
 		for _, p := range problems {
-			s.recordDBRepl(ctx, r, p)
+			record(r, p)
 		}
 		cctx, cancel := context.WithTimeout(ctx, dbReplTimeout)
 		var resp agentproto.DBReplApplyResponse
@@ -328,12 +343,12 @@ func (s *Server) dbReplRound(ctx context.Context) {
 		if err != nil {
 			s.log.Warn("database replication", "server_id", r, "err", err)
 			for _, src := range req.Sources {
-				s.recordDBRepl(ctx, r, agentproto.DBReplState{ServerID: src.ServerID, Lag: -1, Error: err.Error()})
+				record(r, agentproto.DBReplState{ServerID: src.ServerID, Lag: -1, Error: err.Error()})
 			}
 			continue
 		}
 		for _, st := range resp.Sources {
-			s.recordDBRepl(ctx, r, st)
+			record(r, st)
 		}
 		if err := s.db.DeleteDBReplication(ctx, r, append(keep, req.Keep...)); err != nil {
 			s.log.Error("forget database replication", "err", err)
@@ -368,15 +383,95 @@ func (s *Server) replSource(ctx context.Context, src int64, dbs []*store.Databas
 	return out, nil
 }
 
-func (s *Server) recordDBRepl(ctx context.Context, replica int64, st agentproto.DBReplState) {
-	dbs := st.Databases
-	if dbs == nil {
-		dbs = []string{}
+// recordDBRepl records how replica copies from a source (prev: the last
+// record) and notifies the sites whose databases dbs are when copying has
+// stopped working for replAlertAfter, and when it works again.
+func (s *Server) recordDBRepl(ctx context.Context, replica int64, st agentproto.DBReplState, prev store.DBReplication,
+	dbs []*store.Database, servers map[int64]*store.Server) {
+	r := store.DBReplication{ReplicaID: replica, SourceID: st.ServerID, Running: st.Running,
+		Lag: st.Lag, Error: st.Error, Databases: st.Databases, UpdatedAt: s.now()}
+	if r.Databases == nil {
+		r.Databases = []string{}
 	}
-	if err := s.db.SetDBReplication(ctx, store.DBReplication{ReplicaID: replica, SourceID: st.ServerID, Running: st.Running,
-		Lag: st.Lag, Error: st.Error, Databases: dbs, UpdatedAt: s.now()}); err != nil {
+	var change replChange
+	r.FailingSince, r.Alerted, change = replAlert(prev, st, r.UpdatedAt)
+	if err := s.db.SetDBReplication(ctx, r); err != nil {
 		s.log.Error("record database replication", "err", err)
+		return
 	}
+	if change != replNoChange {
+		s.notifyDBRepl(ctx, change, r, dbs, servers)
+	}
+}
+
+type replChange int
+
+const (
+	replNoChange replChange = iota
+	replStopped
+	replResumed
+)
+
+// replAlert works out since when copying has failed and whether that was
+// notified, from the last record and the new state at now.
+func replAlert(prev store.DBReplication, st agentproto.DBReplState, now time.Time) (since time.Time, alerted bool, change replChange) {
+	if st.Error == errReplSourceOffline {
+		return prev.FailingSince, prev.Alerted, replNoChange
+	}
+	if st.Error == "" && st.Running {
+		if prev.Alerted {
+			return time.Time{}, false, replResumed
+		}
+		return time.Time{}, false, replNoChange
+	}
+	since = prev.FailingSince
+	if since.IsZero() {
+		since = now
+	}
+	if !prev.Alerted && now.Sub(since) >= replAlertAfter {
+		return since, true, replStopped
+	}
+	return since, prev.Alerted, replNoChange
+}
+
+// notifyDBRepl tells each site whose databases dbs are that copying them
+// to replica stopped or works again.
+func (s *Server) notifyDBRepl(ctx context.Context, change replChange, r store.DBReplication, dbs []*store.Database, servers map[int64]*store.Server) {
+	name := func(id int64) string {
+		if sv := servers[id]; sv != nil {
+			return sv.Name
+		}
+		return "server #" + strconv.FormatInt(id, 10)
+	}
+	var sites []int64
+	for _, d := range dbs {
+		if !slices.Contains(sites, d.SiteID) {
+			sites = append(sites, d.SiteID)
+		}
+	}
+	for _, id := range sites {
+		site, err := s.db.SiteByID(ctx, id)
+		if err != nil {
+			continue
+		}
+		m := notify.Message{Event: EventReplication, At: r.UpdatedAt, Link: fmt.Sprintf("/sites/%d", site.ID), Project: site.ProjectID}
+		if change == replStopped {
+			m.Title = fmt.Sprintf("The databases of %s are not copied to %s", site.Name, name(r.ReplicaID))
+			m.Text = fmt.Sprintf("Copying from %s has not worked since %s: %s. The copy of the site there keeps working with the databases of %s; they cannot take its place until copying works again.",
+				name(r.SourceID), r.FailingSince.UTC().Format("2006-01-02 15:04 UTC"), replProblem(r), name(r.SourceID))
+		} else {
+			m.Title = fmt.Sprintf("The databases of %s are copied to %s again", site.Name, name(r.ReplicaID))
+		}
+		s.notify(m)
+	}
+}
+
+// replProblem says what is wrong with copying r.
+func replProblem(r store.DBReplication) string {
+	if r.Error != "" {
+		return r.Error
+	}
+	return "it is not running"
 }
 
 // startDBReplication runs a round in the background (after a change).

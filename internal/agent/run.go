@@ -225,6 +225,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.dns.run(ctx)
 	go a.tunnel.run(ctx, a.tunnel.open())
 	a.siteDB.start(ctx)
+	a.clearSeeds()
 	go a.acme.run(ctx)
 	go a.apps.run(ctx)
 	defer a.health.stop()

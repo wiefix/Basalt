@@ -332,6 +332,21 @@ func (a *Agent) applySource(ctx context.Context, db *mariadb.Server, s agentprot
 	return st
 }
 
+// seedDir holds the dumps of seeds under way.
+const seedDir = "dbseed"
+
+// clearSeeds removes dumps left behind when the agent stopped mid-seed
+// (none can be under way before it runs).
+func (a *Agent) clearSeeds() {
+	dir := filepath.Join(a.dir, seedDir)
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+			a.log.Info("removed a leftover database dump", "file", e.Name())
+		}
+	}
+}
+
 // seed copies new databases from the source: with the connection stopped,
 // a dump through the tunnel gives their state at a GTID position; the
 // connection catches up to exactly there, then copies them from there on.
@@ -339,7 +354,7 @@ func (a *Agent) seed(ctx context.Context, db *mariadb.Server, s agentproto.DBRep
 	if err := db.Stop(ctx, conn); err != nil {
 		return err
 	}
-	dir := filepath.Join(a.dir, "dbseed")
+	dir := filepath.Join(a.dir, seedDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}

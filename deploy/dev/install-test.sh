@@ -33,8 +33,9 @@ sleep 3
 
 PANELIP=$(docker inspect -f '{{(index .NetworkSettings.Networks "basalt-net").IPAddress}}' basalt-panel)
 echo "### guided install of the panel (answers typed into a terminal; agents connect to its IP)"
-# Domain: none; agents: the IP; Docker, PHP, MariaDB, DNS: no; install: yes.
-OUT=$(printf '\n%s\nn\nn\nn\nn\ny\n' "$PANELIP" |
+# Domain: none; agents: the IP; Docker: no; PHP, MariaDB: yes (the panel's
+# server takes a copy of a site); DNS: no; install: yes.
+OUT=$(printf '\n%s\nn\ny\ny\nn\ny\n' "$PANELIP" |
   docker exec -i basalt-panel script -qec "sh /deploy/install.sh --binary /dist/basalt-linux-$ARCH" /dev/null 2>&1) || { echo "$OUT"; exit 1; }
 echo "$OUT"
 case "$OUT" in *"Ready to install"*"Agents:  $PANELIP:8443"*"Basalt is running"*) ;; *) echo "the guided install did not ask or finish"; exit 6 ;; esac
@@ -168,6 +169,82 @@ echo "$VALID" | grep -q "; fully validated" || { echo "$VALID"; exit 1; }
 NEG=$(docker exec basalt-panel delv @$NODEIP -a /tmp/anchor +root=zone.test nope.zone.test A 2>&1)
 echo "$NEG" | grep -E "validated|resolution failed" | sed 's/^/  nope.zone.test: /'
 echo "$NEG" | grep -q "negative response, fully validated" || { echo "$NEG"; exit 1; }
+echo "### the PHP site with a database on the panel's server too: files, database copy, primary switch"
+PSRV=$($API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print([s["id"] for s in json.load(sys.stdin)["servers"] if s["name"]!="node1"][0])')
+$API -X PUT -d "{\"ips\":[\"$PANELIP\"]}" http://127.0.0.1:8080/api/v1/servers/$PSRV/public-ips >/dev/null
+read -r DBID DBPW <<<"$($API -d '{"name":"data"}' http://127.0.0.1:8080/api/v1/sites/$SITE/databases | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["database"]["id"], d["credentials"]["password"])')"
+DBN="s${SITE}_data"
+docker exec basalt-node1 mariadb "$DBN" -e "CREATE TABLE hits (id INT AUTO_INCREMENT PRIMARY KEY, at VARCHAR(16)); INSERT INTO hits (at) VALUES ('node1')"
+# A page that writes through "localhost" like WordPress does, and counts.
+printf '<?php $m = new mysqli("localhost", "%s", "%s", "%s"); $m->query("INSERT INTO hits (at) VALUES (\\"" . gethostname() . "\\")"); echo "rows ", $m->query("SELECT COUNT(*) FROM hits")->fetch_row()[0];' "$DBN" "$DBPW" "$DBN" > /tmp/basalt-db.php
+docker cp /tmp/basalt-db.php basalt-panel:/root/db.php
+$API -X PUT -H Content-Type:application/octet-stream --data-binary @/root/db.php "http://127.0.0.1:8080/api/v1/sites/$SITE/files/content?path=/public/db.php" >/dev/null
+R=$($API -d "{\"server_id\":$PSRV}" http://127.0.0.1:8080/api/v1/sites/$SITE/replicas)
+echo "$R" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if "placements" in d else d)'
+copied() { # replica server: its copy holds the site's database and copies
+  $API "http://127.0.0.1:8080/api/v1/sites/$SITE" | python3 -c '
+import sys, json
+p = [p for p in json.load(sys.stdin)["placements"] if p["server_id"] == '"$1"'][0]
+d = p.get("databases") or {}
+print("  synced:", p.get("synced_at"), p.get("sync_error", ""), "databases:", d)
+sys.exit(0 if p.get("synced_at") and d.get("running") and d.get("copied") == ["'"$DBN"'"] else 1)'
+}
+for i in $(seq 90); do copied "$PSRV" >/dev/null && break; sleep 2; done
+copied "$PSRV" || exit 1
+# MariaDB of the panel's server was restarted once, by systemd, to turn its binary log on.
+docker exec basalt-panel mariadb -N -e "SELECT @@log_bin, @@server_id, @@gtid_domain_id" | sed 's/^/  binlog, server id, domain: /'
+[ "$(docker exec basalt-panel mariadb -N -e 'SELECT @@log_bin')" = 1 ] || { echo "binary log off on the panel"; exit 1; }
+for i in $(seq 30); do
+  [ "$(docker exec basalt-panel mariadb -N -e "SELECT COUNT(*) FROM $DBN.hits" 2>/dev/null)" = 1 ] && break; sleep 1
+done
+[ "$(docker exec basalt-panel mariadb -N -e "SELECT COUNT(*) FROM $DBN.hits")" = 1 ] || { echo "rows not copied"; exit 1; }
+# The copy's files belong to the site's own user there, its PHP runs as that user.
+docker exec basalt-panel stat -c '  copy: %n %U:%G %a' /srv/basalt/sites/$SITE/public/index.php /srv/basalt/sites/$SITE/public
+[ "$(docker exec basalt-panel stat -c %U /srv/basalt/sites/$SITE/public/db.php)" = "basalt-s$SITE" ] || { echo "the copy's files are not the site user's"; exit 1; }
+for i in $(seq 30); do
+  docker exec basalt-panel curl -sk --resolve shop.test:443:$PANELIP https://shop.test/ | grep -q "as basalt-s$SITE" && break; sleep 1
+done
+echo "  copy serves: $(docker exec basalt-panel curl -sk --resolve shop.test:443:$PANELIP https://shop.test/)"
+docker exec basalt-panel curl -sk --resolve shop.test:443:$PANELIP https://shop.test/ | grep -q "as basalt-s$SITE" || exit 1
+# The copy writes into the primary's database through the agents' tunnel.
+W=$(docker exec basalt-panel curl -sk --resolve shop.test:443:$PANELIP https://shop.test/db.php)
+echo "  copy writes: $W"
+[ "$W" = "rows 2" ] || exit 1
+[ "$(docker exec basalt-node1 mariadb -N -e "SELECT at FROM $DBN.hits ORDER BY id DESC LIMIT 1")" = panel ] || { echo "the copy did not write on the primary"; exit 1; }
+# The site's user may only read its local copy (root could write anyway).
+docker exec basalt-panel mariadb -u "$DBN" -p"$DBPW" "$DBN" -e "INSERT INTO hits (at) VALUES ('x')" 2>/dev/null && { echo "the copy's database takes writes"; exit 1; }
+[ "$(docker exec basalt-panel mariadb -N -u "$DBN" -p"$DBPW" "$DBN" -e 'SELECT COUNT(*) FROM hits')" -ge 1 ] || { echo "the site's user cannot read its copy"; exit 1; }
+switch() { # server
+  $API -X PUT -d "{\"server_id\":$1}" "http://127.0.0.1:8080/api/v1/sites/$SITE/primary" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("site",{}).get("server_id")=='"$1"' else d)'
+}
+echo "### planned switch to the panel's server and back"
+switch "$PSRV"
+for i in $(seq 90); do copied "$NODE" >/dev/null && break; sleep 2; done
+copied "$NODE" || exit 1
+W=$(docker exec basalt-panel curl -sk --resolve shop.test:443:$PANELIP https://shop.test/db.php)
+echo "  new primary writes: $W"
+[ "$W" = "rows 3" ] || exit 1
+for i in $(seq 30); do
+  W=$(docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/db.php)
+  [ "$W" = "rows 4" ] && break; sleep 1
+done
+echo "  former primary, now a copy, writes on the new one: $W"
+[ "$W" = "rows 4" ] || exit 1
+[ "$(docker exec basalt-panel mariadb -N -e "SELECT at FROM $DBN.hits ORDER BY id DESC LIMIT 1")" = node1 ] || { echo "the copy did not write on the new primary"; exit 1; }
+docker exec basalt-node1 mariadb -u "$DBN" -p"$DBPW" "$DBN" -e "INSERT INTO hits (at) VALUES ('x')" 2>/dev/null && { echo "the former primary still takes writes"; exit 1; }
+switch "$NODE"
+for i in $(seq 90); do copied "$PSRV" >/dev/null && break; sleep 2; done
+copied "$PSRV" || exit 1
+W=$(docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/db.php)
+echo "  back on node1: $W"
+[ "$W" = "rows 5" ] || exit 1
+$API -X DELETE "http://127.0.0.1:8080/api/v1/sites/$SITE/replicas/$PSRV" >/dev/null
+for i in $(seq 30); do
+  [ -z "$(docker exec basalt-panel mariadb -N -e "SHOW DATABASES LIKE '$DBN'")" ] && break; sleep 1
+done
+[ -z "$(docker exec basalt-panel mariadb -N -e "SHOW DATABASES LIKE '$DBN'")" ] || { echo "the copy's database stays after removing the replica"; exit 1; }
+$API -X DELETE "http://127.0.0.1:8080/api/v1/sites/$SITE/databases/$DBID" >/dev/null
+echo "  replica removed, copy dropped"
 echo "### mail server on node1: domain, mailbox, SMTP in, IMAPS out"
 MAIL=$($API -d "{\"server_id\":$NODE,\"hostname\":\"mail.shop.test\",\"memory_mb\":1024}" http://127.0.0.1:8080/api/v1/mail | python3 -c 'import sys,json; print(json.load(sys.stdin)["server"]["id"])')
 for i in $(seq 180); do
