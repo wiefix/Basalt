@@ -72,12 +72,26 @@ func dsn(path string, readOnly bool) string {
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "foreign_keys(ON)")
 	q.Add("_pragma", "synchronous(NORMAL)")
+	// Only walship.Source checkpoints the WAL (it keeps standby copies of
+	// the database byte for byte, which needs to know when that happens).
+	q.Add("_pragma", "wal_autocheckpoint(0)")
 	if readOnly {
 		q.Add("_pragma", "query_only(ON)")
 	} else {
 		q.Set("_txlock", "immediate")
 	}
 	return (&url.URL{Scheme: "file", Opaque: path, RawQuery: q.Encode()}).String()
+}
+
+// WithWriter runs fn on the write pool's only connection: nothing commits
+// until it returns.
+func (db *DB) WithWriter(ctx context.Context, fn func(ctx context.Context, conn *sql.Conn) error) error {
+	conn, err := db.W.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return fn(ctx, conn)
 }
 
 func (db *DB) Ping(ctx context.Context) error {

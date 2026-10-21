@@ -30,6 +30,7 @@ import (
 	"github.com/wiefix/basalt/internal/secrets"
 	"github.com/wiefix/basalt/internal/server"
 	"github.com/wiefix/basalt/internal/store"
+	"github.com/wiefix/basalt/internal/walship"
 )
 
 const usage = `Usage: basalt <command> [flags]
@@ -111,11 +112,15 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	log = log.With("component", "server")
 	compose.SilenceLibraryLogs()
 
-	db, err := store.Open(ctx, filepath.Join(cfg.DataDir, "basalt.db"))
+	dbPath := filepath.Join(cfg.DataDir, "basalt.db")
+	db, err := store.Open(ctx, dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
+	// Checkpoints the database (store turns SQLite's own off) and feeds
+	// standby panels.
+	ship := walship.NewSource(dbPath, db, baseLog.With("component", "walship"))
 
 	instanceID, err := db.InstanceID(ctx)
 	if err != nil {
@@ -211,6 +216,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	ctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
 	var wg sync.WaitGroup
+	wg.Go(func() { ship.Run(ctx) })
 	for _, serve := range []func(context.Context) error{
 		func(ctx context.Context) error { return api.Serve(ctx, cfg.Listen) },
 		func(ctx context.Context) error { return hub.Serve(ctx, cfg.AgentListen) },
