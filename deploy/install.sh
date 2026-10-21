@@ -13,6 +13,12 @@
 #   New server:  the one-line command shown in the panel ("Add server"), which runs
 #                sh install.sh agent --panel https://HOST:8443 --token TOKEN --ca-sha256 FINGERPRINT
 #
+#   Standby panel: the one-line command shown in the panel (Servers, "Add standby panel"),
+#                which runs sh install.sh standby --panel https://HOST:8443 --token TOKEN
+#                --agent-token TOKEN --ca-sha256 FINGERPRINT [--domain panel.example.com]:
+#                a copy of the panel, kept up to date, that can take over
+#                (basalt server promote); its agent joins the panel as a server.
+#
 #   --with-docker turns on user namespaces (userns-remap: root in a container
 #   is an unprivileged user on the host) when it installs Docker; for an
 #   existing Docker, --docker-userns turns them on (its current images and
@@ -82,7 +88,7 @@ usage() {
 	if [ -f "$0" ]; then
 		sed -n '2,/^set -eu/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'
 	else
-		echo "usage: sh install.sh [panel | agent | uninstall] [options]; without a mode, in a terminal, it asks what to install"
+		echo "usage: sh install.sh [panel | agent | standby | uninstall] [options]; without a mode, in a terminal, it asks what to install"
 	fi
 	exit 2
 }
@@ -93,7 +99,7 @@ case "$MODE" in
 "" | -*) MODE=guided ;;
 *) shift ;;
 esac
-DOMAIN="" AGENT_HOST="" BINARY="" PANEL="" TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0 USERNS=auto WITH_DNS=keep PURGE=0 YES=0
+DOMAIN="" AGENT_HOST="" BINARY="" PANEL="" TOKEN="" AGENT_TOKEN="" CA_SHA="" WITH_PHP=0 WITH_DB=0 WITH_DOCKER=0 USERNS=auto WITH_DNS=keep PURGE=0 YES=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--domain) DOMAIN=$2; shift 2 ;;
@@ -101,6 +107,7 @@ while [ $# -gt 0 ]; do
 	--binary) BINARY=$2; shift 2 ;;
 	--panel) PANEL=$2; shift 2 ;;
 	--token) TOKEN=$2; shift 2 ;;
+	--agent-token) AGENT_TOKEN=$2; shift 2 ;;
 	--ca-sha256) CA_SHA=$2; shift 2 ;;
 	--with-php) WITH_PHP=1; shift ;;
 	--with-mariadb) WITH_DB=1; shift ;;
@@ -135,6 +142,7 @@ esac
 case "$MODE" in
 panel | uninstall | guided) ;;
 agent) [ -n "$PANEL" ] && [ -n "$TOKEN" ] && [ -n "$CA_SHA" ] || die "agent mode needs --panel, --token and --ca-sha256" ;;
+standby) [ -n "$PANEL" ] && [ -n "$TOKEN" ] && [ -n "$AGENT_TOKEN" ] && [ -n "$CA_SHA" ] || die "standby mode needs --panel, --token, --agent-token and --ca-sha256" ;;
 *) usage ;;
 esac
 
@@ -362,7 +370,11 @@ fetch_from_panel() {
 		"https://basalt-panel$1" -o "$2"
 }
 
-if [ "$MODE" = agent ]; then
+# A panel's host, or a standby panel's: it runs the panel's service.
+PANEL_HOST=0
+case "$MODE" in panel | standby) PANEL_HOST=1 ;; esac
+
+if [ "$MODE" = agent ] || [ "$MODE" = standby ]; then
 	PANEL_HOSTPORT=${PANEL#https://}
 	PANEL_HOSTPORT=${PANEL_HOSTPORT%%/*}
 	case "$PANEL_HOSTPORT" in *:*) ;; *) PANEL_HOSTPORT="$PANEL_HOSTPORT:443" ;; esac
@@ -406,7 +418,7 @@ usermod --append --groups basalt-www basalt-proxy
 install -d -m 0755 "$LIB" /srv/basalt "$SITES"
 install -d -m 0700 -o root -g root "$LIB/agent"
 install -d -m 0700 -o basalt-proxy -g basalt-proxy "$LIB/proxy"
-if [ "$MODE" = panel ]; then
+if [ "$PANEL_HOST" -eq 1 ]; then
 	ensure_user basalt "$LIB/server"
 	install -d -m 0700 -o basalt -g basalt "$LIB/server"
 fi
@@ -416,8 +428,9 @@ fi
 ADDR=${DOMAIN:-$(public_ip)}
 [ -n "$ADDR" ] || ADDR=$(hostname)
 
-# Where other servers' agents reach the panel: given once, remembered.
-if [ "$MODE" = panel ]; then
+# Where other servers' agents reach the panel: given once, remembered (a
+# standby's agents reach it there once it takes over).
+if [ "$PANEL_HOST" -eq 1 ]; then
 	if [ -n "$AGENT_HOST" ]; then
 		printf '%s\n' "$AGENT_HOST" >"$LIB/server/agent-host"
 	elif [ -s "$LIB/server/agent-host" ]; then
@@ -444,7 +457,7 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native'
 
-if [ "$MODE" = panel ]; then
+if [ "$PANEL_HOST" -eq 1 ]; then
 	# Local backup storages default to /var/backups/basalt: agents (root)
 	# write server-<id>/ there, the panel its own panel/.
 	install -d -m 0711 /var/backups/basalt
@@ -506,7 +519,7 @@ WantedBy=multi-user.target
 EOF
 
 AGENT_FLAGS=""
-[ "$MODE" = panel ] && AGENT_FLAGS="--panel-domain $ADDR --panel-upstream 127.0.0.1:8080"
+[ "$PANEL_HOST" -eq 1 ] && AGENT_FLAGS="--panel-domain $ADDR --panel-upstream 127.0.0.1:8080"
 # An upgrade keeps DNS as it was unless --with-dns or --no-dns says otherwise.
 if [ "$WITH_DNS" = keep ]; then
 	WITH_DNS=0
@@ -559,7 +572,12 @@ systemctl daemon-reload
 
 # ---------- start ----------
 
-if [ "$MODE" = panel ]; then
+if [ "$MODE" = standby ] && [ ! -f "$LIB/server/standby.json" ]; then
+	[ ! -f "$LIB/server/basalt.db" ] || die "this server holds a panel ($LIB/server/basalt.db): a standby needs a server without one"
+	say "Registering this server as a standby panel"
+	runuser -u basalt -- "$BIN" server standby-enroll --data-dir "$LIB/server" --panel "$PANEL" --token "$TOKEN" --ca-sha256 "$CA_SHA"
+fi
+if [ "$PANEL_HOST" -eq 1 ]; then
 	systemctl enable --now basalt-server.service >/dev/null 2>&1
 	systemctl restart basalt-server.service
 	say "Waiting for the panel"
@@ -576,6 +594,9 @@ if [ ! -f "$LIB/agent/agent.json" ] || [ -f "$LIB/agent/removed" ]; then
 	if [ "$MODE" = panel ]; then
 		say "Registering this server with the panel"
 		ENROLL=$(runuser -u basalt -- "$BIN" server local-enroll --data-dir "$LIB/server" --agent-url https://127.0.0.1:8443 --name "$(hostname -s)")
+	elif [ "$MODE" = standby ]; then
+		say "Registering this server with the panel"
+		ENROLL="--panel $PANEL --token $AGENT_TOKEN --ca-sha256 $CA_SHA"
 	else
 		say "Registering this server with the panel"
 		ENROLL="--panel $PANEL --token $TOKEN --ca-sha256 $CA_SHA"
@@ -607,6 +628,15 @@ if [ "$MODE" = panel ]; then
 	echo "                or the IP: re-run with --agent-host)."
 	echo
 	echo "  Open these ports: 80/tcp, 443/tcp+udp (sites), 8443/tcp (other servers' agents), 2222/tcp (SFTP), 8444/tcp between your servers (database replication)"
+elif [ "$MODE" = standby ]; then
+	say "This server is a standby of the panel at $PANEL"
+	echo
+	echo "  It keeps a copy of the panel, kept up to date (state: https://$ADDR/)."
+	echo "  If the panel fails, make this server the panel:"
+	echo "    basalt server promote && systemctl restart basalt-server"
+	echo "  then point the panel's domain here."
+	echo
+	echo "  Open these ports: 80/tcp, 443/tcp+udp (sites), 8443/tcp (agents, once it is the panel), 2222/tcp (SFTP), 8444/tcp between your servers (database replication)"
 else
 	say "This server is connected. Manage it in the panel."
 	echo "  Open these ports: 80/tcp, 443/tcp+udp (sites), 2222/tcp (SFTP), 8444/tcp between your servers (database replication)"

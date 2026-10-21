@@ -122,3 +122,27 @@ func TestPanelCertificatesAndPinning(t *testing.T) {
 		t.Fatal("unexpected key type")
 	}
 }
+
+// TestStandbyIdentity: a standby panel's certificate names it, and agents'
+// and standbys' certificates cannot pass for each other.
+func TestStandbyIdentity(t *testing.T) {
+	ca, _ := NewCA("test", now)
+	key, _ := NewKey()
+	csr, _ := NewCSR(key)
+	sb, err := ca.SignStandby(csr, 7, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, _ := ca.SignAgent(csr, 7, now)
+	sbCert, _ := x509.ParseCertificate(sb)
+	agCert, _ := x509.ParseCertificate(ag)
+	if id, err := StandbyID(sbCert); err != nil || id != 7 {
+		t.Fatalf("StandbyID = %d, %v", id, err)
+	}
+	if _, err := AgentID(sbCert); err == nil {
+		t.Fatal("a standby certificate passes for an agent's")
+	}
+	if _, err := StandbyID(agCert); err == nil {
+		t.Fatal("an agent certificate passes for a standby's")
+	}
+}

@@ -35,7 +35,9 @@ type Options struct {
 	SecureCookies bool
 	// Agents is the agent channel; AgentURL is the address agents use to
 	// reach it, shown in enrollment commands.
-	Agents   AgentHub
+	Agents AgentHub
+	// Standbys feeds standby panels (nil: none can follow this panel).
+	Standbys StandbyFeeder
 	AgentURL string
 	// TrustedProxies may set X-Forwarded-For (e.g. the local proxy).
 	TrustedProxies []netip.Prefix
@@ -102,6 +104,7 @@ type Server struct {
 	trusted       []netip.Prefix
 	setupFile     string
 	agents        AgentHub
+	standbys      StandbyFeeder
 	agentURL      string
 	now           func() time.Time
 	imagesKept    int
@@ -215,6 +218,7 @@ func New(o Options) *Server {
 		trusted:         o.TrustedProxies,
 		setupFile:       o.SetupTokenFile,
 		agents:          o.Agents,
+		standbys:        o.Standbys,
 		agentURL:        o.AgentURL,
 		now:             o.Now,
 		imagesKept:      o.ImagesKept,
@@ -316,6 +320,9 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("POST /api/v1/servers", s.requireRole(store.RoleAdmin, s.handleCreateServer))
 	rt.Handle("GET /api/v1/servers/{id}", s.requireRole(store.RoleViewer, s.handleGetServer))
 	rt.Handle("DELETE /api/v1/servers/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteServer))
+	rt.Handle("GET /api/v1/standbys", s.requireRole(store.RoleAdmin, s.handleListStandbys))
+	rt.Handle("POST /api/v1/standbys", s.requireSession(store.RoleOwner, s.handleCreateStandby))
+	rt.Handle("DELETE /api/v1/standbys/{id}", s.requireSession(store.RoleOwner, s.handleDeleteStandby))
 	rt.Handle("GET /api/v1/servers/{id}/metrics", s.requireRole(store.RoleViewer, s.handleServerMetrics))
 	rt.Handle("GET /api/v1/servers/{id}/certificates", s.requireRole(store.RoleViewer, s.handleServerCerts))
 	rt.Handle("POST /api/v1/servers/{id}/ping", s.requireRole(store.RoleMember, s.handlePingServer))

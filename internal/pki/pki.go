@@ -31,6 +31,8 @@ import (
 const (
 	PanelServerName = "basalt-panel"
 	agentURIPrefix  = "basalt://server/"
+	// A standby panel's certificate: it may fetch the panel's database.
+	standbyURIPrefix = "basalt://standby/"
 
 	caValidity     = 20 * 365 * 24 * time.Hour
 	AgentValidity  = 90 * 24 * time.Hour
@@ -105,6 +107,15 @@ func Fingerprint(der []byte) string {
 // SignAgent issues a client certificate for server id from a CSR. Only the
 // CSR's public key is used; identity fields are set by the CA.
 func (ca *CA) SignAgent(csrDER []byte, serverID int64, now time.Time) ([]byte, error) {
+	return ca.signClient(csrDER, agentURIPrefix, "server-", serverID, now)
+}
+
+// SignStandby issues a client certificate for standby panel id.
+func (ca *CA) SignStandby(csrDER []byte, standbyID int64, now time.Time) ([]byte, error) {
+	return ca.signClient(csrDER, standbyURIPrefix, "standby-", standbyID, now)
+}
+
+func (ca *CA) signClient(csrDER []byte, uriPrefix, namePrefix string, id int64, now time.Time) ([]byte, error) {
 	csr, err := x509.ParseCertificateRequest(csrDER)
 	if err != nil {
 		return nil, fmt.Errorf("parse CSR: %w", err)
@@ -115,10 +126,10 @@ func (ca *CA) SignAgent(csrDER []byte, serverID int64, now time.Time) ([]byte, e
 	if err := checkPublicKey(csr.PublicKey); err != nil {
 		return nil, err
 	}
-	u, _ := url.Parse(agentURIPrefix + strconv.FormatInt(serverID, 10))
+	u, _ := url.Parse(uriPrefix + strconv.FormatInt(id, 10))
 	tmpl := &x509.Certificate{
 		SerialNumber: randomSerial(),
-		Subject:      pkix.Name{CommonName: "server-" + strconv.FormatInt(serverID, 10)},
+		Subject:      pkix.Name{CommonName: namePrefix + strconv.FormatInt(id, 10)},
 		URIs:         []*url.URL{u},
 		NotBefore:    now.Add(-clockSkewSlack),
 		NotAfter:     now.Add(AgentValidity),
@@ -142,17 +153,26 @@ func checkPublicKey(pub any) error {
 
 // AgentID extracts the server ID from a verified agent certificate.
 func AgentID(cert *x509.Certificate) (int64, error) {
+	return certID(cert, agentURIPrefix, "agent")
+}
+
+// StandbyID extracts the standby panel's ID from a verified certificate.
+func StandbyID(cert *x509.Certificate) (int64, error) {
+	return certID(cert, standbyURIPrefix, "standby panel")
+}
+
+func certID(cert *x509.Certificate, prefix, what string) (int64, error) {
 	for _, u := range cert.URIs {
 		s := u.String()
-		if rest, ok := strings.CutPrefix(s, agentURIPrefix); ok {
+		if rest, ok := strings.CutPrefix(s, prefix); ok {
 			id, err := strconv.ParseInt(rest, 10, 64)
 			if err != nil || id <= 0 {
-				return 0, fmt.Errorf("invalid agent URI %q", s)
+				return 0, fmt.Errorf("invalid %s URI %q", what, s)
 			}
 			return id, nil
 		}
 	}
-	return 0, errors.New("certificate has no agent identity")
+	return 0, fmt.Errorf("certificate has no %s identity", what)
 }
 
 // PanelCertificates issues and caches the TLS certificate the panel presents

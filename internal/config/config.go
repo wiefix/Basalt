@@ -258,10 +258,20 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 
 // ParseAgentEnroll parses flags for `basalt agent enroll`.
 func ParseAgentEnroll(args []string, output io.Writer) (AgentEnroll, error) {
+	return parseEnroll("basalt agent enroll", "/var/lib/basalt/agent", args, output)
+}
+
+// ParseStandbyEnroll parses flags for `basalt server standby-enroll`: the
+// panel's data directory becomes a standby of another panel.
+func ParseStandbyEnroll(args []string, output io.Writer) (AgentEnroll, error) {
+	return parseEnroll("basalt server standby-enroll", "/var/lib/basalt/server", args, output)
+}
+
+func parseEnroll(name, dataDir string, args []string, output io.Writer) (AgentEnroll, error) {
 	var cfg AgentEnroll
-	fs := flag.NewFlagSet("basalt agent enroll", flag.ContinueOnError)
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(output)
-	cfg.register(fs, "/var/lib/basalt/agent")
+	cfg.register(fs, dataDir)
 	fs.StringVar(&cfg.PanelURL, "panel", "", "agent channel URL of the panel, e.g. https://panel.example.com:8443")
 	fs.StringVar(&cfg.Token, "token", env("ENROLL_TOKEN", ""), "one-time enrollment token")
 	fs.StringVar(&cfg.CASHA256, "ca-sha256", "", "SHA-256 fingerprint of the panel's agent CA")

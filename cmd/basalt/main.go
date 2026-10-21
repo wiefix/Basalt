@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -29,6 +31,7 @@ import (
 	"github.com/wiefix/basalt/internal/proxy/caddyrun"
 	"github.com/wiefix/basalt/internal/secrets"
 	"github.com/wiefix/basalt/internal/server"
+	"github.com/wiefix/basalt/internal/standby"
 	"github.com/wiefix/basalt/internal/store"
 	"github.com/wiefix/basalt/internal/walship"
 )
@@ -37,7 +40,8 @@ const usage = `Usage: basalt <command> [flags]
 
 Commands:
   server    run the control plane (API and web UI)
-            (server recover: restore the panel from a backup)
+            (server recover: restore the panel from a backup;
+             server standby-enroll: make this host a standby panel)
   agent     run the agent on a managed host
             (agent enroll: register this host with a panel)
   proxy     run the web proxy (embedded Caddy) on a managed host
@@ -100,6 +104,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	if len(args) > 0 && args[0] == "recover" {
 		return runRecover(ctx, args[1:], os.Stdin, os.Stdout, stderr)
 	}
+	if len(args) > 0 && args[0] == "standby-enroll" {
+		return runStandbyEnroll(ctx, args[1:], stderr)
+	}
 	cfg, err := config.ParseServer(args, stderr)
 	if err != nil {
 		return err
@@ -111,6 +118,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	baseLog := log
 	log = log.With("component", "server")
 	compose.SilenceLibraryLogs()
+	if standby.IsStandby(cfg.DataDir) {
+		return runStandby(ctx, cfg, log)
+	}
 
 	dbPath := filepath.Join(cfg.DataDir, "basalt.db")
 	db, err := store.Open(ctx, dbPath)
@@ -187,6 +197,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	hub := agenthub.New(baseLog.With("component", "agenthub"), db, ca, nil)
+	masterKey, err := os.ReadFile(filepath.Join(cfg.DataDir, "master.key"))
+	if err != nil {
+		return err
+	}
+	standbys := standby.NewFeeder(db, ca, ship, masterKey, baseLog.With("component", "standby"), nil)
+	standbys.Register(hub.Mount)
 	hub.ServeInstaller(deploy.InstallScript, cfg.BinariesDir)
 	hub.ServeReleases(filepath.Join(cfg.DataDir, "releases"))
 
@@ -198,6 +214,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		SetupToken:          setupToken,
 		SecureCookies:       !cfg.InsecureCookies,
 		Agents:              hub,
+		Standbys:            standbys,
 		AgentURL:            cfg.AgentURL,
 		TrustedProxies:      trusted,
 		SetupTokenFile:      setupFile,
@@ -231,6 +248,42 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	if err := context.Cause(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
+	return nil
+}
+
+// runStandby keeps a copy of another panel (the data directory belongs to
+// a standby panel) and answers on the panel's address with its state.
+func runStandby(ctx context.Context, cfg config.Server, log *slog.Logger) error {
+	c, err := standby.NewClient(cfg.DataDir, log.With("component", "standby"))
+	if err != nil {
+		return err
+	}
+	st := c.Status()
+	log.Info("starting as a standby panel", "version", buildinfo.Version, "panel", st.Panel, "standby_id", st.StandbyID, "data_dir", cfg.DataDir)
+	srv := &http.Server{Addr: cfg.Listen, Handler: c, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServe() }()
+	go c.Run(ctx)
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return srv.Shutdown(sctx)
+}
+
+func runStandbyEnroll(ctx context.Context, args []string, stderr io.Writer) error {
+	cfg, err := config.ParseStandbyEnroll(args, stderr)
+	if err != nil {
+		return err
+	}
+	id, err := standby.Enroll(ctx, standby.EnrollOptions{DataDir: cfg.DataDir, PanelURL: cfg.PanelURL, Token: cfg.Token, CASHA256: cfg.CASHA256})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stderr, "enrolled as standby panel %d of %s; `basalt server --data-dir %s` now keeps a copy of it\n", id, cfg.PanelURL, cfg.DataDir)
 	return nil
 }
 

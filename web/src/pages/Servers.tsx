@@ -73,6 +73,7 @@ export function ServersPage({ user }: { user: User }) {
       )}
 
       {can(user, "admin") && servers.data && servers.data.servers.length > 0 && <UpdatesCard />}
+      {can(user, "admin") && servers.data && servers.data.servers.length > 0 && <StandbysCard user={user} />}
 
       {adding && <AddServerModal onClose={() => setAdding(false)} />}
     </>
@@ -196,6 +197,171 @@ function UpdatesCard() {
         )}
       </div>
     </div>
+  );
+}
+
+// StandbysCard lists the standby panels: copies of this panel, kept up to
+// date, that can take over if it fails.
+function StandbysCard({ user }: { user: User }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const [adding, setAdding] = useState(false);
+  const list = useQuery({ queryKey: ["standbys"], queryFn: api.standbys, refetchInterval: 5000 });
+  const remove = useMutation({
+    mutationFn: api.deleteStandby,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["standbys"] }),
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  if (list.isPending) return null;
+  if (list.error) return <ErrorBox error={list.error} />;
+  const owner = can(user, "owner");
+  const { standbys, available } = list.data;
+  if (!available && standbys.length === 0) return null;
+  const drop = async (id: number, name: string) => {
+    const ok = await confirm({
+      title: `Remove standby panel ${name}?`,
+      body: (
+        <p>
+          It stops getting this panel's database and keeps the copy it has. Its server stays in the list: remove it
+          there if you no longer need it.
+        </p>
+      ),
+      confirm: "Remove",
+      danger: true,
+    });
+    if (ok) remove.mutate(id);
+  };
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <div className="card-head">
+        <h2>Standby panels</h2>
+        {owner && available && (
+          <button className="btn sm" onClick={() => setAdding(true)}>
+            <Icon name="plus" size={14} /> Add standby panel
+          </button>
+        )}
+      </div>
+      <div className="card-body stack">
+        <p className="muted small" style={{ margin: 0 }}>
+          A standby panel on another server keeps a copy of this panel, updated within a second. If this panel's
+          server fails, the standby takes over: run <span className="mono">basalt server promote</span> on it. Sites
+          and apps keep running either way.
+        </p>
+        {standbys.length > 0 && (
+          <div className="table-wrap">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Copy</th>
+                  <th>Last change</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {standbys.map((sb) => (
+                  <tr key={sb.id}>
+                    <td>
+                      {sb.server_id ? <Link to={`/servers/${sb.server_id}`}>{sb.name}</Link> : sb.name}
+                      {sb.last_ip && <div className="faint small">{sb.last_ip}</div>}
+                    </td>
+                    <td>
+                      {!sb.enrolled ? (
+                        <span className="badge">waiting to be installed</span>
+                      ) : sb.connected && sb.ready ? (
+                        <span className="badge ok">up to date</span>
+                      ) : sb.connected ? (
+                        <span className="badge warn">copying…</span>
+                      ) : (
+                        <span className="badge err">not connected</span>
+                      )}
+                      {sb.error && <div className="small" style={{ color: "var(--err)" }}>{sb.error}</div>}
+                    </td>
+                    <td className="muted">
+                      {sb.applied_at ? timeAgo(sb.applied_at) : sb.last_seen_at ? `seen ${timeAgo(sb.last_seen_at)}` : "—"}
+                    </td>
+                    <td className="num">
+                      {owner && (
+                        <button className="btn icon ghost" title="Remove" onClick={() => drop(sb.id, sb.name)}>
+                          <Icon name="trash" size={14} />
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+      {adding && <AddStandbyModal onClose={() => setAdding(false)} />}
+    </div>
+  );
+}
+
+function AddStandbyModal({ onClose }: { onClose: () => void }) {
+  const qc = useQueryClient();
+  const [name, setName] = useState("");
+  const create = useMutation({
+    mutationFn: () => api.createStandby(name.trim()),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["standbys"] });
+      qc.invalidateQueries({ queryKey: ["servers"] });
+    },
+  });
+  if (create.data) {
+    const e = create.data.enrollment;
+    const minutes = Math.max(0, Math.round((new Date(e.expires_at).getTime() - Date.now()) / 60000));
+    return (
+      <Modal title="Install the standby panel" onClose={onClose} wide footer={<button className="btn primary" onClick={onClose}>Done</button>}>
+        <div className="stack">
+          <p className="muted" style={{ margin: 0 }}>
+            Run this as <strong>root</strong> on a fresh Debian or Ubuntu server, not this panel's. It installs Basalt
+            as a standby of this panel and connects its agent as server <strong>{create.data.server.name}</strong>. The
+            command works once and expires in <strong>{minutes} minutes</strong>.
+          </p>
+          <CodeBox text={e.install_command} />
+          <div className="alert small">
+            Add <span className="mono">--domain</span> with this panel's domain to the command, so the standby serves it
+            once it takes over (then point the domain at it). Open port 8443 of this panel to the standby.
+          </div>
+          <div className="alert warn small">
+            A standby holds everything this panel does, its secrets included: protect its server like this one.
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+  return (
+    <Modal
+      title="Add standby panel"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" form="add-standby" disabled={create.isPending || !name.trim()}>
+            Continue
+          </button>
+        </>
+      }
+    >
+      <form
+        id="add-standby"
+        className="form"
+        onSubmit={(ev: FormEvent) => {
+          ev.preventDefault();
+          create.mutate();
+        }}
+      >
+        <ErrorBox error={create.error} />
+        <Field label="Name" help="Its server gets this name too, e.g. panel-2.">
+          <input className="input" value={name} onChange={(ev) => setName(ev.target.value)} autoFocus required />
+        </Field>
+      </form>
+    </Modal>
   );
 }
 

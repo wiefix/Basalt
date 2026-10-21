@@ -27,7 +27,7 @@ func feed(ctx context.Context, t *testing.T, src *walship.Source, m *walship.Mir
 		done <- src.Follow(ctx, func(msg walship.Msg) error {
 			mu.Lock()
 			defer mu.Unlock()
-			if err := m.Apply(ctx, msg); err != nil {
+			if err := m.Apply(context.WithoutCancel(ctx), msg); err != nil {
 				t.Errorf("apply %d at %d: %v", msg.Kind, msg.Offset, err)
 				return err
 			}

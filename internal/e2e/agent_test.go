@@ -26,7 +26,9 @@ import (
 	"github.com/wiefix/basalt/internal/pki"
 	"github.com/wiefix/basalt/internal/secrets"
 	"github.com/wiefix/basalt/internal/server"
+	"github.com/wiefix/basalt/internal/standby"
 	"github.com/wiefix/basalt/internal/store"
+	"github.com/wiefix/basalt/internal/walship"
 )
 
 type panel struct {
@@ -67,6 +69,16 @@ func startPanelWith(t *testing.T, o server.Options) *panel {
 		log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
 	hub := agenthub.New(log, db, ca, nil)
+	// The panel checkpoints its database and feeds standby panels.
+	ship := walship.NewSource(filepath.Join(dir, "basalt.db"), db, log)
+	go ship.Run(ctx)
+	masterKey, err := os.ReadFile(filepath.Join(dir, "master.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	feeder := standby.NewFeeder(db, ca, ship, masterKey, log, nil)
+	feeder.Register(hub.Mount)
+	o.Standbys = feeder
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

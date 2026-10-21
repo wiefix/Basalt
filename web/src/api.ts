@@ -70,6 +70,22 @@ export interface Metrics {
   uptime: number;
 }
 
+// A standby panel: a copy of this panel that can take over.
+export interface Standby {
+  id: number;
+  name: string;
+  server_id?: number;
+  enrolled: boolean;
+  cert_expires_at: string | null;
+  last_seen_at: string | null;
+  last_ip: string;
+  connected: boolean;
+  ready: boolean;
+  applied_at: string | null;
+  error?: string;
+  version?: string;
+}
+
 export interface Enrollment {
   token: string;
   expires_at: string;
@@ -979,6 +995,13 @@ export const api = {
   resetEnrollToken: (id: number) =>
     post<{ enrollment: Enrollment }>(`/api/v1/servers/${id}/enroll-token`),
   deleteServer: (id: number) => del<void>(`/api/v1/servers/${id}`),
+  standbys: () => get<{ standbys: Standby[]; available: boolean }>("/api/v1/standbys"),
+  createStandby: (name: string) =>
+    post<{ standby: Standby; server: Server; enrollment: { token: string; expires_at: string; install_command: string } }>(
+      "/api/v1/standbys",
+      { name },
+    ),
+  deleteStandby: (id: number) => del<void>(`/api/v1/standbys/${id}`),
   updates: () => get<UpdatesInfo>("/api/v1/updates"),
   checkUpdates: () => post<UpdatesInfo>("/api/v1/updates/check"),
   applyUpdate: () => post<{ run: UpdatesInfo["run"] }>("/api/v1/updates/apply"),

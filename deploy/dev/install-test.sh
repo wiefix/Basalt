@@ -18,7 +18,7 @@ ssh-keygen -q -Y sign -f "$RT/key" -n basalt-release "$RT/latest/download/SHA256
 RELKEY=$(cat "$RT/key.pub")
 docker build -q -t basalt-systemd -f deploy/dev/systemd.Dockerfile deploy/dev >/dev/null
 
-cleanup() { docker rm -f basalt-panel basalt-node1 basalt-releases >/dev/null 2>&1 || true; docker network rm basalt-net >/dev/null 2>&1 || true; }
+cleanup() { docker rm -f basalt-panel basalt-node1 basalt-standby basalt-releases >/dev/null 2>&1 || true; docker network rm basalt-net >/dev/null 2>&1 || true; }
 cleanup
 [ "${KEEP:-}" = 1 ] || trap cleanup EXIT
 docker network create basalt-net >/dev/null
@@ -29,6 +29,7 @@ run() { # name
 }
 run panel
 run node1
+run standby
 sleep 3
 
 PANELIP=$(docker inspect -f '{{(index .NetworkSettings.Networks "basalt-net").IPAddress}}' basalt-panel)
@@ -67,13 +68,27 @@ docker exec basalt-node1 sh -c "$CMD --with-php --with-mariadb --with-docker --w
 docker exec basalt-node1 systemctl is-active basalt-proxy basalt-agent
 docker exec basalt-node1 sh -c 'git --version && docker buildx version | cut -d" " -f1-2' 
 docker exec basalt-node1 ps -o user=,comm= -C basalt | sort | uniq -c
+echo "### a standby panel on its own server, from its one-line command"
+SBCMD=$($API -d '{"name":"spare"}' http://127.0.0.1:8080/api/v1/standbys | python3 -c 'import sys,json; print(json.load(sys.stdin)["enrollment"]["install_command"])')
+case "$SBCMD" in *"| sh -s -- standby --panel https://$PANELIP:8443 "*"--agent-token "*) ;; *) echo "standby command: $SBCMD"; exit 5 ;; esac
+docker exec basalt-standby sh -c "$SBCMD"
+docker exec basalt-standby systemctl is-active basalt-server basalt-proxy basalt-agent
+standby_ready() {
+  $API http://127.0.0.1:8080/api/v1/standbys | python3 -c 'import sys,json; s=json.load(sys.stdin)["standbys"][0]; print("  standby:", s["name"], "connected" if s["connected"] else "not connected", "ready" if s["ready"] else "copying", s.get("error", "")); sys.exit(0 if s["connected"] and s["ready"] else 1)'
+}
+for i in $(seq 60); do standby_ready >/dev/null && break; sleep 1; done
+standby_ready
+docker exec basalt-standby curl -fsS http://127.0.0.1:8080/healthz | python3 -c 'import sys,json; s=json.load(sys.stdin); print("  its state:", s); sys.exit(0 if s["ready"] else "the standby says it is not ready")'
+[ "$(docker exec basalt-standby stat -c '%U %a' /var/lib/basalt/server/master.key)" = "basalt 600" ] || { echo "no private master key on the standby"; exit 1; }
+[ "$(docker exec basalt-standby sha256sum /var/lib/basalt/server/master.key | cut -c1-64)" = "$(docker exec basalt-panel sha256sum /var/lib/basalt/server/master.key | cut -c1-64)" ] || { echo "the standby has another master key"; exit 1; }
+docker exec basalt-standby sh -c '! curl -fsS http://127.0.0.1:8080/api/v1/servers >/dev/null 2>&1' || { echo "the standby serves the panel's API"; exit 1; }
 echo "### systemd exposure scores (lower is safer)"
 for u in basalt-agent basalt-proxy; do
   echo "  $u: $(docker exec basalt-node1 systemd-analyze security $u.service 2>/dev/null | tail -1)"
 done
 
 for i in $(seq 30); do
-  $API http://127.0.0.1:8080/api/v1/servers | grep -q '"name":"node1","status":"online"' && break; sleep 1
+  $API http://127.0.0.1:8080/api/v1/servers | grep -q '"name":"node1","status":"online"' && $API http://127.0.0.1:8080/api/v1/servers | grep -q '"name":"spare","status":"online"' && break; sleep 1
 done
 $API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; [print(" ", s["name"], s["status"], "php:", s["php_versions"], "isolated:", s["isolated"], "docker:", s["docker"], s.get("docker_security")) for s in json.load(sys.stdin)["servers"]]'
 echo "### restic for backups on every server"
@@ -309,28 +324,31 @@ docker exec basalt-panel systemctl start basalt-server
 for i in $(seq 60); do docker exec basalt-panel curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.5; done
 # Agents retry with a backoff of up to a minute: wait for both.
 for i in $(seq 120); do
-  [ "$($API http://127.0.0.1:8080/api/v1/servers | grep -o '"status":"online"' | wc -l)" -ge 2 ] && break; sleep 1
+  [ "$($API http://127.0.0.1:8080/api/v1/servers | grep -o '"status":"online"' | wc -l)" -ge 3 ] && break; sleep 1
 done
 $API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; l=json.load(sys.stdin)["servers"]; [print("  after recovery:", s["name"], s["status"]) for s in l]; sys.exit(0 if all(s["status"]=="online" for s in l) else "an agent did not reconnect")'
+# The standby follows the recovered panel (a new snapshot).
+for i in $(seq 60); do standby_ready >/dev/null && break; sleep 1; done
+standby_ready
 echo "### update from the panel: a signed newer release reaches both servers through systemd"
 docker run -d --name basalt-releases --network basalt-net -v "$PWD/$RT":/www:ro busybox:1.37 httpd -f -p 80 -h /www >/dev/null
-for host in panel node1; do
+for host in panel node1 standby; do
   docker exec basalt-$host sh -c "mkdir -p /etc/systemd/system/basalt-agent.service.d && printf '[Service]\nEnvironment=\"BASALT_RELEASE_KEY=%s\"\n' '$RELKEY' >/etc/systemd/system/basalt-agent.service.d/release.conf && systemctl daemon-reload && systemctl restart basalt-agent"
 done
 docker exec basalt-panel sh -c "mkdir -p /etc/systemd/system/basalt-server.service.d && printf '[Service]\nEnvironment=BASALT_RELEASE_URL=http://basalt-releases BASALT_RELEASE_ALLOW_PRIVATE=1 \"BASALT_RELEASE_KEY=%s\"\n' '$RELKEY' >/etc/systemd/system/basalt-server.service.d/release.conf && systemctl daemon-reload && systemctl restart basalt-server"
 for i in $(seq 60); do docker exec basalt-panel curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.5; done
 for i in $(seq 120); do
-  [ "$($API http://127.0.0.1:8080/api/v1/servers | grep -o '"status":"online"' | wc -l)" -ge 2 ] && break; sleep 1
+  [ "$($API http://127.0.0.1:8080/api/v1/servers | grep -o '"status":"online"' | wc -l)" -ge 3 ] && break; sleep 1
 done
 $API -d '{}' http://127.0.0.1:8080/api/v1/updates/check | python3 -c 'import sys,json; u=json.load(sys.stdin); print("  latest:", u["latest"], "available:", u["available"], u["error"]); sys.exit(0 if u["latest"]=="v9.9.9" and u["available"] else "no update found")'
 $API -d '{}' http://127.0.0.1:8080/api/v1/updates/apply >/dev/null
 for i in $(seq 180); do
   V=$($API http://127.0.0.1:8080/api/v1/updates 2>/dev/null | python3 -c 'import sys,json; u=json.load(sys.stdin); print(" ".join(sorted(s["version"] for s in u["servers"] if s["online"])), u["current"])' 2>/dev/null || true)
-  [ "$V" = "v9.9.9 v9.9.9 v9.9.9" ] && break; sleep 1
+  [ "$V" = "v9.9.9 v9.9.9 v9.9.9 v9.9.9" ] && break; sleep 1
 done
 echo "  versions (servers, panel): $V"
-[ "$V" = "v9.9.9 v9.9.9 v9.9.9" ] || { $API http://127.0.0.1:8080/api/v1/updates; exit 1; }
-for host in panel node1; do
+[ "$V" = "v9.9.9 v9.9.9 v9.9.9 v9.9.9" ] || { $API http://127.0.0.1:8080/api/v1/updates; exit 1; }
+for host in panel node1 standby; do
   docker exec basalt-$host basalt version | grep -q " v9.9.9 " || { echo "$host runs another binary"; exit 1; }
   docker exec basalt-$host systemctl is-active -q basalt-proxy basalt-agent || { echo "$host services down after the update"; exit 1; }
 done
@@ -338,6 +356,8 @@ for i in $(seq 30); do
   docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " && break; sleep 1
 done
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "site down after the update"; exit 1; }
+for i in $(seq 60); do standby_ready >/dev/null && break; sleep 1; done
+standby_ready
 echo "### node1 removed from the panel: its agent stops connecting, sites keep running"
 $API -d '{"name":"main"}' http://127.0.0.1:8080/api/v1/sites/$SITE/databases >/dev/null
 docker exec basalt-node1 mariadb -N -e "SHOW DATABASES LIKE 's${SITE}\_%'" | grep -q main || { echo "site database missing"; exit 1; }

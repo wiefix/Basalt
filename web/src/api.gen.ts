@@ -416,6 +416,10 @@ export interface CreateSiteRequest {
   tls?: string;
 }
 
+export interface CreateStandbyRequest {
+  name?: string;
+}
+
 export interface CreateTokenRequest {
   expires_days?: number;
   name?: string;
@@ -1144,6 +1148,27 @@ export interface SiteView {
   usage: SiteUsageView;
 }
 
+export interface StandbyEnrollmentView {
+  expires_at: string;
+  install_command: string;
+  token: string;
+}
+
+export interface StandbyView {
+  applied_at: string | null;
+  cert_expires_at: string | null;
+  connected: boolean;
+  enrolled: boolean;
+  error?: string;
+  id: number;
+  last_ip: string;
+  last_seen_at: string | null;
+  name: string;
+  ready: boolean;
+  server_id?: number;
+  version?: string;
+}
+
 export interface StartCheckRequest {
   server_id?: number;
   storage_id?: number;
@@ -1422,6 +1447,8 @@ export type DeleteSitesIdSftpUsersUidResponse = {
   ok: boolean;
   sync_error?: string;
 };
+
+export type DeleteStandbysIdResponse = void;
 
 export type DeleteTokensIdResponse = void;
 
@@ -1743,6 +1770,11 @@ export type GetSitesIdSnapshotsResponse = {
 export type GetSitesIdSnapshotsSidFilesResponse = {
   entries: AgentprotoSnapshotEntry[];
   path: string;
+};
+
+export type GetStandbysResponse = {
+  available: boolean;
+  standbys: StandbyView[];
 };
 
 export type GetTokensResponse = {
@@ -2124,6 +2156,14 @@ export type PostSitesIdSyncResponse = {
 export type PostSitesIdUsageResponse = {
   site: SiteView;
 };
+
+export type PostStandbysResponse = {
+  enrollment: StandbyEnrollmentView;
+  server: ServerView;
+  standby: StandbyView;
+};
+
+export type PostStandbysBody = CreateStandbyRequest;
 
 export type PostUpdatesApplyResponse = {
   run: UpdateRun;

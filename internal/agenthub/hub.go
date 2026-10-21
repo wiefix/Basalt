@@ -59,7 +59,17 @@ type Hub struct {
 	installScript []byte
 	binariesDir   string
 	releasesDir   string
+	extra         []route
 }
+
+type route struct {
+	pattern string
+	h       http.HandlerFunc
+}
+
+// Mount serves another endpoint on the agents' port (standby panels).
+// Call before serving.
+func (h *Hub) Mount(pattern string, f http.HandlerFunc) { h.extra = append(h.extra, route{pattern, f}) }
 
 // OnConnect registers a callback run (in its own goroutine) whenever an
 // agent connects, e.g. to push desired state. Call before serving.
@@ -115,6 +125,9 @@ func (h *Hub) Handler() http.Handler {
 	mux.HandleFunc("POST "+agentproto.PathEnroll, h.handleEnroll)
 	mux.HandleFunc("POST "+agentproto.PathConnect, h.handleConnect)
 	h.registerInstaller(mux)
+	for _, r := range h.extra {
+		mux.HandleFunc(r.pattern, r.h)
+	}
 	return mux
 }
 
