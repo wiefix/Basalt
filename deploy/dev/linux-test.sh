@@ -7,7 +7,7 @@ GOMODCACHE="$(go env GOMODCACHE)"
 exec docker run --rm \
   -v "$PWD":/src -w /src \
   -v "$GOMODCACHE":/go/pkg/mod \
-  -e GOFLAGS=-mod=mod -e CGO_ENABLED=0 \
+  -e GOFLAGS=-mod=mod -e CGO_ENABLED=0 -e GOTOOLCHAIN=auto \
   golang:1.27-trixie bash -euo pipefail -c '
     apt-get update -qq >/dev/null
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-fpm php-mysql mariadb-server restic >/dev/null
