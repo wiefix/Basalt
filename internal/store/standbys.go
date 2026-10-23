@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,17 +20,20 @@ type Standby struct {
 	EnrolledAt  *time.Time
 	LastSeen    *time.Time
 	LastIP      string
-	CreatedAt   time.Time
+	// AgentURL is where agents reach it once it takes over (it reports
+	// it; "" until then).
+	AgentURL  string
+	CreatedAt time.Time
 }
 
 const standbyColumns = `id, name, COALESCE(server_id, 0), cert_fp, prev_cert_fp, cert_expires_at, enrolled_at,
-	last_seen_at, last_ip, created_at`
+	last_seen_at, last_ip, agent_url, created_at`
 
 func scanStandby(r interface{ Scan(...any) error }) (*Standby, error) {
 	var s Standby
 	var exp, enrolled, seen sql.NullInt64
 	var created int64
-	if err := r.Scan(&s.ID, &s.Name, &s.ServerID, &s.CertFP, &s.PrevCertFP, &exp, &enrolled, &seen, &s.LastIP, &created); err != nil {
+	if err := r.Scan(&s.ID, &s.Name, &s.ServerID, &s.CertFP, &s.PrevCertFP, &exp, &enrolled, &seen, &s.LastIP, &s.AgentURL, &created); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -90,6 +94,17 @@ func (db *DB) SetStandbySeen(ctx context.Context, id int64, ip string, at time.T
 	return db.execOne(ctx, `UPDATE standby_panels SET last_seen_at = ?, last_ip = ? WHERE id = ?`, at.Unix(), ip, id)
 }
 
+// SetStandbyAgentURL records where agents reach a standby once it takes
+// over; changed reports whether it differs from what was recorded.
+func (db *DB) SetStandbyAgentURL(ctx context.Context, id int64, url string) (changed bool, err error) {
+	res, err := db.W.ExecContext(ctx, `UPDATE standby_panels SET agent_url = ? WHERE id = ? AND agent_url != ?`, url, id, url)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 func (db *DB) StandbyByID(ctx context.Context, id int64) (*Standby, error) {
 	return scanStandby(db.R.QueryRowContext(ctx, `SELECT `+standbyColumns+` FROM standby_panels WHERE id = ?`, id))
 }
@@ -115,4 +130,46 @@ func (db *DB) Standbys(ctx context.Context) ([]*Standby, error) {
 // accepted.
 func (db *DB) DeleteStandby(ctx context.Context, id int64) error {
 	return db.execOne(ctx, `DELETE FROM standby_panels WHERE id = ?`, id)
+}
+
+const settingPanelEpoch = "panel_epoch"
+
+// PanelEpoch is how many times a standby took over this panel's database
+// (0 for the panel it started as).
+func (db *DB) PanelEpoch(ctx context.Context) (int64, error) {
+	v, err := db.Setting(ctx, settingPanelEpoch)
+	if errors.Is(err, ErrNotFound) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(v, 10, 64)
+}
+
+// Promote makes this database, a standby's copy, the panel's: the epoch
+// goes up by one and the standby (self) is no longer listed. It returns
+// the new epoch.
+func (db *DB) Promote(ctx context.Context, self int64) (int64, error) {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var v string
+	err = tx.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, settingPanelEpoch).Scan(&v)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	epoch, _ := strconv.ParseInt(v, 10, 64)
+	epoch++
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
+		settingPanelEpoch, strconv.FormatInt(epoch, 10)); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM standby_panels WHERE id = ?`, self); err != nil {
+		return 0, err
+	}
+	return epoch, tx.Commit()
 }

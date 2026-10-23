@@ -147,6 +147,9 @@ func postJSON(ctx context.Context, c *http.Client, url string, body, out any) er
 type Client struct {
 	dir string
 	log *slog.Logger
+	// agentURL is where agents will reach this standby once it takes over
+	// (its own agent port), told to the panel.
+	agentURL string
 
 	mu        sync.Mutex
 	cfg       config
@@ -160,8 +163,10 @@ type Client struct {
 	removed   bool
 }
 
-func NewClient(dir string, log *slog.Logger) (*Client, error) {
-	c := &Client{dir: dir, log: log}
+// NewClient loads the standby panel in dir; agentURL is the address of its
+// agent port.
+func NewClient(dir, agentURL string, log *slog.Logger) (*Client, error) {
+	c := &Client{dir: dir, log: log, agentURL: agentURL}
 	b, err := os.ReadFile(filepath.Join(dir, FileConfig))
 	if err != nil {
 		return nil, err
@@ -224,6 +229,16 @@ func (c *Client) httpClient(timeout time.Duration) *http.Client {
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 	}}
+}
+
+// Lock keeps a promotion from changing the copy while this process runs
+// (call before Run); it fails if another process holds the standby.
+func (c *Client) Lock() (unlock func(), err error) {
+	unlock, err = lockDir(c.dir)
+	if err != nil {
+		return nil, fmt.Errorf("another process holds the standby panel in %s (%s): %w", c.dir, fileLock, err)
+	}
+	return unlock, nil
 }
 
 // Run follows the panel until ctx ends or the panel removes this standby.
@@ -347,7 +362,7 @@ func (c *Client) follow(ctx context.Context) error {
 		enc := json.NewEncoder(pw)
 		for {
 			st := c.Status()
-			if enc.Encode(Report{Ready: st.Ready, Applied: st.Applied, Error: st.Error, Version: buildinfo.Version}) != nil {
+			if enc.Encode(Report{Ready: st.Ready, Applied: st.Applied, Error: st.Error, Version: buildinfo.Version, AgentURL: c.agentURL}) != nil {
 				cancel()
 				return
 			}
@@ -415,7 +430,7 @@ var page = template.Must(template.New("standby").Parse(`<!doctype html>
 {{else if .Ready}}<p>The copy is complete{{if not .Applied.IsZero}}; it last changed {{.Applied.UTC.Format "2006-01-02 15:04:05"}} UTC{{end}}.{{if not .Connected}} The panel cannot be reached now.{{end}}</p>
 {{else if .Connected}}<p>Copying the panel…</p>
 {{else}}<p>The panel cannot be reached{{if .Error}}: {{.Error}}{{end}}.</p>{{end}}
-<p>To make this server the panel: <code>basalt server promote</code>, then restart its service.</p>
+<p>To make this server the panel (when the panel is gone): <code>systemctl stop basalt-server &amp;&amp; basalt server promote &amp;&amp; systemctl start basalt-server</code>, then point the panel's domain here.</p>
 </body></html>`))
 
 // ServeHTTP answers on the panel's address while this is a standby.

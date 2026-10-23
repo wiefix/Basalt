@@ -846,6 +846,11 @@ export interface PanelURLRequest {
   url?: string;
 }
 
+export interface PanelView {
+  epoch: number;
+  superseded: SupersededView | null;
+}
+
 export interface PasskeyLoginRequest {
   authenticator_data?: string;
   challenge_id?: string;
@@ -1155,6 +1160,7 @@ export interface StandbyEnrollmentView {
 }
 
 export interface StandbyView {
+  agent_url?: string;
   applied_at: string | null;
   cert_expires_at: string | null;
   connected: boolean;
@@ -1233,6 +1239,11 @@ export interface StoreProjectLimitsOut {
   dns_zones: number;
   health_checks: number;
   sites: number;
+}
+
+export interface SupersededView {
+  at: string;
+  epoch: number;
 }
 
 export interface TemplateInfoView {
@@ -1636,6 +1647,10 @@ export type GetNotificationsResponse = {
 };
 
 export type GetOpenapiJsonResponse = Record<string, unknown>;
+
+export type GetPanelResponse = {
+  panel: PanelView;
+};
 
 export type GetPanelBackupResponse = {
   backups: PanelBackupView[];

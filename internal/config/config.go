@@ -287,6 +287,21 @@ func parseEnroll(name, dataDir string, args []string, output io.Writer) (AgentEn
 	return cfg, cfg.validate()
 }
 
+// ParsePromote parses flags for `basalt server promote`.
+func ParsePromote(args []string, output io.Writer) (Common, error) {
+	var cfg Common
+	fs := flag.NewFlagSet("basalt server promote", flag.ContinueOnError)
+	fs.SetOutput(output)
+	cfg.register(fs, "/var/lib/basalt/server")
+	if err := fs.Parse(args); err != nil {
+		return cfg, err
+	}
+	if fs.NArg() > 0 {
+		return cfg, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	return cfg, cfg.validate()
+}
+
 // ParseLocalEnroll parses flags for `basalt server local-enroll`.
 func ParseLocalEnroll(args []string, output io.Writer) (LocalEnroll, error) {
 	var cfg LocalEnroll

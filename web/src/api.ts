@@ -84,6 +84,14 @@ export interface Standby {
   applied_at: string | null;
   error?: string;
   version?: string;
+  agent_url?: string; // where agents reach it once it takes over
+}
+
+// This panel's place among its standbys: superseded when a standby took
+// over from it (its agents went there).
+export interface PanelState {
+  epoch: number;
+  superseded: { epoch: number; at: string } | null;
 }
 
 export interface Enrollment {
@@ -995,6 +1003,7 @@ export const api = {
   resetEnrollToken: (id: number) =>
     post<{ enrollment: Enrollment }>(`/api/v1/servers/${id}/enroll-token`),
   deleteServer: (id: number) => del<void>(`/api/v1/servers/${id}`),
+  panel: () => get<{ panel: PanelState }>("/api/v1/panel"),
   standbys: () => get<{ standbys: Standby[]; available: boolean }>("/api/v1/standbys"),
   createStandby: (name: string) =>
     post<{ standby: Standby; server: Server; enrollment: { token: string; expires_at: string; install_command: string } }>(

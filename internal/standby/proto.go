@@ -47,6 +47,8 @@ type Report struct {
 	Applied time.Time `json:"applied"` // when the copy last took a change
 	Error   string    `json:"error,omitempty"`
 	Version string    `json:"version,omitempty"`
+	// AgentURL is where agents reach the standby once it takes over.
+	AgentURL string `json:"agent_url,omitempty"`
 }
 
 const (

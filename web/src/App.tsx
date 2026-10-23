@@ -67,6 +67,22 @@ export function App() {
   return <Shell user={me.data!.user} />;
 }
 
+// SupersededBanner warns that a standby panel took over from this one: its
+// servers no longer connect here, so changes made here reach none of them.
+function SupersededBanner() {
+  const panel = useQuery({ queryKey: ["panel"], queryFn: api.panel, refetchInterval: 60_000 });
+  const s = panel.data?.panel.superseded;
+  if (!s) return null;
+  return (
+    <div className="alert err" style={{ marginBottom: 16 }}>
+      <strong>A standby panel took over from this one.</strong> Its servers connect to the new panel and refuse this one
+      (seen {new Date(s.at).toLocaleString()}): changes made here reach no server. Use the new panel. To keep this
+      server as its standby, stop this panel (<code>systemctl stop basalt-server</code>), move{" "}
+      <code>/var/lib/basalt/server</code> aside, add a standby panel on the new panel and run its command here.
+    </div>
+  );
+}
+
 function Shell({ user }: { user: User }) {
   const qc = useQueryClient();
   const navigate = useNavigate();
@@ -161,6 +177,7 @@ function Shell({ user }: { user: User }) {
         </div>
       </aside>
       <main className="main">
+        <SupersededBanner />
         <Routes>
           {/* Users with no role on the panel work in their projects' sites and apps. */}
           <Route path="/" element={<Navigate to={can(user, "viewer") ? "/servers" : "/sites"} replace />} />

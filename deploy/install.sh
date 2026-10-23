@@ -18,6 +18,8 @@
 #                --agent-token TOKEN --ca-sha256 FINGERPRINT [--domain panel.example.com]:
 #                a copy of the panel, kept up to date, that can take over
 #                (basalt server promote); its agent joins the panel as a server.
+#                Servers learn its address (--agent-host, default: this server's
+#                IP, not the domain, which leads to the panel until it takes over).
 #
 #   --with-docker turns on user namespaces (userns-remap: root in a container
 #   is an unprivileged user on the host) when it installs Docker; for an
@@ -436,6 +438,9 @@ if [ "$PANEL_HOST" -eq 1 ]; then
 	elif [ -s "$LIB/server/agent-host" ]; then
 		AGENT_HOST=$(cat "$LIB/server/agent-host")
 	fi
+	# A standby's domain still leads to the panel it copies: agents learn
+	# its own address, to find it once it takes over.
+	[ "$MODE" != standby ] || [ -n "$AGENT_HOST" ] || AGENT_HOST=$(public_ip)
 	AGENT_HOST=${AGENT_HOST:-$ADDR}
 fi
 
@@ -633,8 +638,9 @@ elif [ "$MODE" = standby ]; then
 	echo
 	echo "  It keeps a copy of the panel, kept up to date (state: https://$ADDR/)."
 	echo "  If the panel fails, make this server the panel:"
-	echo "    basalt server promote && systemctl restart basalt-server"
-	echo "  then point the panel's domain here."
+	echo "    systemctl stop basalt-server && basalt server promote && systemctl start basalt-server"
+	echo "  Servers move here by themselves (they know its address $AGENT_HOST:8443); then point"
+	echo "  the panel's domain here."
 	echo
 	echo "  Open these ports: 80/tcp, 443/tcp+udp (sites), 8443/tcp (agents, once it is the panel), 2222/tcp (SFTP), 8444/tcp between your servers (database replication)"
 else

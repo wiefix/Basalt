@@ -54,7 +54,7 @@ func TestStandbyPanel(t *testing.T) {
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	follow := func() (*standby.Client, context.CancelFunc, chan struct{}) {
-		c, err := standby.NewClient(dir, log)
+		c, err := standby.NewClient(dir, "", log)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -41,7 +41,8 @@ const usage = `Usage: basalt <command> [flags]
 Commands:
   server    run the control plane (API and web UI)
             (server recover: restore the panel from a backup;
-             server standby-enroll: make this host a standby panel)
+             server standby-enroll: make this host a standby panel;
+             server promote: make this standby panel the panel)
   agent     run the agent on a managed host
             (agent enroll: register this host with a panel)
   proxy     run the web proxy (embedded Caddy) on a managed host
@@ -106,6 +107,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	if len(args) > 0 && args[0] == "standby-enroll" {
 		return runStandbyEnroll(ctx, args[1:], stderr)
+	}
+	if len(args) > 0 && args[0] == "promote" {
+		return runPromote(ctx, args[1:], os.Stdout, stderr)
 	}
 	cfg, err := config.ParseServer(args, stderr)
 	if err != nil {
@@ -197,12 +201,14 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	hub := agenthub.New(baseLog.With("component", "agenthub"), db, ca, nil)
+	hub.SetPanelURL(cfg.AgentURL)
 	masterKey, err := os.ReadFile(filepath.Join(cfg.DataDir, "master.key"))
 	if err != nil {
 		return err
 	}
 	standbys := standby.NewFeeder(db, ca, ship, masterKey, baseLog.With("component", "standby"), nil)
 	standbys.Register(hub.Mount)
+	standbys.OnAgentURL(hub.PushPanelInfo)
 	hub.ServeInstaller(deploy.InstallScript, cfg.BinariesDir)
 	hub.ServeReleases(filepath.Join(cfg.DataDir, "releases"))
 
@@ -254,10 +260,15 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 // runStandby keeps a copy of another panel (the data directory belongs to
 // a standby panel) and answers on the panel's address with its state.
 func runStandby(ctx context.Context, cfg config.Server, log *slog.Logger) error {
-	c, err := standby.NewClient(cfg.DataDir, log.With("component", "standby"))
+	c, err := standby.NewClient(cfg.DataDir, cfg.AgentURL, log.With("component", "standby"))
 	if err != nil {
 		return err
 	}
+	unlock, err := c.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	st := c.Status()
 	log.Info("starting as a standby panel", "version", buildinfo.Version, "panel", st.Panel, "standby_id", st.StandbyID, "data_dir", cfg.DataDir)
 	srv := &http.Server{Addr: cfg.Listen, Handler: c, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
@@ -272,6 +283,33 @@ func runStandby(ctx context.Context, cfg config.Server, log *slog.Logger) error 
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
+}
+
+// runPromote makes the standby panel in the data directory the panel.
+func runPromote(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	cfg, err := config.ParsePromote(args, stderr)
+	if err != nil {
+		return err
+	}
+	p, err := standby.Promote(ctx, cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "This server holds the panel now (epoch %d).\n", p.Epoch)
+	if !p.LastChange.IsZero() {
+		fmt.Fprintf(stdout, "Its copy has the panel's changes up to about %s (the latest audit log entry).\n", p.LastChange.UTC().Format(time.RFC3339))
+	}
+	fmt.Fprint(stdout, "\nNext:\n  1. Start it: systemctl start basalt-server. Agents that cannot reach the\n     former panel come here by themselves (they learned this address).\n")
+	switch {
+	case p.Zone != "":
+		fmt.Fprintf(stdout, "  2. Point the panel's domain here: %s is in the zone %s of your Basalt\n     DNS. Sign in here and change its A/AAAA records under DNS.\n", p.PanelURL, p.Zone)
+	case p.PanelURL != "":
+		fmt.Fprintf(stdout, "  2. Point the panel's domain (%s) at this server at its DNS provider.\n", p.PanelURL)
+	default:
+		fmt.Fprint(stdout, "  2. Point the panel's domain, if it has one, at this server.\n")
+	}
+	fmt.Fprint(stdout, "  3. Keep the former panel stopped. If it comes back, its agents stay here\n     (they know the newer epoch) and it shows that it was replaced. To make\n     it a standby of this panel, add a standby panel here and install it there.\n")
+	return nil
 }
 
 func runStandbyEnroll(ctx context.Context, args []string, stderr io.Writer) error {

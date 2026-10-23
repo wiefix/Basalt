@@ -119,6 +119,7 @@ var apiDocs = map[string]apiDoc{
 	"GET /api/v1/servers/{id}/certificates": {summary: "Public certificates of the server's domains and their expiry", resp: obj("certificates", []certView{})},
 	"POST /api/v1/servers/{id}/ping":        {summary: "Round trip to the server's agent", resp: obj("rtt_ms", 0.0, "agent_time", time.Time{})},
 	"PUT /api/v1/servers/{id}/public-ips":   {summary: "Set the addresses automatic DNS records use (empty: detected)", body: publicIPsRequest{}, resp: obj("server", serverView{})},
+	"GET /api/v1/panel":                     {summary: "This panel's epoch, and whether a standby panel took over from it", resp: obj("panel", panelView{})},
 	"GET /api/v1/standbys":                  {summary: "Standby panels: copies of this panel that can take over", resp: obj("standbys", []standbyView{}, "available", false)},
 	"POST /api/v1/standbys": {summary: "Add a standby panel; returns its one-time install command (owner)", body: createStandbyRequest{},
 		resp: obj("standby", standbyView{}, "server", serverView{}, "enrollment", standbyEnrollmentView{})},

@@ -52,6 +52,7 @@ type Hub struct {
 
 	mu        sync.Mutex
 	conns     map[int64]*conn
+	panel     panelState
 	onConnect func(ctx context.Context, serverID int64)
 	onACME    func(ctx context.Context, serverID int64, c agentproto.ACMEChallenge) error
 	onHealth  func(serverID int64, r agentproto.HealthReport)
@@ -124,6 +125,7 @@ func (h *Hub) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST "+agentproto.PathEnroll, h.handleEnroll)
 	mux.HandleFunc("POST "+agentproto.PathConnect, h.handleConnect)
+	mux.HandleFunc("GET "+agentproto.PathPanelEpoch, h.handleEpoch)
 	h.registerInstaller(mux)
 	for _, r := range h.extra {
 		mux.HandleFunc(r.pattern, r.h)
@@ -153,6 +155,7 @@ func (h *Hub) ServeListener(ctx context.Context, ln net.Listener) error {
 		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 	go h.pruneLoop(ctx)
+	go h.takeoverLoop(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ServeTLS(ln, "", "") }()
@@ -260,6 +263,11 @@ func (h *Hub) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid agent certificate", http.StatusForbidden)
 		return
 	}
+	// Before anything else: a former panel must not tell the agent it was
+	// removed, nor take it back.
+	if h.superseded(w, r, id) {
+		return
+	}
 	srv, err := h.db.ServerByID(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		// Gone, not forbidden: the agent stops retrying.
@@ -302,6 +310,7 @@ func (h *Hub) handleConnect(w http.ResponseWriter, r *http.Request) {
 	h.conns[id] = c
 	h.mu.Unlock()
 	h.log.Info("agent connected", "server_id", id, "ip", ip)
+	go h.sendPanelInfo(ctx, id)
 	if h.onConnect != nil {
 		go h.onConnect(ctx, id)
 	}

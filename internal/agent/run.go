@@ -137,6 +137,8 @@ type Agent struct {
 
 	mu sync.Mutex
 	id *identity
+	// cfgMu orders the writes of agent.json.
+	cfgMu sync.Mutex
 
 	// MetricsInterval and RenewBefore can be changed in tests.
 	MetricsInterval time.Duration
@@ -236,9 +238,14 @@ func (a *Agent) Run(ctx context.Context) error {
 		return nil
 	}
 	backoff := minBackoff
+	// Each failure moves on to the next address of the panel; once all
+	// failed, the agent waits longer before the next round.
+	tried := 0
 	for {
+		urls := a.panelURLs()
+		url := urls[tried%len(urls)]
 		start := time.Now()
-		err := a.session(ctx)
+		connected, err := a.session(ctx, url)
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -252,17 +259,27 @@ func (a *Agent) Run(ctx context.Context) error {
 			<-ctx.Done()
 			return nil
 		}
+		if connected {
+			tried = 0 // the address that worked comes first now
+		} else {
+			tried++
+		}
 		if time.Since(start) > maxBackoff {
 			backoff = minBackoff // the session was healthy for a while
 		}
 		wait := backoff/2 + rand.N(backoff/2+1)
-		a.log.Warn("disconnected from panel", "err", err, "retry_in", wait.Round(time.Millisecond))
+		if tried > 0 && tried < len(urls) {
+			wait = minBackoff // the next address at once
+		} else {
+			tried = 0
+			backoff = min(backoff*2, maxBackoff)
+		}
+		a.log.Warn("disconnected from panel", "panel", url, "err", err, "retry_in", wait.Round(time.Millisecond))
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-time.After(wait):
 		}
-		backoff = min(backoff*2, maxBackoff)
 	}
 }
 
@@ -291,35 +308,42 @@ func (a *Agent) httpClient() *http.Client {
 	}}
 }
 
-// session runs one connection until it fails.
-func (a *Agent) session(ctx context.Context) error {
+// session runs one connection to the panel at url until it fails;
+// connected reports whether the panel took the agent.
+func (a *Agent) session(ctx context.Context, url string) (connected bool, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	pr, pw := io.Pipe()
 	defer pw.Close()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.identity().PanelURL+agentproto.PathConnect, pr)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url+agentproto.PathConnect, pr)
 	if err != nil {
-		return err
+		return false, err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+	if epoch := a.identity().Epoch; epoch > 0 {
+		req.Header.Set(agentproto.HeaderPanelEpoch, strconv.FormatInt(epoch, 10))
+	}
 	resp, err := a.httpClient().Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusGone {
-		return errRemoved
+		return false, errRemoved
 	}
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("panel rejected connection (%s): %s", resp.Status, strings.TrimSpace(string(msg)))
+		return false, fmt.Errorf("panel rejected connection (%s): %s", resp.Status, strings.TrimSpace(string(msg)))
+	}
+	if err := a.usePanel(url); err != nil {
+		a.log.Warn("remember the panel's address", "err", err)
 	}
 
 	peer := agentproto.NewPeer(resp.Body, pw, nil, a.handle)
 	runErr := make(chan error, 1)
 	go func() { runErr <- peer.Run(ctx) }()
-	a.log.Info("connected to panel", "panel", a.identity().PanelURL, "server_id", a.identity().ServerID)
+	a.log.Info("connected to panel", "panel", url, "server_id", a.identity().ServerID)
 
 	hello := hostFacts()
 	hello.SFTPPort, hello.SFTPFingerprint = a.sftp.Port(), a.sftp.Fingerprint()
@@ -333,7 +357,7 @@ func (a *Agent) session(ctx context.Context) error {
 	hello.PeerPort, hello.PeerError = a.tunnel.Status()
 	hello.HTTPSPort = a.proxy.opts.HTTPSPort
 	if err := peer.Notify(agentproto.TypeHello, hello); err != nil {
-		return err
+		return true, err
 	}
 	a.acme.setPanel(peer)
 	defer a.acme.setPanel(nil)
@@ -341,13 +365,19 @@ func (a *Agent) session(ctx context.Context) error {
 	go a.reportMetrics(ctx, peer)
 	go a.health.report(ctx, peer)
 
-	return <-runErr
+	return true, <-runErr
 }
 
 func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage) (any, error) {
 	switch typ {
 	case agentproto.TypePing:
 		return agentproto.PingResponse{AgentTime: time.Now()}, nil
+	case agentproto.TypePanelInfo:
+		var info agentproto.PanelInfo
+		if err := json.Unmarshal(payload, &info); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.setPanelInfo(info)
 	case agentproto.TypeProxyApply:
 		var d agentproto.ProxyApply
 		if err := json.Unmarshal(payload, &d); err != nil {

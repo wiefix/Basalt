@@ -83,6 +83,7 @@ export const checks = [
   fits<Returns<A["createServer"]>>()<G.PostServersResponse>(),
   fits<Returns<A["resetEnrollToken"]>>()<G.PostServersIdEnrollTokenResponse>(),
   fits<Returns<A["deleteServer"]>>()<G.DeleteServersIdResponse>(),
+  fits<Returns<A["panel"]>>()<G.GetPanelResponse>(),
   fits<Returns<A["standbys"]>>()<G.GetStandbysResponse>(),
   fits<Returns<A["createStandby"]>>()<G.PostStandbysResponse>(),
   fits<Returns<A["deleteStandby"]>>()<G.DeleteStandbysIdResponse>(),

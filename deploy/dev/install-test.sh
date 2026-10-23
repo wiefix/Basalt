@@ -358,6 +358,42 @@ done
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "site down after the update"; exit 1; }
 for i in $(seq 60); do standby_ready >/dev/null && break; sleep 1; done
 standby_ready
+echo "### the panel fails: the standby is promoted and the servers move to it by themselves"
+agentcfg() { # host field
+  docker exec basalt-$1 cat /var/lib/basalt/agent/agent.json | python3 -c 'import sys,json; print(json.load(sys.stdin).get("'$2'", ""))'
+}
+echo "  node1's agent knows: $(agentcfg node1 panels)"
+[ "$(agentcfg node1 panels | grep -o https | wc -l)" = 2 ] || { echo "the agents do not know the standby"; exit 1; }
+docker exec basalt-panel systemctl stop basalt-server
+docker exec basalt-standby basalt server promote >/dev/null 2>&1 && { echo "promoted while the standby runs"; exit 1; }
+docker exec basalt-standby systemctl stop basalt-server
+docker exec basalt-standby basalt server promote
+docker exec basalt-standby systemctl start basalt-server
+for i in $(seq 60); do docker exec basalt-standby curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.5; done
+OLD=$API
+API="docker exec basalt-standby curl -sS -b /tmp/j -c /tmp/j -H Content-Type:application/json"
+$API -d '{"email":"admin@example.test","password":"installer test password"}' http://127.0.0.1:8080/api/v1/auth/login >/dev/null
+for i in $(seq 180); do
+  [ "$(agentcfg node1 epoch)" = 1 ] && [ "$(agentcfg panel epoch)" = 1 ] && [ "$(agentcfg standby epoch)" = 1 ] && break
+  sleep 1
+done
+for host in node1 panel standby; do
+  echo "  $host's agent: $(agentcfg $host panel_url), epoch $(agentcfg $host epoch)"
+  [ "$(agentcfg $host epoch)" = 1 ] || { echo "$host's agent is not on the new panel"; exit 1; }
+done
+$API http://127.0.0.1:8080/api/v1/panel | python3 -c 'import sys,json; p=json.load(sys.stdin)["panel"]; print("  new panel:", p); sys.exit(0 if p["epoch"]==1 and not p["superseded"] else 1)'
+$API http://127.0.0.1:8080/api/v1/sites | python3 -c 'import sys,json; l=json.load(sys.stdin)["sites"]; print("  its sites:", [s["name"] for s in l]); sys.exit(0 if any(s["name"]=="shop" for s in l) else "data missing")'
+docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "site down after the takeover"; exit 1; }
+ping_node1() { $API -X POST http://127.0.0.1:8080/api/v1/servers/$NODE/ping | python3 -c 'import sys,json; print("  ping node1 from the new panel:", json.load(sys.stdin)["rtt_ms"], "ms")'; }
+ping_node1
+echo "### the former panel comes back: no server returns to it, it shows it was replaced"
+docker exec basalt-panel systemctl start basalt-server
+for i in $(seq 60); do docker exec basalt-panel curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.5; done
+for i in $(seq 60); do
+  $OLD http://127.0.0.1:8080/api/v1/panel | grep -q '"superseded":{' && break; sleep 1
+done
+$OLD http://127.0.0.1:8080/api/v1/panel | python3 -c 'import sys,json; p=json.load(sys.stdin)["panel"]; print("  former panel:", p); sys.exit(0 if p["superseded"] and p["superseded"]["epoch"]==1 else "it does not know")'
+ping_node1
 echo "### node1 removed from the panel: its agent stops connecting, sites keep running"
 $API -d '{"name":"main"}' http://127.0.0.1:8080/api/v1/sites/$SITE/databases >/dev/null
 docker exec basalt-node1 mariadb -N -e "SHOW DATABASES LIKE 's${SITE}\_%'" | grep -q main || { echo "site database missing"; exit 1; }

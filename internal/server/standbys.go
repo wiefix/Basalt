@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -37,11 +38,13 @@ type standbyView struct {
 	Applied *time.Time `json:"applied_at"`
 	Error   string     `json:"error,omitempty"`
 	Version string     `json:"version,omitempty"`
+	// AgentURL is where agents reach it once it takes over.
+	AgentURL string `json:"agent_url,omitempty"`
 }
 
 func (s *Server) viewStandby(sb *store.Standby) standbyView {
 	v := standbyView{ID: sb.ID, Name: sb.Name, ServerID: sb.ServerID, Enrolled: sb.EnrolledAt != nil,
-		CertExpires: sb.CertExpires, LastSeen: sb.LastSeen, LastIP: sb.LastIP}
+		CertExpires: sb.CertExpires, LastSeen: sb.LastSeen, LastIP: sb.LastIP, AgentURL: sb.AgentURL}
 	if s.standbys == nil {
 		return v
 	}
@@ -150,5 +153,45 @@ func (s *Server) handleDeleteStandby(w http.ResponseWriter, r *http.Request, p *
 		s.standbys.Disconnect(id)
 	}
 	s.audit(r, &p.user.ID, "standby.removed", map[string]any{"standby_id": id, "name": sb.Name})
+	// Agents forget its address.
+	if h, ok := s.agents.(panelHub); ok {
+		go h.PushPanelInfo(context.WithoutCancel(r.Context()))
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// panelHub is the agent channel's view of the panel among its standbys
+// (agenthub.Hub).
+type panelHub interface {
+	Superseded() (epoch int64, at time.Time, ok bool)
+	PushPanelInfo(ctx context.Context)
+}
+
+type panelView struct {
+	// Epoch counts the standbys that took over before this panel.
+	Epoch int64 `json:"epoch"`
+	// Superseded: a standby took over from this panel (its agents came with
+	// a higher epoch and were refused); changes made here reach no server.
+	Superseded *supersededView `json:"superseded"`
+}
+
+type supersededView struct {
+	Epoch int64     `json:"epoch"`
+	At    time.Time `json:"at"` // when an agent last told so
+}
+
+// handlePanel tells whether this panel is still the panel.
+func (s *Server) handlePanel(w http.ResponseWriter, r *http.Request, p *principal) {
+	epoch, err := s.db.PanelEpoch(r.Context())
+	if err != nil {
+		s.internalError(w, r, "load panel epoch", err)
+		return
+	}
+	v := panelView{Epoch: epoch}
+	if h, ok := s.agents.(panelHub); ok {
+		if e, at, ok := h.Superseded(); ok {
+			v.Superseded = &supersededView{Epoch: e, At: at}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"panel": v})
 }

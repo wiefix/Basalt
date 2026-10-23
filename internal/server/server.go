@@ -320,6 +320,7 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("POST /api/v1/servers", s.requireRole(store.RoleAdmin, s.handleCreateServer))
 	rt.Handle("GET /api/v1/servers/{id}", s.requireRole(store.RoleViewer, s.handleGetServer))
 	rt.Handle("DELETE /api/v1/servers/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteServer))
+	rt.Handle("GET /api/v1/panel", s.requireRole(store.RoleUser, s.handlePanel))
 	rt.Handle("GET /api/v1/standbys", s.requireRole(store.RoleAdmin, s.handleListStandbys))
 	rt.Handle("POST /api/v1/standbys", s.requireSession(store.RoleOwner, s.handleCreateStandby))
 	rt.Handle("DELETE /api/v1/standbys/{id}", s.requireSession(store.RoleOwner, s.handleDeleteStandby))

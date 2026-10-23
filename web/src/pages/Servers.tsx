@@ -245,8 +245,10 @@ function StandbysCard({ user }: { user: User }) {
       <div className="card-body stack">
         <p className="muted small" style={{ margin: 0 }}>
           A standby panel on another server keeps a copy of this panel, updated within a second. If this panel's
-          server fails, the standby takes over: run <span className="mono">basalt server promote</span> on it. Sites
-          and apps keep running either way.
+          server fails, make the standby the panel: on it run{" "}
+          <span className="mono">{"systemctl stop basalt-server && basalt server promote && systemctl start basalt-server"}</span>,
+          then point the panel's domain at it. The servers know its address and move to it by themselves; this
+          panel, if it comes back, gets none of them. Sites and apps keep running either way.
         </p>
         {standbys.length > 0 && (
           <div className="table-wrap">
@@ -264,7 +266,11 @@ function StandbysCard({ user }: { user: User }) {
                   <tr key={sb.id}>
                     <td>
                       {sb.server_id ? <Link to={`/servers/${sb.server_id}`}>{sb.name}</Link> : sb.name}
-                      {sb.last_ip && <div className="faint small">{sb.last_ip}</div>}
+                      {(sb.agent_url || sb.last_ip) && (
+                        <div className="faint small mono" title="Where servers reach it once it takes over">
+                          {sb.agent_url ? sb.agent_url.replace(/^https:\/\//, "") : sb.last_ip}
+                        </div>
+                      )}
                     </td>
                     <td>
                       {!sb.enrolled ? (

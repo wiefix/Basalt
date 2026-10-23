@@ -32,6 +32,10 @@ var ErrNotEnrolled = errors.New("agent is not enrolled; run `basalt agent enroll
 type config struct {
 	PanelURL string `json:"panel_url"`
 	ServerID int64  `json:"server_id"`
+	// Panels are the addresses of the panel and its standbys, tried when
+	// PanelURL fails; Epoch is the highest panel epoch seen (PanelInfo).
+	Panels []string `json:"panels,omitempty"`
+	Epoch  int64    `json:"epoch,omitempty"`
 }
 
 // identity is everything the agent needs to authenticate to the panel.

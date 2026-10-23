@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/auth"
 	"github.com/wiefix/basalt/internal/pki"
 	"github.com/wiefix/basalt/internal/store"
@@ -43,6 +44,9 @@ type Feeder struct {
 	now       func() time.Time
 	limiter   *auth.Limiter
 
+	// onAgentURL runs when a standby's agent address changes.
+	onAgentURL func(ctx context.Context)
+
 	mu     sync.Mutex
 	states map[int64]*State
 	cancel map[int64]context.CancelFunc
@@ -56,6 +60,10 @@ func NewFeeder(db *store.DB, ca *pki.CA, src *walship.Source, masterKey []byte, 
 		limiter: auth.NewLimiter(10, 6*time.Second).WithClock(now),
 		states:  map[int64]*State{}, cancel: map[int64]context.CancelFunc{}}
 }
+
+// OnAgentURL registers what to do when a standby reports a new address of
+// its agent port (agents should learn it). Call before serving.
+func (f *Feeder) OnAgentURL(fn func(ctx context.Context)) { f.onAgentURL = fn }
 
 // Register adds the feeder's endpoints to the agents' port.
 func (f *Feeder) Register(mount func(pattern string, h http.HandlerFunc)) {
@@ -231,6 +239,7 @@ func (f *Feeder) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		sc := bufio.NewScanner(r.Body)
 		sc.Buffer(make([]byte, 4096), 4096)
 		last := f.now()
+		agentURL := sb.AgentURL
 		for sc.Scan() {
 			var rep Report
 			if json.Unmarshal(sc.Bytes(), &rep) != nil {
@@ -242,9 +251,21 @@ func (f *Feeder) handleReplicate(w http.ResponseWriter, r *http.Request) {
 			if len(rep.Version) > 64 {
 				rep.Version = rep.Version[:64]
 			}
+			if rep.AgentURL != "" && agentproto.ValidPanelURL(rep.AgentURL) != nil {
+				rep.AgentURL = ""
+			}
 			f.mu.Lock()
 			st.Report, st.ReportAt = rep, f.now()
 			f.mu.Unlock()
+			if rep.AgentURL != "" && rep.AgentURL != agentURL {
+				agentURL = rep.AgentURL
+				changed, err := f.db.SetStandbyAgentURL(ctx, sb.ID, agentURL)
+				if err != nil {
+					f.log.Error("record the standby's agent address", "err", err)
+				} else if changed && f.onAgentURL != nil {
+					go f.onAgentURL(context.WithoutCancel(ctx))
+				}
+			}
 			if now := f.now(); now.Sub(last) >= seenEvery {
 				last = now
 				f.db.SetStandbySeen(ctx, sb.ID, ip, now)

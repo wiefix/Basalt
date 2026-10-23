@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +41,8 @@ type panel struct {
 	hc       *http.Client
 	dataDir  string
 	srv      *server.Server
+	// stop shuts the panel down (also at the end of the test).
+	stop func()
 }
 
 func startPanel(t *testing.T) *panel { return startPanelWith(t, server.Options{}) }
@@ -47,15 +50,27 @@ func startPanel(t *testing.T) *panel { return startPanelWith(t, server.Options{}
 // startPanelWith starts a panel; o supplies options other than the wiring.
 func startPanelWith(t *testing.T, o server.Options) *panel {
 	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := openPanel(t, o, t.TempDir(), ln)
+	p.call(http.StatusCreated, "POST", "/api/v1/setup", map[string]string{
+		"setup_token": "setup", "email": "o@example.com", "name": "O", "password": "owner password 123",
+	})
+	return p
+}
+
+// openPanel runs a panel on the data directory dir (new or not), its agent
+// port on ln.
+func openPanel(t *testing.T, o server.Options, dir string, ln net.Listener) *panel {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	dir := t.TempDir()
 
 	db, err := store.Open(ctx, filepath.Join(dir, "basalt.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { db.Close() })
 	box, err := secrets.LoadOrCreateKey(filepath.Join(dir, "master.key"))
 	if err != nil {
 		t.Fatal(err)
@@ -68,23 +83,22 @@ func startPanelWith(t *testing.T, o server.Options) *panel {
 	if testing.Verbose() {
 		log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	}
+	agentURL := "https://" + ln.Addr().String()
 	hub := agenthub.New(log, db, ca, nil)
+	hub.SetPanelURL(agentURL)
 	// The panel checkpoints its database and feeds standby panels.
 	ship := walship.NewSource(filepath.Join(dir, "basalt.db"), db, log)
-	go ship.Run(ctx)
+	shipDone := make(chan struct{})
+	go func() { ship.Run(ctx); close(shipDone) }()
 	masterKey, err := os.ReadFile(filepath.Join(dir, "master.key"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	feeder := standby.NewFeeder(db, ca, ship, masterKey, log, nil)
 	feeder.Register(hub.Mount)
+	feeder.OnAgentURL(hub.PushPanelInfo)
 	o.Standbys = feeder
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	go hub.ServeListener(ctx, ln)
-	agentURL := "https://" + ln.Addr().String()
+	hubDone := make(chan struct{})
 
 	o.Log, o.DB, o.Box = log, db, box
 	o.Hasher = auth.NewHasher(auth.Argon2Params{Memory: 1024, Time: 1, Threads: 1}, 4)
@@ -101,14 +115,22 @@ func startPanelWith(t *testing.T, o server.Options) *panel {
 	hub.ServeReleases(filepath.Join(o.DataDir, "releases"))
 	hub.OnACMEChallenge(srv.ACMEChallenge)
 	hub.OnHealthReport(srv.HealthReport)
+	go func() { hub.ServeListener(ctx, ln); close(hubDone) }()
 	api := httptest.NewServer(srv.Handler())
-	t.Cleanup(api.Close)
 
 	jar, _ := cookiejar.New(nil)
 	p := &panel{t: t, db: db, hub: hub, agentURL: agentURL, api: api, hc: &http.Client{Jar: jar}, dataDir: o.DataDir, srv: srv}
-	p.call(http.StatusCreated, "POST", "/api/v1/setup", map[string]string{
-		"setup_token": "setup", "email": "o@example.com", "name": "O", "password": "owner password 123",
-	})
+	var once sync.Once
+	p.stop = func() {
+		once.Do(func() {
+			cancel()
+			api.Close()
+			<-hubDone
+			<-shipDone
+			db.Close()
+		})
+	}
+	t.Cleanup(p.stop)
 	return p
 }
 
