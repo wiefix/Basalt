@@ -17,10 +17,10 @@ import (
 	"github.com/wiefix/basalt/internal/standby"
 )
 
-// TestPanelFailover: agents learn where the panel's standby is; when the
-// panel is gone the standby is promoted and they move to it by
-// themselves, and the former panel, back again, gets no agent: it learns
-// it was replaced.
+// TestPanelFailover: agents and standby panels learn where the panel's
+// standbys are; when the panel is gone a standby is promoted and they move
+// to it by themselves, and the former panel, back again, gets neither: it
+// learns it was replaced.
 func TestPanelFailover(t *testing.T) {
 	a := startPanel(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -98,6 +98,46 @@ func TestPanelFailover(t *testing.T) {
 	if _, err := standby.Promote(ctx, dir); err == nil {
 		t.Fatal("promoted while the standby runs")
 	}
+
+	// A second standby, C, which will follow whichever takes over. Its
+	// agent port is not listening: it is a standby.
+	lnC, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cURL := "https://" + lnC.Addr().String()
+	lnC.Close()
+	enr = a.call(http.StatusCreated, "POST", "/api/v1/standbys", map[string]any{"name": "spare-2"})["enrollment"].(map[string]any)
+	dirC := t.TempDir()
+	if _, err := standby.Enroll(ctx, standby.EnrollOptions{DataDir: dirC, PanelURL: a.agentURL, Token: enr["token"].(string),
+		CASHA256: a.hub.CAFingerprint()}); err != nil {
+		t.Fatal(err)
+	}
+	runC := func() (*standby.Client, func()) {
+		c, err := standby.NewClient(dirC, cURL, log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cctx, stop := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { c.Run(cctx); close(done) }()
+		return c, func() { stop(); <-done }
+	}
+	sbC, stopC := runC()
+	defer func() { stopC() }()
+	standbyCfg := func(dir string) (cfg struct {
+		PanelURL string   `json:"panel_url"`
+		Panels   []string `json:"panels"`
+		Epoch    int64    `json:"epoch"`
+	}) {
+		b, _ := os.ReadFile(filepath.Join(dir, standby.FileConfig))
+		json.Unmarshal(b, &cfg)
+		return cfg
+	}
+	eventually(t, "the standbys learn each other's addresses", func() bool {
+		return sbC.Status().Ready && slices.Equal(standbyCfg(dirC).Panels, []string{a.agentURL, bURL, cURL}) &&
+			slices.Equal(standbyCfg(dir).Panels, []string{a.agentURL, bURL, cURL})
+	})
 	a.call(http.StatusCreated, "POST", "/api/v1/dns/zones", map[string]any{"name": "before.test"})
 	applied := c.Status().Applied
 	eventually(t, "the copy takes the change", func() bool { return c.Status().Applied.After(applied) })
@@ -123,13 +163,23 @@ func TestPanelFailover(t *testing.T) {
 	id := mustAtoi(sid)
 	eventually(t, "the agent moves to the new panel", func() bool {
 		cfg := agentCfg()
-		return b.hub.Connected(id) && cfg.PanelURL == bURL && cfg.Epoch == 1 && slices.Equal(cfg.Panels, []string{bURL})
+		return b.hub.Connected(id) && cfg.PanelURL == bURL && cfg.Epoch == 1 && slices.Equal(cfg.Panels, []string{bURL, cURL})
 	})
-	if l := b.call(200, "GET", "/api/v1/standbys", nil)["standbys"].([]any); len(l) != 0 {
-		t.Fatalf("the new panel lists itself as a standby: %v", l)
+	// The other standby follows the new panel by itself.
+	eventually(t, "the other standby follows the new panel", func() bool {
+		st, cfg := sbC.Status(), standbyCfg(dirC)
+		return st.Connected && st.Ready && st.Panel == bURL && cfg.PanelURL == bURL && cfg.Epoch == 1 &&
+			slices.Equal(cfg.Panels, []string{bURL, cURL})
+	})
+	l := b.call(200, "GET", "/api/v1/standbys", nil)["standbys"].([]any)
+	if len(l) != 1 || l[0].(map[string]any)["name"] != "spare-2" || l[0].(map[string]any)["connected"] != true {
+		t.Fatalf("the new panel's standbys: %v", l)
 	}
+	applied = sbC.Status().Applied
+	b.call(http.StatusCreated, "POST", "/api/v1/dns/zones", map[string]any{"name": "after.test"})
+	eventually(t, "the other standby copies the new panel's changes", func() bool { return sbC.Status().Applied.After(applied) })
 	zones := b.call(200, "GET", "/api/v1/dns", nil)["zones"].([]any)
-	if len(zones) != 1 || zones[0].(map[string]any)["name"] != "before.test" {
+	if len(zones) != 2 || zones[1].(map[string]any)["name"] != "before.test" { // and after.test, made here
 		t.Fatalf("zones: %v", zones)
 	}
 	if p := b.call(200, "GET", "/api/v1/panel", nil)["panel"].(map[string]any); p["epoch"] != 1.0 || p["superseded"] != nil {
@@ -145,8 +195,31 @@ func TestPanelFailover(t *testing.T) {
 	}
 	a2 := openPanel(t, server.Options{}, a.dataDir, lnA)
 	a2.call(200, "POST", "/api/v1/auth/login", map[string]string{"email": "o@example.com", "password": "owner password 123"})
+
+	// The other standby is pointed back at the former panel: it is refused,
+	// the former panel learns it was replaced, and the standby goes back.
+	stopC()
+	cfgC := filepath.Join(dirC, standby.FileConfig)
+	raw, _ := os.ReadFile(cfgC)
+	var mc map[string]any
+	json.Unmarshal(raw, &mc)
+	mc["panel_url"] = a.agentURL
+	raw, _ = json.Marshal(mc)
+	if err := os.WriteFile(cfgC, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sbC, stopC = runC()
+	eventually(t, "a standby tells the former panel it was replaced", func() bool {
+		p := a2.call(200, "GET", "/api/v1/panel", nil)["panel"].(map[string]any)
+		s, _ := p["superseded"].(map[string]any)
+		return s != nil && s["epoch"] == 1.0
+	})
+	eventually(t, "the other standby is back on the new panel", func() bool {
+		st := sbC.Status()
+		return st.Connected && st.Panel == bURL && standbyCfg(dirC).PanelURL == bURL
+	})
 	cfgPath := filepath.Join(agentDir, "agent.json")
-	raw, _ := os.ReadFile(cfgPath)
+	raw, _ = os.ReadFile(cfgPath)
 	var m map[string]any
 	json.Unmarshal(raw, &m)
 	m["panel_url"] = a.agentURL
@@ -155,11 +228,6 @@ func TestPanelFailover(t *testing.T) {
 		t.Fatal(err)
 	}
 	stopAgent = runAgent()
-	eventually(t, "the former panel learns it was replaced", func() bool {
-		p := a2.call(200, "GET", "/api/v1/panel", nil)["panel"].(map[string]any)
-		s, _ := p["superseded"].(map[string]any)
-		return s != nil && s["epoch"] == 1.0
-	})
 	eventually(t, "the agent is back on the new panel", func() bool {
 		return agentCfg().PanelURL == bURL && b.hub.Connected(id)
 	})

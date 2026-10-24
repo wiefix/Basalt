@@ -209,6 +209,8 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	standbys := standby.NewFeeder(db, ca, ship, masterKey, baseLog.With("component", "standby"), nil)
 	standbys.Register(hub.Mount)
 	standbys.OnAgentURL(hub.PushPanelInfo)
+	standbys.UseHub(hub)
+	hub.OnPanelInfo(standbys.PushPanels)
 	hub.ServeInstaller(deploy.InstallScript, cfg.BinariesDir)
 	hub.ServeReleases(filepath.Join(cfg.DataDir, "releases"))
 
@@ -299,7 +301,7 @@ func runPromote(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	if !p.LastChange.IsZero() {
 		fmt.Fprintf(stdout, "Its copy has the panel's changes up to about %s (the latest audit log entry).\n", p.LastChange.UTC().Format(time.RFC3339))
 	}
-	fmt.Fprint(stdout, "\nNext:\n  1. Start it: systemctl start basalt-server. Agents that cannot reach the\n     former panel come here by themselves (they learned this address).\n")
+	fmt.Fprint(stdout, "\nNext:\n  1. Start it: systemctl start basalt-server. Agents and the other standby\n     panels that cannot reach the former panel come here by themselves (they\n     learned this address).\n")
 	switch {
 	case p.Zone != "":
 		fmt.Fprintf(stdout, "  2. Point the panel's domain here: %s is in the zone %s of your Basalt\n     DNS. Sign in here and change its A/AAAA records under DNS.\n", p.PanelURL, p.Zone)
@@ -308,7 +310,7 @@ func runPromote(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	default:
 		fmt.Fprint(stdout, "  2. Point the panel's domain, if it has one, at this server.\n")
 	}
-	fmt.Fprint(stdout, "  3. Keep the former panel stopped. If it comes back, its agents stay here\n     (they know the newer epoch) and it shows that it was replaced. To make\n     it a standby of this panel, add a standby panel here and install it there.\n")
+	fmt.Fprint(stdout, "  3. Keep the former panel stopped. If it comes back, its agents and standbys\n     stay here (they know the newer epoch) and it shows that it was replaced.\n     To make it a standby of this panel, add a standby panel here and install\n     it there.\n")
 	return nil
 }
 

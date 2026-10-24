@@ -33,6 +33,7 @@ run standby
 sleep 3
 
 PANELIP=$(docker inspect -f '{{(index .NetworkSettings.Networks "basalt-net").IPAddress}}' basalt-panel)
+STANDBYIP=$(docker inspect -f '{{(index .NetworkSettings.Networks "basalt-net").IPAddress}}' basalt-standby)
 echo "### guided install of the panel (answers typed into a terminal; agents connect to its IP)"
 # Domain: none; agents: the IP; Docker: no; PHP, MariaDB: yes (the panel's
 # server takes a copy of a site); DNS: no; install: yes.
@@ -82,6 +83,23 @@ docker exec basalt-standby curl -fsS http://127.0.0.1:8080/healthz | python3 -c 
 [ "$(docker exec basalt-standby stat -c '%U %a' /var/lib/basalt/server/master.key)" = "basalt 600" ] || { echo "no private master key on the standby"; exit 1; }
 [ "$(docker exec basalt-standby sha256sum /var/lib/basalt/server/master.key | cut -c1-64)" = "$(docker exec basalt-panel sha256sum /var/lib/basalt/server/master.key | cut -c1-64)" ] || { echo "the standby has another master key"; exit 1; }
 docker exec basalt-standby sh -c '! curl -fsS http://127.0.0.1:8080/api/v1/servers >/dev/null 2>&1' || { echo "the standby serves the panel's API"; exit 1; }
+echo "### a second standby panel (by hand on node1, its own data directory): it will follow whichever takes over"
+SB2=$($API -d '{"name":"spare-2"}' http://127.0.0.1:8080/api/v1/standbys)
+SB2TOKEN=$(echo "$SB2" | python3 -c 'import sys,json; print(json.load(sys.stdin)["enrollment"]["token"])')
+SB2CA=$(echo "$SB2" | python3 -c 'import sys,json,re; print(re.search(r"--ca-sha256 (\S+)", json.load(sys.stdin)["enrollment"]["install_command"]).group(1))')
+# Its host is node1, whose agent is enrolled already: the extra server goes.
+$API -X DELETE http://127.0.0.1:8080/api/v1/servers/$(echo "$SB2" | python3 -c 'import sys,json; print(json.load(sys.stdin)["server"]["id"])') >/dev/null
+N1IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "basalt-net").IPAddress}}' basalt-node1)
+docker exec basalt-node1 basalt server standby-enroll --data-dir /var/lib/basalt/spare2 --panel https://$PANELIP:8443 --token "$SB2TOKEN" --ca-sha256 "$SB2CA"
+docker exec basalt-node1 systemd-run --unit basalt-spare2 --quiet /usr/local/bin/basalt server --data-dir /var/lib/basalt/spare2 --listen 127.0.0.1:8090 --agent-url https://$N1IP:8445
+spare2() { # field of its state
+  docker exec basalt-node1 curl -fsS http://127.0.0.1:8090/healthz 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get("'$1'", ""))' 2>/dev/null
+}
+for i in $(seq 60); do [ "$(spare2 ready)" = True ] && break; sleep 1; done
+[ "$(spare2 ready)" = True ] || { docker exec basalt-node1 journalctl -u basalt-spare2 --no-pager | tail -20; echo "the second standby has no copy"; exit 1; }
+for i in $(seq 30); do docker exec basalt-node1 grep -q "https://$N1IP:8445" /var/lib/basalt/spare2/standby.json && break; sleep 1; done
+echo "  the second standby knows: $(docker exec basalt-node1 python3 -c 'import json; print(json.load(open("/var/lib/basalt/spare2/standby.json"))["panels"])')"
+docker exec basalt-node1 grep -q "https://$N1IP:8445" /var/lib/basalt/spare2/standby.json || { echo "the second standby does not know the panel's addresses"; exit 1; }
 echo "### systemd exposure scores (lower is safer)"
 for u in basalt-agent basalt-proxy; do
   echo "  $u: $(docker exec basalt-node1 systemd-analyze security $u.service 2>/dev/null | tail -1)"
@@ -363,7 +381,7 @@ agentcfg() { # host field
   docker exec basalt-$1 cat /var/lib/basalt/agent/agent.json | python3 -c 'import sys,json; print(json.load(sys.stdin).get("'$2'", ""))'
 }
 echo "  node1's agent knows: $(agentcfg node1 panels)"
-[ "$(agentcfg node1 panels | grep -o https | wc -l)" = 2 ] || { echo "the agents do not know the standby"; exit 1; }
+[ "$(agentcfg node1 panels | grep -o https | wc -l | tr -d " ")" = 3 ] || { echo "the agents do not know the standbys"; exit 1; }
 docker exec basalt-panel systemctl stop basalt-server
 docker exec basalt-standby basalt server promote >/dev/null 2>&1 && { echo "promoted while the standby runs"; exit 1; }
 docker exec basalt-standby systemctl stop basalt-server
@@ -386,6 +404,14 @@ $API http://127.0.0.1:8080/api/v1/sites | python3 -c 'import sys,json; l=json.lo
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "site down after the takeover"; exit 1; }
 ping_node1() { $API -X POST http://127.0.0.1:8080/api/v1/servers/$NODE/ping | python3 -c 'import sys,json; print("  ping node1 from the new panel:", json.load(sys.stdin)["rtt_ms"], "ms")'; }
 ping_node1
+for i in $(seq 120); do [ "$(spare2 panel)" = "https://$STANDBYIP:8443" ] && [ "$(spare2 connected)" = True ] && [ "$(spare2 ready)" = True ] && break; sleep 1; done
+echo "  the second standby follows: $(spare2 panel), epoch $(spare2 epoch), ready $(spare2 ready)"
+[ "$(spare2 panel)" = "https://$STANDBYIP:8443" ] && [ "$(spare2 epoch)" = 1 ] && [ "$(spare2 ready)" = True ] || { echo "the second standby did not follow the new panel"; exit 1; }
+new_standbys() {
+  $API http://127.0.0.1:8080/api/v1/standbys | python3 -c 'import sys,json; l=json.load(sys.stdin)["standbys"]; print("  its standbys:", [(s["name"], s["connected"], s["ready"]) for s in l]); sys.exit(0 if [s["name"] for s in l]==["spare-2"] and l[0]["connected"] and l[0]["ready"] else 1)'
+}
+for i in $(seq 30); do new_standbys >/dev/null && break; sleep 1; done
+new_standbys
 echo "### the former panel comes back: no server returns to it, it shows it was replaced"
 docker exec basalt-panel systemctl start basalt-server
 for i in $(seq 60); do docker exec basalt-panel curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.5; done
@@ -394,6 +420,10 @@ for i in $(seq 60); do
 done
 $OLD http://127.0.0.1:8080/api/v1/panel | python3 -c 'import sys,json; p=json.load(sys.stdin)["panel"]; print("  former panel:", p); sys.exit(0 if p["superseded"] and p["superseded"]["epoch"]==1 else "it does not know")'
 ping_node1
+# The second standby stays with the new panel.
+sleep 5
+[ "$(spare2 panel)" = "https://$STANDBYIP:8443" ] && [ "$(spare2 connected)" = True ] || { echo "the second standby left the new panel"; exit 1; }
+docker exec basalt-node1 systemctl stop basalt-spare2
 echo "### node1 removed from the panel: its agent stops connecting, sites keep running"
 $API -d '{"name":"main"}' http://127.0.0.1:8080/api/v1/sites/$SITE/databases >/dev/null
 docker exec basalt-node1 mariadb -N -e "SHOW DATABASES LIKE 's${SITE}\_%'" | grep -q main || { echo "site database missing"; exit 1; }

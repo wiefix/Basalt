@@ -97,6 +97,8 @@ func openPanel(t *testing.T, o server.Options, dir string, ln net.Listener) *pan
 	feeder := standby.NewFeeder(db, ca, ship, masterKey, log, nil)
 	feeder.Register(hub.Mount)
 	feeder.OnAgentURL(hub.PushPanelInfo)
+	feeder.UseHub(hub)
+	hub.OnPanelInfo(feeder.PushPanels)
 	o.Standbys = feeder
 	hubDone := make(chan struct{})
 

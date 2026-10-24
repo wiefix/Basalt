@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -46,10 +47,20 @@ type Feeder struct {
 
 	// onAgentURL runs when a standby's agent address changes.
 	onAgentURL func(ctx context.Context)
+	hub        PanelHub
 
 	mu     sync.Mutex
 	states map[int64]*State
 	cancel map[int64]context.CancelFunc
+	// kick tells a stream to send the panel's addresses again.
+	kick map[int64]chan struct{}
+}
+
+// PanelHub knows the panel's addresses and whether it was replaced
+// (agenthub.Hub).
+type PanelHub interface {
+	PanelInfo(ctx context.Context) (agentproto.PanelInfo, error)
+	MarkSuperseded(ours, theirs int64, why ...any)
 }
 
 func NewFeeder(db *store.DB, ca *pki.CA, src *walship.Source, masterKey []byte, log *slog.Logger, now func() time.Time) *Feeder {
@@ -58,7 +69,24 @@ func NewFeeder(db *store.DB, ca *pki.CA, src *walship.Source, masterKey []byte, 
 	}
 	return &Feeder{db: db, ca: ca, src: src, masterKey: masterKey, log: log, now: now,
 		limiter: auth.NewLimiter(10, 6*time.Second).WithClock(now),
-		states:  map[int64]*State{}, cancel: map[int64]context.CancelFunc{}}
+		states:  map[int64]*State{}, cancel: map[int64]context.CancelFunc{}, kick: map[int64]chan struct{}{}}
+}
+
+// UseHub has the feeder tell standbys the panel's addresses and refuse
+// those that know a newer panel. Call before serving.
+func (f *Feeder) UseHub(h PanelHub) { f.hub = h }
+
+// PushPanels tells every connected standby the panel's addresses again
+// (they changed).
+func (f *Feeder) PushPanels(context.Context) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, k := range f.kick {
+		select {
+		case k <- struct{}{}:
+		default:
+		}
+	}
 }
 
 // OnAgentURL registers what to do when a standby reports a new address of
@@ -146,6 +174,11 @@ func (f *Feeder) issue(ctx context.Context, id int64, csr []byte) ([]byte, error
 // authorize returns the standby the request's certificate belongs to, or
 // answers the request itself.
 func (f *Feeder) authorize(w http.ResponseWriter, r *http.Request) (*store.Standby, bool) {
+	// Before anything else: a former panel must not tell the standby it
+	// was removed, nor give it a certificate.
+	if f.superseded(w, r) {
+		return nil, false
+	}
 	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
 		http.Error(w, "client certificate required", http.StatusUnauthorized)
 		return nil, false
@@ -171,6 +204,27 @@ func (f *Feeder) authorize(w http.ResponseWriter, r *http.Request) (*store.Stand
 		return nil, false
 	}
 	return sb, true
+}
+
+// superseded refuses a standby that knows a newer panel than this one; it
+// writes the response itself. Otherwise it puts this panel's epoch in the
+// response.
+func (f *Feeder) superseded(w http.ResponseWriter, r *http.Request) bool {
+	epoch, err := f.db.PanelEpoch(r.Context())
+	if err != nil {
+		f.internalError(w, "load panel epoch", err)
+		return true
+	}
+	known, err := strconv.ParseInt(r.Header.Get(agentproto.HeaderPanelEpoch), 10, 64)
+	if err == nil && known > epoch {
+		if f.hub != nil {
+			f.hub.MarkSuperseded(epoch, known, "standby_ip", remoteIP(r))
+		}
+		http.Error(w, "this panel was replaced by a standby that took over (epoch "+strconv.FormatInt(known, 10)+")", http.StatusConflict)
+		return true
+	}
+	w.Header().Set(agentproto.HeaderPanelEpoch, strconv.FormatInt(epoch, 10))
+	return false
 }
 
 func (f *Feeder) handleRenew(w http.ResponseWriter, r *http.Request) {
@@ -214,12 +268,22 @@ func (f *Feeder) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	f.cancel[sb.ID] = cancel
 	st := &State{Connected: true, Since: f.now()}
 	f.states[sb.ID] = st
+	// Standbys before 0.6 do not send their epoch nor know the addresses.
+	var kick chan struct{}
+	if f.hub != nil && r.Header.Get(agentproto.HeaderPanelEpoch) != "" {
+		kick = make(chan struct{}, 1)
+		kick <- struct{}{} // the first time, after the master key
+		f.kick[sb.ID] = kick
+	}
 	f.mu.Unlock()
 	defer func() {
 		f.mu.Lock()
 		if f.states[sb.ID] == st {
 			st.Connected = false
 			delete(f.cancel, sb.ID)
+		}
+		if kick != nil && f.kick[sb.ID] == kick {
+			delete(f.kick, sb.ID)
 		}
 		f.mu.Unlock()
 	}()
@@ -291,14 +355,23 @@ func (f *Feeder) handleReplicate(w http.ResponseWriter, r *http.Request) {
 		t := time.NewTicker(pingEvery)
 		defer t.Stop()
 		for {
+			msg := walship.Msg{Kind: kindPing}
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				if send(walship.Msg{Kind: kindPing}) != nil {
-					cancel()
-					return
+			case <-kick: // nil without a hub: never
+				info, err := f.hub.PanelInfo(ctx)
+				if err != nil {
+					f.log.Error("panel addresses", "err", err)
+					continue
 				}
+				msg = walship.Msg{Kind: kindPanels}
+				msg.Data, _ = json.Marshal(info)
+			}
+			if send(msg) != nil {
+				cancel()
+				return
 			}
 		}
 	}()

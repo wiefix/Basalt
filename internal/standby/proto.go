@@ -63,7 +63,17 @@ const (
 const (
 	kindMasterKey walship.Kind = 16 // the panel's master key, first
 	kindPing      walship.Kind = 17
+	// The panel's epoch and the addresses of the panel and its standbys
+	// (JSON agentproto.PanelInfo), after the master key and when they
+	// change; only to standbys that send agentproto.HeaderPanelEpoch.
+	kindPanels walship.Kind = 18
 )
+
+// Like agents, standby panels learn the panel's epoch and addresses: when
+// the panel fails and another standby takes over, they follow that one.
+// Both sides send agentproto.HeaderPanelEpoch: a panel with a lower epoch
+// than the standby knows refuses it (409) and learns it was replaced, and
+// a standby does not follow such a panel.
 
 const (
 	frameHeader = 1 + 8 + 4

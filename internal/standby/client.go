@@ -20,10 +20,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/buildinfo"
 	"github.com/wiefix/basalt/internal/pki"
 	"github.com/wiefix/basalt/internal/walship"
@@ -44,8 +47,12 @@ const (
 var ErrRemoved = errors.New("the panel removed this standby panel")
 
 type config struct {
-	PanelURL  string `json:"panel_url"`
+	PanelURL  string `json:"panel_url"` // the address that last worked
 	StandbyID int64  `json:"standby_id"`
+	// Panels and Epoch are what the panel last told (kindPanels): the
+	// addresses to try when PanelURL fails, and its epoch.
+	Panels []string `json:"panels,omitempty"`
+	Epoch  int64    `json:"epoch,omitempty"`
 }
 
 // IsStandby reports whether dir belongs to a standby panel.
@@ -133,6 +140,10 @@ func postJSON(ctx context.Context, c *http.Client, url string, body, out any) er
 		return err
 	}
 	defer resp.Body.Close()
+	return readJSON(resp, out)
+}
+
+func readJSON(resp *http.Response, out any) error {
 	if resp.StatusCode == http.StatusGone {
 		return ErrRemoved
 	}
@@ -195,13 +206,101 @@ type Status struct {
 	Applied   time.Time `json:"applied"`
 	Error     string    `json:"error,omitempty"`
 	Removed   bool      `json:"removed"`
+	Epoch     int64     `json:"epoch"`
 }
 
 func (c *Client) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return Status{Panel: c.cfg.PanelURL, StandbyID: c.cfg.StandbyID, Connected: c.connected, Ready: c.ready,
-		Applied: c.applied, Error: c.lastErr, Removed: c.removed}
+		Applied: c.applied, Error: c.lastErr, Removed: c.removed, Epoch: c.cfg.Epoch}
+}
+
+// panelURLs are the addresses to try, the one that last worked first. The
+// standby's own address is left out: it answers there only once promoted.
+func (c *Client) panelURLs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := []string{c.cfg.PanelURL}
+	for _, u := range c.cfg.Panels {
+		if u != c.agentURL && !slices.Contains(out, u) {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// updateConfig changes standby.json; change reports whether there is
+// anything to write.
+func (c *Client) updateConfig(change func(*config) bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	next := c.cfg
+	next.Panels = slices.Clone(next.Panels)
+	if !change(&next) {
+		return nil
+	}
+	b, _ := json.MarshalIndent(next, "", "  ")
+	if err := writeAtomic(filepath.Join(c.dir, FileConfig), b, 0o600); err != nil {
+		return err
+	}
+	c.cfg = next
+	return nil
+}
+
+// setPanels records what the panel says of itself and its standbys.
+func (c *Client) setPanels(data []byte) error {
+	var info agentproto.PanelInfo
+	if err := json.Unmarshal(data, &info); err != nil || info.Epoch < 0 || len(info.Panels) > agentproto.MaxPanels {
+		return errors.New("the panel sent invalid addresses")
+	}
+	for _, u := range info.Panels {
+		if err := agentproto.ValidPanelURL(u); err != nil {
+			return fmt.Errorf("the panel sent an invalid address %s: %w", u, err)
+		}
+	}
+	return c.updateConfig(func(cfg *config) bool {
+		if info.Epoch < cfg.Epoch || (info.Epoch == cfg.Epoch && slices.Equal(info.Panels, cfg.Panels)) {
+			return false
+		}
+		if info.Epoch > cfg.Epoch && c.log != nil {
+			c.log.Info("the panel was taken over by a standby", "epoch", info.Epoch)
+		}
+		cfg.Epoch, cfg.Panels = info.Epoch, slices.Clone(info.Panels)
+		return true
+	})
+}
+
+// usePanel remembers the address that worked, to try it first.
+func (c *Client) usePanel(u string) error {
+	return c.updateConfig(func(cfg *config) bool {
+		if cfg.PanelURL == u {
+			return false
+		}
+		c.log.Info("following the panel at another address from now on", "panel", u, "was", cfg.PanelURL)
+		cfg.PanelURL = u
+		return true
+	})
+}
+
+func (c *Client) epoch() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.cfg.Epoch
+}
+
+// checkEpoch refuses a panel older than the one the standby knows (it was
+// replaced): it would hand out a stale database.
+func (c *Client) checkEpoch(resp *http.Response) error {
+	known := c.epoch()
+	if known == 0 {
+		return nil
+	}
+	got, err := strconv.ParseInt(resp.Header.Get(agentproto.HeaderPanelEpoch), 10, 64)
+	if err != nil || got < known {
+		return fmt.Errorf("the panel there was replaced by a standby that took over (epoch %d)", known)
+	}
+	return nil
 }
 
 func (c *Client) tlsCert() *tls.Certificate {
@@ -250,30 +349,36 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 	backoff := time.Second
 	for {
-		c.renew(ctx)
-		start := time.Now()
-		err := c.follow(ctx)
-		c.mu.Lock()
-		c.connected = false
-		if err != nil && ctx.Err() == nil {
-			c.lastErr = err.Error()
-		}
-		c.mu.Unlock()
-		if ctx.Err() != nil {
-			return nil
-		}
-		if errors.Is(err, ErrRemoved) {
-			os.WriteFile(filepath.Join(c.dir, fileRemoved), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
+		// The addresses in turn: the next one at once when one cannot be
+		// followed, a pause after a whole round or a stream that ended.
+		for _, u := range c.panelURLs() {
+			start := time.Now()
+			connected, err := c.follow(ctx, u)
 			c.mu.Lock()
-			c.removed = true
+			c.connected = false
+			if err != nil && ctx.Err() == nil {
+				c.lastErr = err.Error()
+			}
 			c.mu.Unlock()
-			c.log.Error("the panel removed this standby panel; not following it any more")
-			<-ctx.Done()
-			return nil
-		}
-		c.log.Warn("standby stream ended", "err", err)
-		if time.Since(start) > time.Minute {
-			backoff = time.Second
+			if ctx.Err() != nil {
+				return nil
+			}
+			if errors.Is(err, ErrRemoved) {
+				os.WriteFile(filepath.Join(c.dir, fileRemoved), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600)
+				c.mu.Lock()
+				c.removed = true
+				c.mu.Unlock()
+				c.log.Error("the panel removed this standby panel; not following it any more")
+				<-ctx.Done()
+				return nil
+			}
+			c.log.Warn("standby stream ended", "panel", u, "err", err)
+			if connected {
+				if time.Since(start) > time.Minute {
+					backoff = time.Second
+				}
+				break
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -285,7 +390,7 @@ func (c *Client) Run(ctx context.Context) error {
 }
 
 // renew gets a new certificate once a third of the current one is left.
-func (c *Client) renew(ctx context.Context) {
+func (c *Client) renew(ctx context.Context, panel string) {
 	c.mu.Lock()
 	cert := c.cert
 	c.mu.Unlock()
@@ -301,7 +406,7 @@ func (c *Client) renew(ctx context.Context) {
 		return
 	}
 	var resp RenewResponse
-	if err := postJSON(ctx, c.httpClient(30*time.Second), c.cfg.PanelURL+PathRenew, RenewRequest{CSR: csr}, &resp); err != nil {
+	if err := c.postJSON(ctx, panel+PathRenew, RenewRequest{CSR: csr}, &resp); err != nil {
 		c.log.Warn("renew the standby certificate", "err", err)
 		return
 	}
@@ -320,33 +425,68 @@ func (c *Client) renew(ctx context.Context) {
 	c.log.Info("standby certificate renewed", "until", nc.NotAfter)
 }
 
-// follow runs one stream: the master key, then the copy of the database.
-func (c *Client) follow(ctx context.Context) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	pr, pw := io.Pipe()
-	defer pw.Close()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.PanelURL+PathReplicate, pr)
+// postJSON is a request to the panel at url, with the epoch the standby
+// knows; a panel older than that is not believed.
+func (c *Client) postJSON(ctx context.Context, url string, body, out any) error {
+	b, _ := json.Marshal(body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/x-ndjson")
-	resp, err := c.httpClient(0).Do(req)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(agentproto.HeaderPanelEpoch, strconv.FormatInt(c.epoch(), 10))
+	resp, err := c.httpClient(30 * time.Second).Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
+	if err := c.checkEpoch(resp); err != nil {
+		return err
+	}
+	return readJSON(resp, out)
+}
+
+// follow runs one stream from the panel at panel: the master key, then the
+// copy of the database. connected: the panel took the standby.
+func (c *Client) follow(ctx context.Context, panel string) (connected bool, err error) {
+	c.renew(ctx, panel)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, panel+PathReplicate, pr)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/x-ndjson")
+	req.Header.Set(agentproto.HeaderPanelEpoch, strconv.FormatInt(c.epoch(), 10))
+	resp, err := c.httpClient(0).Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusGone {
-		return ErrRemoved
+		return false, ErrRemoved
 	}
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("the panel refused (%s): %s", resp.Status, strings.TrimSpace(string(msg)))
+		return false, fmt.Errorf("the panel at %s refused (%s): %s", panel, resp.Status, strings.TrimSpace(string(msg)))
+	}
+	if err := c.checkEpoch(resp); err != nil {
+		return false, fmt.Errorf("%s: %w", panel, err)
+	}
+	if err := c.usePanel(panel); err != nil {
+		return true, err
 	}
 	c.mu.Lock()
 	c.connected, c.lastErr = true, ""
 	c.mu.Unlock()
-	c.log.Info("following the panel", "panel", c.cfg.PanelURL)
+	c.log.Info("following the panel", "panel", panel)
+	return true, c.stream(ctx, cancel, resp, pw)
+}
+
+// stream applies what the panel sends and reports back until it ends.
+func (c *Client) stream(ctx context.Context, cancel context.CancelFunc, resp *http.Response, pw *io.PipeWriter) error {
 
 	m := walship.NewMirror(filepath.Join(c.dir, fileDB))
 	defer func() {
@@ -394,6 +534,11 @@ func (c *Client) follow(ctx context.Context) error {
 			continue
 		case kindMasterKey:
 			if err := c.saveKey(msg.Data); err != nil {
+				return err
+			}
+			continue
+		case kindPanels:
+			if err := c.setPanels(msg.Data); err != nil {
 				return err
 			}
 			continue

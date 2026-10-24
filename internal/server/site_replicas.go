@@ -22,8 +22,8 @@ import (
 // work; the panel copies them one way to the replicas every minute, so a
 // change made on a replica itself is undone. DNS answers with the servers
 // whose copy passes its health check, as for apps. A site's MariaDB
-// databases live on one server, so a site with databases is not
-// replicated.
+// databases are replicated to the copies separately (dbrepl.go), and the
+// copies write to the primary's through the servers' tunnel.
 
 const (
 	siteSyncEvery   = time.Minute

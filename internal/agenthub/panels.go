@@ -28,6 +28,8 @@ type panelState struct {
 	// Superseded: an agent knew a higher epoch (a standby took over).
 	supersededBy int64
 	supersededAt time.Time
+	// onInfo runs when the addresses change (standby panels learn them).
+	onInfo func(ctx context.Context)
 }
 
 // SetPanelURL sets the address agents reach this panel's agent port at.
@@ -73,9 +75,16 @@ func (h *Hub) PanelInfo(ctx context.Context) (agentproto.PanelInfo, error) {
 	return info, nil
 }
 
+// OnPanelInfo registers what else to tell when the panel's addresses
+// change (the standby panels). Call before serving.
+func (h *Hub) OnPanelInfo(fn func(ctx context.Context)) { h.panel.onInfo = fn }
+
 // PushPanelInfo tells every connected agent the panel's addresses (a
 // standby was added, removed or moved).
 func (h *Hub) PushPanelInfo(ctx context.Context) {
+	if h.panel.onInfo != nil {
+		h.panel.onInfo(ctx)
+	}
 	h.mu.Lock()
 	ids := make([]int64, 0, len(h.conns))
 	for id := range h.conns {
@@ -116,13 +125,14 @@ func (h *Hub) superseded(w http.ResponseWriter, r *http.Request, id int64) bool 
 	if known <= epoch {
 		return false
 	}
-	h.markSuperseded(epoch, known, "server_id", id)
+	h.MarkSuperseded(epoch, known, "server_id", id)
 	http.Error(w, "this panel was replaced by a standby that took over (epoch "+strconv.FormatInt(known, 10)+")", http.StatusConflict)
 	return true
 }
 
-// markSuperseded records that a panel of a higher epoch took over.
-func (h *Hub) markSuperseded(ours, theirs int64, why ...any) {
+// MarkSuperseded records that a panel of a higher epoch took over (an
+// agent or a standby panel knew it).
+func (h *Hub) MarkSuperseded(ours, theirs int64, why ...any) {
 	h.mu.Lock()
 	first := h.panel.supersededBy == 0
 	h.panel.supersededBy, h.panel.supersededAt = max(h.panel.supersededBy, theirs), h.now()
@@ -193,7 +203,7 @@ func (h *Hub) checkTakeover(ctx context.Context) {
 		err = json.NewDecoder(io.LimitReader(resp.Body, 1024)).Decode(&v)
 		resp.Body.Close()
 		if err == nil && resp.StatusCode == http.StatusOK && v.Epoch > ours {
-			h.markSuperseded(ours, v.Epoch, "standby", sb.Name)
+			h.MarkSuperseded(ours, v.Epoch, "standby", sb.Name)
 		}
 	}
 }

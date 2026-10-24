@@ -247,7 +247,7 @@ function StandbysCard({ user }: { user: User }) {
           A standby panel on another server keeps a copy of this panel, updated within a second. If this panel's
           server fails, make the standby the panel: on it run{" "}
           <span className="mono">{"systemctl stop basalt-server && basalt server promote && systemctl start basalt-server"}</span>,
-          then point the panel's domain at it. The servers know its address and move to it by themselves; this
+          then point the panel's domain at it. The servers and the other standby panels know its address and move to it by themselves; this
           panel, if it comes back, gets none of them. Sites and apps keep running either way.
         </p>
         {standbys.length > 0 && (
