@@ -87,6 +87,7 @@ export const checks = [
   fits<Returns<A["standbys"]>>()<G.GetStandbysResponse>(),
   fits<Returns<A["createStandby"]>>()<G.PostStandbysResponse>(),
   fits<Returns<A["deleteStandby"]>>()<G.DeleteStandbysIdResponse>(),
+  fits<Returns<A["setFailover"]>>()<G.PutStandbysFailoverResponse>(),
   fits<Returns<A["updates"]>>()<G.GetUpdatesResponse>(),
   fits<Returns<A["checkUpdates"]>>()<G.PostUpdatesCheckResponse>(),
   fits<Returns<A["applyUpdate"]>>()<G.PostUpdatesApplyResponse>(),

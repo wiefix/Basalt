@@ -243,6 +243,13 @@ func (a *Agent) applySource(ctx context.Context, db *mariadb.Server, s agentprot
 		if err := db.Source(ctx, conn, s.Port, s.Password); err != nil {
 			return fail(err)
 		}
+		// A new connection starts with no databases (MariaDB may keep the
+		// filters of a former one of the same name): each is seeded.
+		if status == nil {
+			if err := db.SetFilter(ctx, conn, nil); err != nil {
+				return fail(err)
+			}
+		}
 		if a.dbrepl.sources == nil {
 			a.dbrepl.sources = map[string]string{}
 		}

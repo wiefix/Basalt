@@ -87,6 +87,14 @@ export interface Standby {
   agent_url?: string; // where agents reach it once it takes over
 }
 
+// The standby that takes over by itself when the panel is gone (0: none),
+// after how long, and the servers it asks first.
+export interface Failover {
+  standby_id: number;
+  after_s: number;
+  witnesses: { server_id: number; name: string; addr: string }[];
+}
+
 // This panel's place among its standbys: superseded when a standby took
 // over from it (its agents went there).
 export interface PanelState {
@@ -1004,7 +1012,8 @@ export const api = {
     post<{ enrollment: Enrollment }>(`/api/v1/servers/${id}/enroll-token`),
   deleteServer: (id: number) => del<void>(`/api/v1/servers/${id}`),
   panel: () => get<{ panel: PanelState }>("/api/v1/panel"),
-  standbys: () => get<{ standbys: Standby[]; available: boolean }>("/api/v1/standbys"),
+  standbys: () => get<{ standbys: Standby[]; available: boolean; failover: Failover }>("/api/v1/standbys"),
+  setFailover: (b: { standby_id: number; after_s: number }) => put<{ failover: Failover }>("/api/v1/standbys/failover", b),
   createStandby: (name: string) =>
     post<{ standby: Standby; server: Server; enrollment: { token: string; expires_at: string; install_command: string } }>(
       "/api/v1/standbys",

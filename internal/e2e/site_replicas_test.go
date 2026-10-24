@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -100,6 +101,17 @@ func TestSiteReplicas(t *testing.T) {
 	if copyOf("logs/replica.log") == nil {
 		t.Fatal("the copy's own logs went")
 	}
+
+	// A change on the primary is copied at once: its agent watches the
+	// files (inotify, Linux) and tells the panel; elsewhere the test tells
+	// it. The panel's round every minute does not run here.
+	h1id := mustAtoi(h1.id)
+	blogID := mustAtoi(blog)
+	put("/public/index.html", []byte("three"))
+	if runtime.GOOS != "linux" {
+		p.srv.SiteChanged(h1id, []int64{blogID})
+	}
+	eventually(t, "the change copied by itself", func() bool { return string(copyOf("public/index.html")) == "three" })
 
 	// Both servers serve the domain with DNS-01; removing the replica moves
 	// its copy to that server's trash.

@@ -232,6 +232,22 @@ func TestLinuxDBReplication(t *testing.T) {
 	if out, err := sqlOn(t, dst, user, pw, "INSERT INTO "+db+".t VALUES (22, 'x')"); err == nil {
 		t.Fatalf("the copy takes writes again: %s", out)
 	}
+	// The first server, after it was a copy once, becomes one again: its
+	// copy starts over (MariaDB keeps the filters of a removed connection
+	// by its name: the new one must not inherit them and skip the seed),
+	// so what only it had is gone.
+	mustSQL(src, "root", "", "SET sql_log_bin = 0; INSERT INTO "+db+".t VALUES (30, 'only-here')")
+	p.call(200, "PUT", base+"/primary", map[string]any{"server_id": mustAtoi(h2.id)})
+	waitFor(t, "the first server's copy made again", 60*time.Second, func() bool {
+		out, _ := sqlOn(t, src, "root", "", "SELECT COUNT(*) FROM "+db+".t WHERE id = 30")
+		d := copyStateOf(p, base, h1.id)
+		return out == "0" && d != nil && d["running"] == true
+	}, func() string { return jsonString(p.call(200, "GET", base, nil)["placements"]) })
+	p.call(200, "PUT", base+"/primary", map[string]any{"server_id": mustAtoi(h1.id)})
+	waitFor(t, "the second server copying again", 60*time.Second, func() bool {
+		d := copyState()
+		return d != nil && d["running"] == true
+	}, func() string { return jsonString(p.call(200, "GET", base, nil)["placements"]) })
 	p.call(http.StatusUnprocessableEntity, "PUT", base+"/primary", map[string]any{"server_id": mustAtoi(h1.id)})
 
 	// Taking the copy away drops the databases there.
@@ -254,6 +270,17 @@ func TestLinuxDBReplication(t *testing.T) {
 	if !strings.Contains(string(b), "server_id = "+h1.id) || !strings.Contains(string(b), "log_bin") {
 		t.Fatalf("one.cnf:\n%s", b)
 	}
+}
+
+// copyStateOf is how server id copies the site's databases.
+func copyStateOf(p *panel, base, id string) map[string]any {
+	for _, pl := range p.call(200, "GET", base, nil)["placements"].([]any) {
+		if pl := pl.(map[string]any); jsonID(pl["server_id"]) == id {
+			d, _ := pl["databases"].(map[string]any)
+			return d
+		}
+	}
+	return nil
 }
 
 func mariadbUp(socket string) bool {

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"time"
 
 	"github.com/wiefix/basalt/internal/walship"
@@ -67,7 +68,51 @@ const (
 	// (JSON agentproto.PanelInfo), after the master key and when they
 	// change; only to standbys that send agentproto.HeaderPanelEpoch.
 	kindPanels walship.Kind = 18
+	// Whether this standby takes over by itself, and whom it asks first
+	// (JSON Failover), with kindPanels.
+	kindFailover walship.Kind = 19
 )
+
+// Failover is how a standby takes over by itself when the panel is gone:
+// once it has not reached the panel for After seconds, it asks the
+// Witnesses (the agents of other servers, through their tunnel, service
+// agentproto.ServicePanelStatus); it becomes the panel only if most of
+// them do not reach the panel either, none does, and none knows a newer
+// panel.
+type Failover struct {
+	Auto      bool      `json:"auto"`
+	After     int64     `json:"after_s,omitempty"`
+	Witnesses []Witness `json:"witnesses,omitempty"`
+}
+
+type Witness struct {
+	ServerID int64  `json:"server_id"`
+	Addr     string `json:"addr"` // host:port of its tunnel
+}
+
+// MaxWitnesses bounds the servers a standby asks.
+const MaxWitnesses = 64
+
+func (f Failover) Validate() error {
+	if !f.Auto {
+		return nil
+	}
+	if f.After < 1 || f.After > 86400 {
+		return errors.New("invalid failover delay")
+	}
+	if len(f.Witnesses) == 0 || len(f.Witnesses) > MaxWitnesses {
+		return errors.New("a standby that takes over by itself needs 1 to 64 servers to ask")
+	}
+	for _, w := range f.Witnesses {
+		if w.ServerID <= 0 {
+			return errors.New("invalid witness")
+		}
+		if _, port, err := net.SplitHostPort(w.Addr); err != nil || port == "" || len(w.Addr) > 300 {
+			return fmt.Errorf("invalid witness address %q", w.Addr)
+		}
+	}
+	return nil
+}
 
 // Like agents, standby panels learn the panel's epoch and addresses: when
 // the panel fails and another standby takes over, they follow that one.

@@ -148,3 +148,58 @@ func TestTunnel(t *testing.T) {
 		}
 	}
 }
+
+// TestPanelStatusService: any certificate of the panel's CA, a standby
+// panel's included, may ask whether the agent reaches the panel; nothing
+// else is open to a standby, and a foreign certificate gets nothing.
+func TestPanelStatusService(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ca, _ := pki.NewCA("test", time.Now())
+	other, _ := pki.NewCA("other", time.Now())
+	cert := agentCert(t, ca, 1)
+	m := newTunnelManager(Config{PeerListen: "127.0.0.1:0", MySQLSocket: "/nonexistent"}, func() tls.Certificate { return cert },
+		func() *x509.Certificate { return ca.Cert }, log)
+	m.status = func() agentproto.PanelStatus { return agentproto.PanelStatus{Connected: false, For: 42, Epoch: 3} }
+	m.apply(ctx, agentproto.PeerApply{Revision: 1, Services: map[string][]int64{agentproto.ServiceMariaDB: {2}}})
+	go m.run(ctx, m.open())
+	port, _ := m.Status()
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+
+	standbyCert := func(root *pki.CA) tls.Certificate {
+		key, _ := pki.NewKey()
+		csr, _ := pki.NewCSR(key)
+		der, err := root.SignStandby(csr, 5, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+	}
+	ask := func(c tls.Certificate, service string) (string, error) {
+		conn, err := tls.Dial("tcp", addr, &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{c}, InsecureSkipVerify: true})
+		if err != nil {
+			return "", err
+		}
+		defer conn.Close()
+		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		if _, err := conn.Write([]byte(`{"service":"` + service + `"}` + "\n")); err != nil {
+			return "", err
+		}
+		b, err := io.ReadAll(bufio.NewReader(conn))
+		return string(b), err
+	}
+	got, err := ask(standbyCert(ca), agentproto.ServicePanelStatus)
+	if err != nil || got != `{"ok":true}`+"\n"+`{"connected":false,"for_s":42,"epoch":3}`+"\n" {
+		t.Fatalf("standby asks the status: %q %v", got, err)
+	}
+	if got, _ := ask(agentCert(t, ca, 9), agentproto.ServicePanelStatus); got == "" {
+		t.Fatal("an agent cannot ask the status")
+	}
+	if got, _ := ask(standbyCert(ca), agentproto.ServiceMariaDB); got != `{"ok":false,"error":"not allowed"}`+"\n" {
+		t.Fatalf("standby reached MariaDB: %q", got)
+	}
+	if got, _ := ask(standbyCert(other), agentproto.ServicePanelStatus); got != "" {
+		t.Fatalf("a foreign certificate got an answer: %q", got)
+	}
+}

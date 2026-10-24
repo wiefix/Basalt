@@ -56,7 +56,7 @@ export function SitePage({ user: me }: { user: User }) {
       )}
       {s.replicas.length > 0 && (
         <div className="alert" style={{ marginBottom: 16 }}>
-          Served by {s.replicas.length + 1} servers: the files here are copied to the others every minute. Change them here (or over SFTP to
+          Served by {s.replicas.length + 1} servers: the files here are copied to the others seconds after they change. Change them here (or over SFTP to
           this server) only — changes made on another server are undone.
           {site.data.placements?.some((p) => p.databases) &&
             " Its databases live here too: the copies on the other servers use them through the servers' tunnel (with “localhost” as the database host), and keep read-only copies for a switch-over."}
@@ -281,8 +281,8 @@ function SiteServersCard({ site, placements, user, me }: { site: Site; placement
       <div className="card-body stack">
         <p className="faint small" style={{ margin: 0 }}>
           {list.length > 1
-            ? "The files are copied from the primary to the others every minute (not the logs), and its MariaDB databases as they change (read-only there). DNS answers with the servers whose copy passes its health check (HTTPS on /, editable under Monitoring); certificates come through DNS."
-            : "Serve the site from more servers for failover: its files are copied there every minute, its databases as they change, and DNS answers only with the servers whose copy is up. It needs domains in a zone under DNS; databases also need MariaDB on both servers and the servers' tunnel (port 8444 open between them)."}
+            ? "The files are copied from the primary to the others seconds after they change, and checked every minute (not the logs), and its MariaDB databases as they change (read-only there). DNS answers with the servers whose copy passes its health check (HTTPS on /, editable under Monitoring); certificates come through DNS."
+            : "Serve the site from more servers for failover: its files are copied there seconds after they change, its databases as they change, and DNS answers only with the servers whose copy is up. It needs domains in a zone under DNS; databases also need MariaDB on both servers and the servers' tunnel (port 8444 open between them)."}
         </p>
         {admin &&
           (candidates.length === 0 ? (

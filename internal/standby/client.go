@@ -53,6 +53,8 @@ type config struct {
 	// addresses to try when PanelURL fails, and its epoch.
 	Panels []string `json:"panels,omitempty"`
 	Epoch  int64    `json:"epoch,omitempty"`
+	// Failover: this standby takes over by itself (kindFailover).
+	Failover *Failover `json:"failover,omitempty"`
 }
 
 // IsStandby reports whether dir belongs to a standby panel.
@@ -172,6 +174,9 @@ type Client struct {
 	applied   time.Time
 	lastErr   string
 	removed   bool
+	// lostAt: since when the panel is not followed.
+	lostAt       time.Time
+	failoverNote string // why it did not take over by itself
 }
 
 // NewClient loads the standby panel in dir; agentURL is the address of its
@@ -207,13 +212,22 @@ type Status struct {
 	Error     string    `json:"error,omitempty"`
 	Removed   bool      `json:"removed"`
 	Epoch     int64     `json:"epoch"`
+	// AutoFailover: it takes over by itself after AfterS seconds without
+	// the panel; Note: what the servers said the last time it asked.
+	AutoFailover bool   `json:"auto_failover"`
+	AfterS       int64  `json:"after_s,omitempty"`
+	Note         string `json:"failover_note,omitempty"`
 }
 
 func (c *Client) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return Status{Panel: c.cfg.PanelURL, StandbyID: c.cfg.StandbyID, Connected: c.connected, Ready: c.ready,
+	st := Status{Panel: c.cfg.PanelURL, StandbyID: c.cfg.StandbyID, Connected: c.connected, Ready: c.ready,
 		Applied: c.applied, Error: c.lastErr, Removed: c.removed, Epoch: c.cfg.Epoch}
+	if f := c.cfg.Failover; f != nil {
+		st.AutoFailover, st.AfterS, st.Note = true, f.After, c.failoverNote
+	}
+	return st
 }
 
 // panelURLs are the addresses to try, the one that last worked first. The
@@ -347,6 +361,13 @@ func (c *Client) Run(ctx context.Context) error {
 		<-ctx.Done()
 		return nil
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	takeOver := false
+	c.mu.Lock()
+	c.lostAt = time.Now()
+	c.mu.Unlock()
+	go c.watchPanel(ctx, func() { takeOver = true; cancel() })
 	backoff := time.Second
 	for {
 		// The addresses in turn: the next one at once when one cannot be
@@ -356,11 +377,17 @@ func (c *Client) Run(ctx context.Context) error {
 			connected, err := c.follow(ctx, u)
 			c.mu.Lock()
 			c.connected = false
+			if connected {
+				c.lostAt = time.Now()
+			}
 			if err != nil && ctx.Err() == nil {
 				c.lastErr = err.Error()
 			}
 			c.mu.Unlock()
 			if ctx.Err() != nil {
+				if takeOver {
+					return ErrTakeOver
+				}
 				return nil
 			}
 			if errors.Is(err, ErrRemoved) {
@@ -382,6 +409,9 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		select {
 		case <-ctx.Done():
+			if takeOver {
+				return ErrTakeOver
+			}
 			return nil
 		case <-time.After(backoff + time.Duration(rand.Int64N(int64(backoff)/2+1))):
 		}
@@ -542,6 +572,11 @@ func (c *Client) stream(ctx context.Context, cancel context.CancelFunc, resp *ht
 				return err
 			}
 			continue
+		case kindFailover:
+			if err := c.setFailover(msg.Data); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := m.Apply(ctx, msg); err != nil {
 			return fmt.Errorf("apply the panel's changes: %w", err)
@@ -575,6 +610,7 @@ var page = template.Must(template.New("standby").Parse(`<!doctype html>
 {{else if .Ready}}<p>The copy is complete{{if not .Applied.IsZero}}; it last changed {{.Applied.UTC.Format "2006-01-02 15:04:05"}} UTC{{end}}.{{if not .Connected}} The panel cannot be reached now.{{end}}</p>
 {{else if .Connected}}<p>Copying the panel…</p>
 {{else}}<p>The panel cannot be reached{{if .Error}}: {{.Error}}{{end}}.</p>{{end}}
+{{if .AutoFailover}}<p>It becomes the panel by itself once the panel has been unreachable for {{.AfterS}} seconds and most of the servers it asks cannot reach it either.{{if .Note}} Last time it asked: {{.Note}}.{{end}}</p>{{end}}
 <p>To make this server the panel (when the panel is gone): <code>systemctl stop basalt-server &amp;&amp; basalt server promote &amp;&amp; systemctl start basalt-server</code>, then point the panel's domain here.</p>
 </body></html>`))
 

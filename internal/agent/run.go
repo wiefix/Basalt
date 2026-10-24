@@ -132,6 +132,8 @@ type Agent struct {
 	docker      string
 
 	health      *healthManager
+	link        panelLink
+	watch       *siteWatcher
 	mailCheck   *mailcheck.Checker
 	mailCheckMu sync.Mutex // one deliverability check at a time
 
@@ -182,6 +184,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		dns:             newDNSManager(cfg, log.With("subsystem", "dns")),
 		acme:            newACMERelay(cfg, log.With("subsystem", "acme")),
 		health:          newHealthManager(log.With("subsystem", "health")),
+		watch:           newSiteWatcher(log.With("subsystem", "sitewatch"), sites.root),
 		mailCheck:       &mailcheck.Checker{Resolvers: cfg.Resolvers, SMTPProbes: cfg.MailCheckProbes},
 		apps:            apps,
 		backups:         backups,
@@ -201,6 +204,8 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	a.tunnel = newTunnelManager(cfg, func() tls.Certificate { return a.identity().tlsCertificate() },
 		func() *x509.Certificate { return a.identity().ca }, log.With("subsystem", "tunnel"))
 	a.siteDB = newSiteDBs(cfg, a.tunnel, log.With("subsystem", "sitedb"))
+	a.link.set(false) // not connected since the agent started
+	a.tunnel.status = a.panelStatus
 	return a, nil
 }
 
@@ -231,6 +236,8 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.acme.run(ctx)
 	go a.apps.run(ctx)
 	defer a.health.stop()
+	a.watch.start()
+	defer a.watch.close()
 
 	if b, err := os.ReadFile(filepath.Join(a.dir, fileRemoved)); err == nil {
 		a.log.Error("this server was removed from the panel; not connecting", "removed", strings.TrimSpace(string(b)), "help", removedHelp)
@@ -339,6 +346,8 @@ func (a *Agent) session(ctx context.Context, url string) (connected bool, err er
 	if err := a.usePanel(url); err != nil {
 		a.log.Warn("remember the panel's address", "err", err)
 	}
+	a.link.set(true)
+	defer a.link.set(false)
 
 	peer := agentproto.NewPeer(resp.Body, pw, nil, a.handle)
 	runErr := make(chan error, 1)
@@ -364,6 +373,7 @@ func (a *Agent) session(ctx context.Context, url string) (connected bool, err er
 	go a.maybeRenew(ctx, peer)
 	go a.reportMetrics(ctx, peer)
 	go a.health.report(ctx, peer)
+	go a.watch.report(ctx, peer)
 
 	return true, <-runErr
 }
@@ -480,6 +490,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return struct{}{}, a.tunnel.apply(context.WithoutCancel(ctx), req)
+	case agentproto.TypeSiteWatch:
+		var req agentproto.SiteWatch
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.watch.apply(req)
 	case agentproto.TypeHealthApply:
 		var req agentproto.HealthApply
 		if err := json.Unmarshal(payload, &req); err != nil {

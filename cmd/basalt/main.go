@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -119,11 +120,16 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	baseLog := log
-	log = log.With("component", "server")
 	compose.SilenceLibraryLogs()
+	return runPanel(ctx, cfg, log)
+}
+
+// runPanel runs the panel, or the standby panel the data directory belongs
+// to (which goes on as the panel if it takes over).
+func runPanel(ctx context.Context, cfg config.Server, baseLog *slog.Logger) error {
+	log := baseLog.With("component", "server")
 	if standby.IsStandby(cfg.DataDir) {
-		return runStandby(ctx, cfg, log)
+		return runStandby(ctx, cfg, baseLog)
 	}
 
 	dbPath := filepath.Join(cfg.DataDir, "basalt.db")
@@ -135,6 +141,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	// Checkpoints the database (store turns SQLite's own off) and feeds
 	// standby panels.
 	ship := walship.NewSource(dbPath, db, baseLog.With("component", "walship"))
+	if err := db.GuessPanelServer(ctx); err != nil {
+		log.Warn("find the panel's own server", "err", err)
+	}
 
 	instanceID, err := db.InstanceID(ctx)
 	if err != nil {
@@ -236,6 +245,8 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 	hub.OnConnect(api.SyncSites)
 	hub.OnACMEChallenge(api.ACMEChallenge)
 	hub.OnHealthReport(api.HealthReport)
+	hub.OnSiteChanged(api.SiteChanged)
+	standbys.UseFailover(api.FailoverFor)
 
 	// Run both listeners; the first failure stops the other.
 	ctx, cancel := context.WithCancelCause(ctx)
@@ -261,8 +272,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer) error {
 
 // runStandby keeps a copy of another panel (the data directory belongs to
 // a standby panel) and answers on the panel's address with its state.
-func runStandby(ctx context.Context, cfg config.Server, log *slog.Logger) error {
-	c, err := standby.NewClient(cfg.DataDir, cfg.AgentURL, log.With("component", "standby"))
+func runStandby(ctx context.Context, cfg config.Server, baseLog *slog.Logger) error {
+	log := baseLog.With("component", "server")
+	c, err := standby.NewClient(cfg.DataDir, cfg.AgentURL, baseLog.With("component", "standby"))
 	if err != nil {
 		return err
 	}
@@ -276,15 +288,29 @@ func runStandby(ctx context.Context, cfg config.Server, log *slog.Logger) error 
 	srv := &http.Server{Addr: cfg.Listen, Handler: c, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: time.Minute}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
-	go c.Run(ctx)
+	ran := make(chan error, 1)
+	go func() { ran <- c.Run(ctx) }()
+	var runErr error
 	select {
 	case err := <-errc:
 		return err
+	case runErr = <-ran:
 	case <-ctx.Done():
 	}
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return srv.Shutdown(sctx)
+	if err := srv.Shutdown(sctx); err != nil || !errors.Is(runErr, standby.ErrTakeOver) {
+		return err
+	}
+	// The panel is gone and the servers agree: this standby takes over and
+	// goes on as the panel.
+	unlock()
+	p, err := standby.TakeOver(ctx, cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("take over the panel: %w", err)
+	}
+	log.Warn("this server took over the panel", "epoch", p.Epoch, "copy_up_to", p.LastChange)
+	return runPanel(ctx, cfg, baseLog)
 }
 
 // runPromote makes the standby panel in the data directory the panel.
@@ -400,9 +426,14 @@ func runLocalEnroll(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 	token := auth.NewToken()
 	expires := time.Now().Add(time.Hour)
-	if _, err := db.CreateServer(ctx, cfg.Name, auth.HashToken(token), expires); errors.Is(err, store.ErrNameTaken) {
+	srv, err := db.CreateServer(ctx, cfg.Name, auth.HashToken(token), expires)
+	if errors.Is(err, store.ErrNameTaken) {
 		return fmt.Errorf("a server named %q already exists", cfg.Name)
 	} else if err != nil {
+		return err
+	}
+	// The panel's own host: it does not vote on whether the panel is gone.
+	if err := db.SetSetting(ctx, store.SettingPanelServer, strconv.FormatInt(srv.ID, 10)); err != nil {
 		return err
 	}
 	fmt.Fprintf(stdout, "--panel %s --token %s --ca-sha256 %s\n", cfg.AgentURL, token, ca.Fingerprint())

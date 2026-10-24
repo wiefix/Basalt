@@ -117,6 +117,8 @@ func openPanel(t *testing.T, o server.Options, dir string, ln net.Listener) *pan
 	hub.ServeReleases(filepath.Join(o.DataDir, "releases"))
 	hub.OnACMEChallenge(srv.ACMEChallenge)
 	hub.OnHealthReport(srv.HealthReport)
+	hub.OnSiteChanged(srv.SiteChanged)
+	feeder.UseFailover(srv.FailoverFor)
 	go func() { hub.ServeListener(ctx, ln); close(hubDone) }()
 	api := httptest.NewServer(srv.Handler())
 

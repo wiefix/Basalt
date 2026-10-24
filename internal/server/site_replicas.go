@@ -19,8 +19,9 @@ import (
 
 // A site can be served by several servers (replicas). Its files live on
 // its primary server, where the file manager, SFTP, backups and PHP logs
-// work; the panel copies them one way to the replicas every minute, so a
-// change made on a replica itself is undone. DNS answers with the servers
+// work; the panel copies them one way to the replicas within seconds of a
+// change (the primary watches the files and tells, site_changed) and every
+// minute anyway, so a change made on a replica itself is undone. DNS answers with the servers
 // whose copy passes its health check, as for apps. A site's MariaDB
 // databases are replicated to the copies separately (dbrepl.go), and the
 // copies write to the primary's through the servers' tunnel.
@@ -210,6 +211,7 @@ func (s *Server) handleAddSiteReplica(w http.ResponseWriter, r *http.Request, p 
 	s.syncAutoDNS(r.Context())
 	s.startSiteSync(site.ID)
 	s.startDBReplication()
+	go s.pushSiteWatch(context.WithoutCancel(r.Context()), site.ServerID)
 	s.writeSite(w, r, http.StatusCreated, site.ID)
 }
 
@@ -236,6 +238,7 @@ func (s *Server) handleRemoveSiteReplica(w http.ResponseWriter, r *http.Request,
 	s.PushProxy(r.Context(), sid)
 	s.PushProxy(r.Context(), site.ServerID)
 	s.startDBReplication()
+	go s.pushSiteWatch(context.WithoutCancel(r.Context()), site.ServerID)
 	var cleanup string
 	if err := s.deleteSiteOn(r.Context(), site.ID, sid); err != nil {
 		cleanup = err.Error()
@@ -340,6 +343,8 @@ func (s *Server) deleteSiteOn(ctx context.Context, siteID, serverID int64) error
 type siteSyncs struct {
 	mu      sync.Mutex
 	running map[int64]bool
+	// again: the site changed during its copy, which runs once more.
+	again map[int64]bool
 }
 
 func (s *Server) siteSyncing(id int64) bool {
@@ -350,27 +355,78 @@ func (s *Server) siteSyncing(id int64) bool {
 
 // startSiteSync copies a site's files to its replicas in the background,
 // unless that is going on already.
-func (s *Server) startSiteSync(id int64) {
+func (s *Server) startSiteSync(id int64) { s.queueSiteSync(id, false) }
+
+// queueSiteSync starts a copy of the site; changed: its files changed, so a
+// copy going on runs once more after it ends.
+func (s *Server) queueSiteSync(id int64, changed bool) {
 	s.syncs.mu.Lock()
 	if s.syncs.running == nil {
-		s.syncs.running = map[int64]bool{}
+		s.syncs.running, s.syncs.again = map[int64]bool{}, map[int64]bool{}
 	}
 	if s.syncs.running[id] {
+		if changed {
+			s.syncs.again[id] = true
+		}
 		s.syncs.mu.Unlock()
 		return
 	}
 	s.syncs.running[id] = true
 	s.syncs.mu.Unlock()
 	go func() {
-		defer func() {
+		for {
+			ctx, cancel := context.WithTimeout(context.Background(), siteSyncTimeout)
+			s.syncSite(ctx, id)
+			cancel()
 			s.syncs.mu.Lock()
-			delete(s.syncs.running, id)
+			if !s.syncs.again[id] {
+				delete(s.syncs.running, id)
+				s.syncs.mu.Unlock()
+				return
+			}
+			delete(s.syncs.again, id)
 			s.syncs.mu.Unlock()
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), siteSyncTimeout)
-		defer cancel()
-		s.syncSite(ctx, id)
+		}
 	}()
+}
+
+// SiteChanged copies at once the sites whose files changed on serverID,
+// their primary (the agent's site_changed).
+func (s *Server) SiteChanged(serverID int64, ids []int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, id := range ids {
+		site, err := s.db.SiteByID(ctx, id)
+		if err != nil || site.ServerID != serverID || len(site.Replicas) == 0 {
+			continue // no longer its primary, or no copies
+		}
+		s.queueSiteSync(id, true)
+	}
+}
+
+// pushSiteWatch tells a server which of its sites to watch: those it is
+// the primary of, with replicas.
+func (s *Server) pushSiteWatch(ctx context.Context, serverID int64) {
+	if !s.agents.Connected(serverID) {
+		return // told when it connects
+	}
+	sites, err := s.db.ReplicatedSites(ctx)
+	if err != nil {
+		s.log.Warn("list replicated sites", "err", err)
+		return
+	}
+	req := agentproto.SiteWatch{Sites: []int64{}}
+	for _, site := range sites {
+		if site.ServerID == serverID {
+			req.Sites = append(req.Sites, site.ID)
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	// Agents before 0.6 do not know it: the round every minute copies.
+	if err := s.agents.Call(ctx, serverID, agentproto.TypeSiteWatch, req, nil); err != nil {
+		s.log.Debug("tell a server which sites to watch", "server_id", serverID, "err", err)
+	}
 }
 
 // siteSyncLoop copies the files of every site on several servers, every
@@ -794,5 +850,8 @@ func (s *Server) handleSetSitePrimary(w http.ResponseWriter, r *http.Request, p 
 	}
 	unlock()
 	s.startDBReplication()
+	for _, id := range []int64{old, req.ServerID} {
+		go s.pushSiteWatch(context.WithoutCancel(ctx), id)
+	}
 	s.writeSite(w, r, http.StatusOK, site.ID, "warning", strings.Join(problems, "; "))
 }

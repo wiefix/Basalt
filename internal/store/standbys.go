@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -147,10 +148,35 @@ func (db *DB) PanelEpoch(ctx context.Context) (int64, error) {
 	return strconv.ParseInt(v, 10, 64)
 }
 
+// SettingPanelServer is the server whose agent runs on the panel's own
+// host (it does not vote on whether the panel is gone).
+const SettingPanelServer = "panel_server_id"
+
+// SettingPromoted records a promotion the panel has not announced yet
+// (JSON Promotion).
+const SettingPromoted = "panel_promoted"
+
+// Promotion is how this database became the panel's.
+type Promotion struct {
+	Epoch int64     `json:"epoch"`
+	At    time.Time `json:"at"`
+	Auto  bool      `json:"auto"` // the standby took over by itself
+}
+
+// PanelServer is the server on the panel's host (0: not known).
+func (db *DB) PanelServer(ctx context.Context) int64 {
+	v, err := db.Setting(ctx, SettingPanelServer)
+	if err != nil {
+		return 0
+	}
+	id, _ := strconv.ParseInt(v, 10, 64)
+	return id
+}
+
 // Promote makes this database, a standby's copy, the panel's: the epoch
-// goes up by one and the standby (self) is no longer listed. It returns
-// the new epoch.
-func (db *DB) Promote(ctx context.Context, self int64) (int64, error) {
+// goes up by one, the standby (self) is no longer listed and its host's
+// server becomes the panel's. It returns the new epoch.
+func (db *DB) Promote(ctx context.Context, self int64, auto bool, now time.Time) (int64, error) {
 	tx, err := db.W.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
@@ -168,8 +194,69 @@ func (db *DB) Promote(ctx context.Context, self int64) (int64, error) {
 		settingPanelEpoch, strconv.FormatInt(epoch, 10)); err != nil {
 		return 0, err
 	}
+	var host sql.NullInt64
+	if err := tx.QueryRowContext(ctx, `SELECT server_id FROM standby_panels WHERE id = ?`, self).Scan(&host); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, err
+	}
+	b, _ := json.Marshal(Promotion{Epoch: epoch, At: now.UTC(), Auto: auto})
+	set := map[string]string{SettingPromoted: string(b)}
+	if host.Valid {
+		set[SettingPanelServer] = strconv.FormatInt(host.Int64, 10)
+	}
+	for k, v := range set {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, k, v); err != nil {
+			return 0, err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM standby_panels WHERE id = ?`, self); err != nil {
 		return 0, err
 	}
 	return epoch, tx.Commit()
+}
+
+// GuessPanelServer records, for a panel installed before it was recorded,
+// the server on the panel's host: the one agent that connects from the
+// loopback, if there is exactly one.
+func (db *DB) GuessPanelServer(ctx context.Context) error {
+	if db.PanelServer(ctx) != 0 {
+		return nil
+	}
+	rows, err := db.R.QueryContext(ctx, `SELECT id FROM servers WHERE last_ip IN ('127.0.0.1', '::1')`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil || len(ids) != 1 {
+		return err
+	}
+	return db.SetSetting(ctx, SettingPanelServer, strconv.FormatInt(ids[0], 10))
+}
+
+// TakePromotion returns the promotion not announced yet, and forgets it
+// (nil: none).
+func (db *DB) TakePromotion(ctx context.Context) (*Promotion, error) {
+	v, err := db.Setting(ctx, SettingPromoted)
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := db.deleteSetting(ctx, SettingPromoted); err != nil {
+		return nil, err
+	}
+	var p Promotion
+	if err := json.Unmarshal([]byte(v), &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
 }

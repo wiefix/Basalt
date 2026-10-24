@@ -48,6 +48,7 @@ type Feeder struct {
 	// onAgentURL runs when a standby's agent address changes.
 	onAgentURL func(ctx context.Context)
 	hub        PanelHub
+	failover   func(ctx context.Context, standbyID int64) (Failover, error)
 
 	mu     sync.Mutex
 	states map[int64]*State
@@ -75,6 +76,17 @@ func NewFeeder(db *store.DB, ca *pki.CA, src *walship.Source, masterKey []byte, 
 // UseHub has the feeder tell standbys the panel's addresses and refuse
 // those that know a newer panel. Call before serving.
 func (f *Feeder) UseHub(h PanelHub) { f.hub = h }
+
+// UseFailover has the feeder tell each standby whether it takes over by
+// itself (fn: the setting for a standby). Call before serving; PushPanels
+// sends it again.
+func (f *Feeder) UseFailover(fn func(ctx context.Context, standbyID int64) (Failover, error)) {
+	f.failover = fn
+}
+
+// refreshEvery: the addresses and the failover setting go again now and
+// then (the servers' tunnel addresses change without a push).
+const refreshEvery = 5 * time.Minute
 
 // PushPanels tells every connected standby the panel's addresses again
 // (they changed).
@@ -354,29 +366,52 @@ func (f *Feeder) handleReplicate(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		t := time.NewTicker(pingEvery)
 		defer t.Stop()
+		refresh := time.NewTicker(refreshEvery)
+		defer refresh.Stop()
 		for {
-			msg := walship.Msg{Kind: kindPing}
+			msgs := []walship.Msg{{Kind: kindPing}}
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-			case <-kick: // nil without a hub: never
-				info, err := f.hub.PanelInfo(ctx)
-				if err != nil {
-					f.log.Error("panel addresses", "err", err)
-					continue
+			case <-refresh.C:
+				if kick != nil {
+					msgs = f.panelFrames(ctx, sb.ID)
 				}
-				msg = walship.Msg{Kind: kindPanels}
-				msg.Data, _ = json.Marshal(info)
+			case <-kick: // nil without a hub: never
+				msgs = f.panelFrames(ctx, sb.ID)
 			}
-			if send(msg) != nil {
-				cancel()
-				return
+			for _, m := range msgs {
+				if send(m) != nil {
+					cancel()
+					return
+				}
 			}
 		}
 	}()
 	err := f.src.Follow(ctx, send)
 	f.log.Info("standby panel disconnected", "standby_id", sb.ID, "reason", err)
+}
+
+// panelFrames are the panel's addresses and the standby's failover
+// setting.
+func (f *Feeder) panelFrames(ctx context.Context, id int64) []walship.Msg {
+	var out []walship.Msg
+	if info, err := f.hub.PanelInfo(ctx); err != nil {
+		f.log.Error("panel addresses", "err", err)
+	} else {
+		b, _ := json.Marshal(info)
+		out = append(out, walship.Msg{Kind: kindPanels, Data: b})
+	}
+	if f.failover != nil {
+		if fo, err := f.failover(ctx, id); err != nil {
+			f.log.Error("failover setting", "err", err)
+		} else {
+			b, _ := json.Marshal(fo)
+			out = append(out, walship.Msg{Kind: kindFailover, Data: b})
+		}
+	}
+	return out
 }
 
 func (f *Feeder) internalError(w http.ResponseWriter, what string, err error) {

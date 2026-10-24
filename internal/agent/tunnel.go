@@ -39,6 +39,8 @@ type tunnelManager struct {
 	cert   func() tls.Certificate
 	ca     func() *x509.Certificate
 	target map[string]func(ctx context.Context) (net.Conn, error) // by service
+	// status tells whether the agent reaches the panel (panel_status).
+	status func() agentproto.PanelStatus
 
 	mu       sync.Mutex
 	revision int64
@@ -93,24 +95,34 @@ func (m *tunnelManager) serverConfig() *tls.Config {
 		},
 		ClientAuth: tls.RequireAnyClientCert,
 		VerifyPeerCertificate: func(raw [][]byte, _ [][]*x509.Certificate) error {
-			_, err := m.verify(raw, 0)
+			_, err := m.verifyChain(raw)
 			return err
 		},
 	}
+}
+
+// verifyChain checks a certificate chain against the panel's CA, for
+// client authentication (agents and standby panels).
+func (m *tunnelManager) verifyChain(raw [][]byte) (*x509.Certificate, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("no certificate")
+	}
+	leaf, err := x509.ParseCertificate(raw[0])
+	if err != nil {
+		return nil, err
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: m.pool(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		return nil, err
+	}
+	return leaf, nil
 }
 
 // verify checks a peer's certificate chain against the panel's CA (agents'
 // certificates are for client authentication, whichever end they are on)
 // and returns its server id, which must be want unless want is 0.
 func (m *tunnelManager) verify(raw [][]byte, want int64) (int64, error) {
-	if len(raw) == 0 {
-		return 0, errors.New("no certificate")
-	}
-	leaf, err := x509.ParseCertificate(raw[0])
+	leaf, err := m.verifyChain(raw)
 	if err != nil {
-		return 0, err
-	}
-	if _, err := leaf.Verify(x509.VerifyOptions{Roots: m.pool(), KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
 		return 0, err
 	}
 	id, err := pki.AgentID(leaf)
@@ -192,10 +204,7 @@ func (m *tunnelManager) serve(ctx context.Context, c *tls.Conn) {
 	if err := c.HandshakeContext(ctx); err != nil {
 		return
 	}
-	peer, err := m.verify([][]byte{c.ConnectionState().PeerCertificates[0].Raw}, 0)
-	if err != nil {
-		return
-	}
+	leaf := c.ConnectionState().PeerCertificates[0]
 	r := bufio.NewReaderSize(c, 1024)
 	line, err := r.ReadSlice('\n')
 	if err != nil {
@@ -208,6 +217,18 @@ func (m *tunnelManager) serve(ctx context.Context, c *tls.Conn) {
 	}
 	if json.Unmarshal(line, &hello) != nil {
 		reply("bad request")
+		return
+	}
+	if hello.Service == agentproto.ServicePanelStatus && m.status != nil {
+		// Agents and standby panels of this panel may ask.
+		reply("")
+		b, _ := json.Marshal(m.status())
+		c.Write(append(b, '\n'))
+		return
+	}
+	peer, err := pki.AgentID(leaf)
+	if err != nil {
+		reply("not allowed")
 		return
 	}
 	m.mu.Lock()

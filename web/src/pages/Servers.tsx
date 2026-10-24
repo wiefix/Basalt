@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router";
-import { api, can, type Enrollment, type User } from "../api";
+import { api, can, type Enrollment, type Failover, type Standby, type User } from "../api";
 import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, StatusBadge, errorMessage, formatBytes, timeAgo, useConfirm, useToast } from "../components/ui";
 
 export function ServersPage({ user }: { user: User }) {
@@ -216,7 +216,7 @@ function StandbysCard({ user }: { user: User }) {
   if (list.isPending) return null;
   if (list.error) return <ErrorBox error={list.error} />;
   const owner = can(user, "owner");
-  const { standbys, available } = list.data;
+  const { standbys, available, failover } = list.data;
   if (!available && standbys.length === 0) return null;
   const drop = async (id: number, name: string) => {
     const ok = await confirm({
@@ -301,8 +301,112 @@ function StandbysCard({ user }: { user: User }) {
           </div>
         )}
       </div>
+      {standbys.some((sb) => sb.enrolled) && <FailoverBlock failover={failover} standbys={standbys} owner={owner} />}
       {adding && <AddStandbyModal onClose={() => setAdding(false)} />}
     </div>
+  );
+}
+
+// FailoverBlock shows, and lets the owner choose, the standby that takes
+// over by itself when the panel is gone.
+function FailoverBlock({ failover, standbys, owner }: { failover: Failover; standbys: Standby[]; owner: boolean }) {
+  const [editing, setEditing] = useState(false);
+  const chosen = standbys.find((sb) => sb.id === failover.standby_id);
+  const minutes = Math.round(failover.after_s / 60);
+  return (
+    <div className="card-body stack" style={{ borderTop: "1px solid var(--border)" }}>
+      <div className="row wrap" style={{ justifyContent: "space-between" }}>
+        <div>
+          <h3>Automatic takeover</h3>
+          <p className="muted small" style={{ margin: "4px 0 0" }}>
+            {chosen ? (
+              <>
+                <strong>{chosen.name}</strong> becomes the panel by itself when this panel has been unreachable for {minutes}{" "}
+                minute{minutes === 1 ? "" : "s"} and most of these servers cannot reach it either:{" "}
+                {failover.witnesses.map((w) => w.name).join(", ") || "none"}.
+              </>
+            ) : (
+              "Off: a standby becomes the panel only when you promote it."
+            )}
+          </p>
+        </div>
+        {owner && (
+          <button className="btn sm" onClick={() => setEditing(true)}>
+            <Icon name="edit" size={14} /> {chosen ? "Change" : "Set up"}
+          </button>
+        )}
+      </div>
+      {chosen && (
+        <p className="faint small" style={{ margin: 0 }}>
+          It does not take over while any of these servers still reaches this panel, so a standby cut off from the network
+          does not. Point the panel's domain at it afterwards; you are notified.
+        </p>
+      )}
+      {editing && <FailoverModal failover={failover} standbys={standbys.filter((sb) => sb.enrolled)} onClose={() => setEditing(false)} />}
+    </div>
+  );
+}
+
+function FailoverModal({ failover, standbys, onClose }: { failover: Failover; standbys: Standby[]; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [standbyId, setStandbyId] = useState(failover.standby_id);
+  const [minutes, setMinutes] = useState(String(Math.round(failover.after_s / 60) || 5));
+  const save = useMutation({
+    mutationFn: () => api.setFailover({ standby_id: standbyId, after_s: standbyId ? Math.round(Number(minutes) * 60) : 0 }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["standbys"] });
+      onClose();
+    },
+  });
+  return (
+    <Modal
+      title="Automatic takeover"
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" form="failover-form" disabled={save.isPending}>
+            Save
+          </button>
+        </>
+      }
+    >
+      <form
+        id="failover-form"
+        className="form"
+        onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          save.mutate();
+        }}
+      >
+        <ErrorBox error={save.error} />
+        <Field label="Standby panel">
+          <select className="input" value={standbyId} onChange={(e) => setStandbyId(Number(e.target.value))}>
+            <option value={0}>None: only by hand</option>
+            {standbys.map((sb) => (
+              <option key={sb.id} value={sb.id}>
+                {sb.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        {standbyId !== 0 && (
+          <Field
+            label="After, minutes"
+            help="How long the panel must be unreachable from the standby first. Short delays take over on brief outages too; 5 minutes or more is safer."
+          >
+            <input className="input mono" type="number" min={1} max={60} value={minutes} onChange={(e) => setMinutes(e.target.value)} required />
+          </Field>
+        )}
+        <p className="faint small" style={{ margin: 0 }}>
+          Before taking over, the standby asks the agents of your other servers (not this panel's server, not its own) through
+          their tunnel, port 8444: it goes ahead only if most of them cannot reach this panel either, and none can. It needs at
+          least one such server.
+        </p>
+      </form>
+    </Modal>
   );
 }
 

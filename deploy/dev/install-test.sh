@@ -271,6 +271,46 @@ copied "$PSRV" || exit 1
 W=$(docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/db.php)
 echo "  back on node1: $W"
 [ "$W" = "rows 5" ] || exit 1
+echo "### node1 fails (its agent hangs: no panel, no tunnel): forced switch, node1 comes back as a copy"
+rows() { # host: rows in its copy of the site's database
+  docker exec basalt-$1 mariadb -N -e "SELECT COUNT(*) FROM $DBN.hits" 2>/dev/null
+}
+for i in $(seq 60); do [ "$(rows panel)" = 5 ] && break; sleep 1; done
+[ "$(rows panel)" = 5 ] || { echo "the copy is behind before the failure"; exit 1; }
+docker exec basalt-node1 systemctl kill -s STOP basalt-agent
+online() { # server id
+  $API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; sys.exit(0 if [s for s in json.load(sys.stdin)["servers"] if s["id"]=='"$1"'][0]["status"]=="online" else 1)'
+}
+for i in $(seq 120); do online "$NODE" || break; sleep 1; done
+online "$NODE" && { echo "the panel still sees node1 online"; exit 1; }
+CODE=$($API -o /tmp/r -w '%{http_code}' -X PUT -d "{\"server_id\":$PSRV}" "http://127.0.0.1:8080/api/v1/sites/$SITE/primary")
+[ "$CODE" = 409 ] || { echo "switch from an offline primary without force: $CODE"; exit 1; }
+echo "  without force: $($API -X PUT -d "{\"server_id\":$PSRV}" "http://127.0.0.1:8080/api/v1/sites/$SITE/primary" | cut -c1-160)"
+$API -X PUT -d "{\"server_id\":$PSRV,\"force\":true}" "http://127.0.0.1:8080/api/v1/sites/$SITE/primary" | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  forced:", d["site"]["server_id"], d.get("warning", "")); sys.exit(0 if d["site"]["server_id"]=='"$PSRV"' else 1)'
+for i in $(seq 30); do
+  W=$(docker exec basalt-panel curl -sk --resolve shop.test:443:$PANELIP https://shop.test/db.php)
+  [ "$W" = "rows 6" ] && break; sleep 1
+done
+echo "  new primary writes: $W"
+[ "$W" = "rows 6" ] || exit 1
+# What node1 does alone meanwhile is lost once it is back.
+docker exec basalt-node1 mariadb "$DBN" -e "INSERT INTO hits (at) VALUES ('lost')"
+docker exec basalt-node1 sh -c "echo lost > /srv/basalt/sites/$SITE/public/lost.txt"
+docker exec basalt-node1 systemctl kill -s CONT basalt-agent
+for i in $(seq 120); do online "$NODE" && break; sleep 1; done
+online "$NODE" || { echo "node1 did not come back"; exit 1; }
+for i in $(seq 120); do copied "$NODE" >/dev/null && [ "$(rows node1)" = 6 ] && ! docker exec basalt-node1 test -e /srv/basalt/sites/$SITE/public/lost.txt && break; sleep 2; done
+copied "$NODE" || exit 1
+echo "  node1, a copy now: rows $(rows node1), lost row: $(docker exec basalt-node1 mariadb -N -e "SELECT COUNT(*) FROM $DBN.hits WHERE at='lost'")"
+[ "$(rows node1)" = 6 ] && [ "$(docker exec basalt-node1 mariadb -N -e "SELECT COUNT(*) FROM $DBN.hits WHERE at='lost'")" = 0 ] || { echo "node1's copy differs from the new primary"; exit 1; }
+docker exec basalt-node1 test -e /srv/basalt/sites/$SITE/public/lost.txt && { echo "node1 kept a file the primary does not have"; exit 1; }
+docker exec basalt-node1 mariadb -u "$DBN" -p"$DBPW" "$DBN" -e "INSERT INTO hits (at) VALUES ('x')" 2>/dev/null && { echo "node1's copy takes writes"; exit 1; }
+switch "$NODE"
+for i in $(seq 90); do copied "$PSRV" >/dev/null && break; sleep 2; done
+copied "$PSRV" || exit 1
+W=$(docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/db.php)
+echo "  back on node1: $W"
+[ "$W" = "rows 7" ] || exit 1
 $API -X DELETE "http://127.0.0.1:8080/api/v1/sites/$SITE/replicas/$PSRV" >/dev/null
 for i in $(seq 30); do
   [ -z "$(docker exec basalt-panel mariadb -N -e "SHOW DATABASES LIKE '$DBN'")" ] && break; sleep 1
@@ -382,15 +422,28 @@ agentcfg() { # host field
 }
 echo "  node1's agent knows: $(agentcfg node1 panels)"
 [ "$(agentcfg node1 panels | grep -o https | wc -l | tr -d " ")" = 3 ] || { echo "the agents do not know the standbys"; exit 1; }
-docker exec basalt-panel systemctl stop basalt-server
 docker exec basalt-standby basalt server promote >/dev/null 2>&1 && { echo "promoted while the standby runs"; exit 1; }
-docker exec basalt-standby systemctl stop basalt-server
-docker exec basalt-standby basalt server promote
-docker exec basalt-standby systemctl start basalt-server
-for i in $(seq 60); do docker exec basalt-standby curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.5; done
+# The standby takes over by itself after a minute without the panel, if
+# node1 (the only server besides the panel's and its own) agrees.
+SBID=$($API http://127.0.0.1:8080/api/v1/standbys | python3 -c 'import sys,json; print([s["id"] for s in json.load(sys.stdin)["standbys"] if s["name"]=="spare"][0])')
+$API -X PUT -d "{\"standby_id\":$SBID,\"after_s\":60}" http://127.0.0.1:8080/api/v1/standbys/failover | python3 -c 'import sys,json; f=json.load(sys.stdin)["failover"]; print("  automatic takeover:", f); sys.exit(0 if [w["name"] for w in f["witnesses"]]==["node1"] else "the witnesses should be node1 only")'
+for i in $(seq 30); do docker exec basalt-standby curl -fsS http://127.0.0.1:8080/healthz | grep -q '"auto_failover":true' && break; sleep 1; done
+docker exec basalt-standby curl -fsS http://127.0.0.1:8080/healthz | grep -q '"auto_failover":true' || { echo "the standby does not know it takes over"; exit 1; }
+docker exec basalt-panel systemctl stop basalt-server
+echo "  panel stopped at $(date -u +%T); waiting for the standby to take over"
+for i in $(seq 150); do
+  docker exec basalt-standby curl -fsS http://127.0.0.1:8080/api/v1/standby >/dev/null 2>&1 || { docker exec basalt-standby curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break; }
+  sleep 1
+done
+echo "  took over at $(date -u +%T)"
+docker exec basalt-standby journalctl -u basalt-server --no-pager -o cat | grep -m1 "taking over the panel" | cut -c1-200
+docker exec basalt-standby test ! -e /var/lib/basalt/server/standby.json || { echo "the standby did not take over"; exit 1; }
+docker exec basalt-standby systemctl is-active -q basalt-server || { echo "the panel is not running there"; exit 1; }
 OLD=$API
 API="docker exec basalt-standby curl -sS -b /tmp/j -c /tmp/j -H Content-Type:application/json"
 $API -d '{"email":"admin@example.test","password":"installer test password"}' http://127.0.0.1:8080/api/v1/auth/login >/dev/null
+for i in $(seq 30); do $API "http://127.0.0.1:8080/api/v1/audit?action=panel.promoted" | grep -q '"auto":true' && break; sleep 1; done
+$API "http://127.0.0.1:8080/api/v1/audit?action=panel.promoted" | python3 -c 'import sys,json; e=json.load(sys.stdin)["entries"]; print("  audit:", [(x["action"], x["details"]) for x in e]); sys.exit(0 if e and e[0]["details"].get("auto") else "no record of the automatic takeover")'
 for i in $(seq 180); do
   [ "$(agentcfg node1 epoch)" = 1 ] && [ "$(agentcfg panel epoch)" = 1 ] && [ "$(agentcfg standby epoch)" = 1 ] && break
   sleep 1

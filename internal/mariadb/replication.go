@@ -419,6 +419,14 @@ func (s *Server) Remove(ctx context.Context, conn string) error {
 	if err := s.Stop(ctx, conn); err != nil {
 		return err
 	}
+	// MariaDB keeps a connection's filters by its name after RESET SLAVE
+	// ALL: a new connection of the same name would copy those databases
+	// at once, from a stale position, without seeding them.
+	if st, err := s.Status(ctx, conn); err == nil && st != nil {
+		if err := s.SetFilter(ctx, conn, nil); err != nil {
+			return err
+		}
+	}
 	_, err := s.db.ExecContext(ctx, "RESET SLAVE '"+conn+"' ALL")
 	if noConnection(err) {
 		return nil

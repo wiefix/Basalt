@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -26,7 +27,7 @@ func TestPromote(t *testing.T) {
 		t.Fatal("the same address counted as a change")
 	}
 	for want := int64(1); want <= 2; want++ {
-		e, err := db.Promote(ctx, self.ID)
+		e, err := db.Promote(ctx, self.ID, false, time.Now())
 		if err != nil || e != want {
 			t.Fatalf("promote: %d %v; want %d", e, err, want)
 		}
@@ -37,5 +38,28 @@ func TestPromote(t *testing.T) {
 	list, _ := db.Standbys(ctx)
 	if len(list) != 1 || list[0].ID != other.ID || list[0].AgentURL != "https://192.0.2.7:8443" {
 		t.Fatalf("standbys: %+v", list)
+	}
+
+	// A standby whose host has a server: that server becomes the panel's,
+	// and the promotion waits to be announced.
+	host, err := db.CreateServer(ctx, "spare", []byte("h"), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, _ := db.CreateStandby(ctx, "spare", host.ID, []byte("c"), time.Now().Add(time.Hour))
+	if db.PanelServer(ctx) != 0 {
+		t.Fatal("panel server before")
+	}
+	at := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	if e, err := db.Promote(ctx, sb.ID, true, at); err != nil || e != 3 {
+		t.Fatalf("promote: %d %v", e, err)
+	}
+	if db.PanelServer(ctx) != host.ID {
+		t.Fatalf("panel server %d", db.PanelServer(ctx))
+	}
+	v, _ := db.Setting(ctx, SettingPromoted)
+	var p Promotion
+	if json.Unmarshal([]byte(v), &p); p != (Promotion{Epoch: 3, At: at, Auto: true}) {
+		t.Fatalf("promotion: %s", v)
 	}
 }

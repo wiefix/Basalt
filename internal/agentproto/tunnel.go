@@ -40,6 +40,20 @@ type PeerForward struct {
 	Service  string `json:"service"`
 }
 
+// ServicePanelStatus answers, without the panel's leave, whether this
+// agent reaches the panel (PanelStatus, one JSON line after the reply),
+// to any certificate of the panel's CA: a standby panel asks the agents
+// before it takes over by itself. It tells nothing else.
+const ServicePanelStatus = "panel_status"
+
+// PanelStatus is whether an agent is connected to the panel, for how long
+// it has been so, and the panel epoch it knows.
+type PanelStatus struct {
+	Connected bool  `json:"connected"`
+	For       int64 `json:"for_s"` // seconds in this state
+	Epoch     int64 `json:"epoch"`
+}
+
 // TunnelHello is the first line a tunnel client sends.
 type TunnelHello struct {
 	Service string `json:"service"`

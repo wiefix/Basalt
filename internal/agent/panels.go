@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
+	"sync"
+	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
 )
@@ -85,4 +87,28 @@ func (a *Agent) usePanel(u string) error {
 		c.PanelURL = u
 		return true
 	})
+}
+
+// panelLink is whether the agent is connected to the panel and since when
+// (a standby panel asks before it takes over: agentproto.PanelStatus).
+type panelLink struct {
+	mu        sync.Mutex
+	connected bool
+	since     time.Time
+}
+
+func (l *panelLink) set(connected bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.connected != connected || l.since.IsZero() {
+		l.connected, l.since = connected, time.Now()
+	}
+}
+
+// panelStatus answers agentproto.ServicePanelStatus.
+func (a *Agent) panelStatus() agentproto.PanelStatus {
+	a.link.mu.Lock()
+	defer a.link.mu.Unlock()
+	return agentproto.PanelStatus{Connected: a.link.connected, For: int64(time.Since(a.link.since) / time.Second),
+		Epoch: a.identity().Epoch}
 }

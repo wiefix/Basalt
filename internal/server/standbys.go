@@ -21,6 +21,9 @@ import (
 type StandbyFeeder interface {
 	State(id int64) standby.State
 	Disconnect(id int64)
+	// PushPanels sends the standbys the panel's addresses and their
+	// failover setting again.
+	PushPanels(ctx context.Context)
 }
 
 type standbyView struct {
@@ -79,7 +82,12 @@ func (s *Server) handleListStandbys(w http.ResponseWriter, r *http.Request, p *p
 	for i, sb := range list {
 		out[i] = s.viewStandby(sb)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"standbys": out, "available": s.standbys != nil})
+	fo, err := s.viewFailover(r.Context())
+	if err != nil {
+		s.internalError(w, r, "failover setting", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"standbys": out, "available": s.standbys != nil, "failover": fo})
 }
 
 func (s *Server) handleCreateStandby(w http.ResponseWriter, r *http.Request, p *principal) {

@@ -71,6 +71,9 @@ type Options struct {
 	// they go out, merged into one when there are several (default 10
 	// seconds; negative: each goes out at once).
 	NotifyWindow time.Duration
+	// FailoverMinAfter is the shortest delay a standby may be given to
+	// take over by itself (default a minute; tests make it shorter).
+	FailoverMinAfter time.Duration
 	// OfflineAfter is how long a server's agent stays away before a
 	// notification (default 5 minutes).
 	OfflineAfter time.Duration
@@ -133,6 +136,7 @@ type Server struct {
 	batchMu           sync.Mutex
 	batches           map[string][]notify.Message // by event, until sent
 	offlineAfter      time.Duration
+	failoverMin       time.Duration
 	certCheckEvery    time.Duration
 	auditCheckEvery   time.Duration
 	auditWatch        auditWatch
@@ -195,6 +199,9 @@ func New(o Options) *Server {
 	if o.OfflineAfter <= 0 {
 		o.OfflineAfter = 5 * time.Minute
 	}
+	if o.FailoverMinAfter <= 0 {
+		o.FailoverMinAfter = time.Minute
+	}
 	if o.SiteSyncEvery <= 0 {
 		o.SiteSyncEvery = siteSyncEvery
 	}
@@ -235,6 +242,7 @@ func New(o Options) *Server {
 		batches:         map[string][]notify.Message{},
 		notifySem:       make(chan struct{}, notifyWorkers),
 		offlineAfter:    o.OfflineAfter,
+		failoverMin:     o.FailoverMinAfter,
 		certCheckEvery:  o.CertCheckEvery,
 		auditCheckEvery: o.AuditCheckEvery,
 		usageEvery:      usageEvery,
@@ -324,6 +332,7 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("GET /api/v1/standbys", s.requireRole(store.RoleAdmin, s.handleListStandbys))
 	rt.Handle("POST /api/v1/standbys", s.requireSession(store.RoleOwner, s.handleCreateStandby))
 	rt.Handle("DELETE /api/v1/standbys/{id}", s.requireSession(store.RoleOwner, s.handleDeleteStandby))
+	rt.Handle("PUT /api/v1/standbys/failover", s.requireSession(store.RoleOwner, s.handleSetFailover))
 	rt.Handle("GET /api/v1/servers/{id}/metrics", s.requireRole(store.RoleViewer, s.handleServerMetrics))
 	rt.Handle("GET /api/v1/servers/{id}/certificates", s.requireRole(store.RoleViewer, s.handleServerCerts))
 	rt.Handle("POST /api/v1/servers/{id}/ping", s.requireRole(store.RoleMember, s.handlePingServer))
@@ -513,6 +522,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	}
 
 	go s.cleanupLoop(ctx)
+	go s.announcePromotion(ctx)
 	go s.notifyLoop(ctx)
 	go s.backupLoop(ctx)
 	go s.dnsLoop(ctx)

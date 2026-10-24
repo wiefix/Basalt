@@ -21,19 +21,20 @@ import (
 
 // Events a channel can subscribe to.
 const (
-	EventHealthDown   = "health.down"
-	EventHealthUp     = "health.up"
-	EventDeployFailed = "deploy.failed"
-	EventBackupFailed = "backup.failed"
-	EventServerDown   = "server.offline"
-	EventServerUp     = "server.online"
-	EventMailProblem  = "mail.problem"
-	EventCertExpiring = "cert.expiring"
-	EventAuditBroken  = "audit.broken"
-	EventSiteQuota    = "site.quota"
-	EventCertMissing  = "cert.missing"
-	EventProjectDisk  = "project.disk"
-	EventReplication  = "site.replication"
+	EventHealthDown    = "health.down"
+	EventHealthUp      = "health.up"
+	EventDeployFailed  = "deploy.failed"
+	EventBackupFailed  = "backup.failed"
+	EventServerDown    = "server.offline"
+	EventServerUp      = "server.online"
+	EventMailProblem   = "mail.problem"
+	EventCertExpiring  = "cert.expiring"
+	EventAuditBroken   = "audit.broken"
+	EventSiteQuota     = "site.quota"
+	EventCertMissing   = "cert.missing"
+	EventProjectDisk   = "project.disk"
+	EventReplication   = "site.replication"
+	EventPanelFailover = "panel.failover"
 )
 
 // notificationEvent is an event a channel can receive; Project: it is
@@ -59,6 +60,7 @@ var notificationEvents = []notificationEvent{
 	{EventSiteQuota, "A site goes over its disk quota", true},
 	{EventProjectDisk, "A project's sites go over its disk limit", true},
 	{EventReplication, "A site's databases stop being copied to another server, or are copied again", true},
+	{EventPanelFailover, "A standby panel took over the panel", false},
 }
 
 // findEvent returns the event e, or false if there is none.

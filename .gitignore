@@ -18,3 +18,4 @@ web/dist/*
 .agent/
 .sites/
 .backups/
+/basalt

@@ -613,6 +613,17 @@ export interface Error {
   error: string;
 }
 
+export interface FailoverRequest {
+  after_s?: number;
+  standby_id?: number;
+}
+
+export interface FailoverView {
+  after_s: number;
+  standby_id: number;
+  witnesses: WitnessView[];
+}
+
 export interface FileOpRequest {
   content?: string;
   mode?: string;
@@ -1365,6 +1376,12 @@ export interface WebhookView {
   secret: string;
 }
 
+export interface WitnessView {
+  addr: string;
+  name: string;
+  server_id: number;
+}
+
 // Responses and bodies of the routes.
 
 export type DeleteAccountPasskeysIdResponse = void;
@@ -1789,6 +1806,7 @@ export type GetSitesIdSnapshotsSidFilesResponse = {
 
 export type GetStandbysResponse = {
   available: boolean;
+  failover: FailoverView;
   standbys: StandbyView[];
 };
 
@@ -2426,6 +2444,12 @@ export type PutSitesIdSftpUsersUidResponse = {
 };
 
 export type PutSitesIdSftpUsersUidBody = UpdateSFTPUserRequest;
+
+export type PutStandbysFailoverResponse = {
+  failover: FailoverView;
+};
+
+export type PutStandbysFailoverBody = FailoverRequest;
 
 export type PutUsersIdResponse = {
   user: UserView;

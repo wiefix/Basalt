@@ -56,6 +56,7 @@ type Hub struct {
 	onConnect func(ctx context.Context, serverID int64)
 	onACME    func(ctx context.Context, serverID int64, c agentproto.ACMEChallenge) error
 	onHealth  func(serverID int64, r agentproto.HealthReport)
+	onChanged func(serverID int64, sites []int64)
 
 	installScript []byte
 	binariesDir   string
@@ -81,6 +82,10 @@ func (h *Hub) OnConnect(f func(ctx context.Context, serverID int64)) { h.onConne
 func (h *Hub) OnACMEChallenge(f func(ctx context.Context, serverID int64, c agentproto.ACMEChallenge) error) {
 	h.onACME = f
 }
+
+// OnSiteChanged registers the handler of a server's reports that sites'
+// files changed (the server is their primary).
+func (h *Hub) OnSiteChanged(f func(serverID int64, sites []int64)) { h.onChanged = f }
 
 // OnHealthReport registers the handler of health check results from
 // agents. Call before serving.
@@ -375,6 +380,18 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 		}
 		// Only apps placed on this server are stored.
 		return nil, h.db.InsertAppMetrics(ctx, id, apps)
+	case agentproto.TypeSiteChanged:
+		var c agentproto.SiteChanged
+		if err := json.Unmarshal(payload, &c); err != nil {
+			return nil, err
+		}
+		if len(c.Sites) > agentproto.MaxWatchedSites {
+			return nil, errors.New("too many changed sites")
+		}
+		if h.onChanged != nil {
+			go h.onChanged(id, c.Sites)
+		}
+		return nil, nil
 	case agentproto.TypeHealthReport:
 		var r agentproto.HealthReport
 		if err := json.Unmarshal(payload, &r); err != nil {

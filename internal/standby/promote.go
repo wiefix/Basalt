@@ -35,7 +35,14 @@ type Promoted struct {
 // database is checked and becomes the panel's, with a higher epoch, so
 // agents leave the panel it copied (they refuse a lower epoch) once they
 // reach this one. The standby must not be running.
-func Promote(ctx context.Context, dir string) (*Promoted, error) {
+func Promote(ctx context.Context, dir string) (*Promoted, error) { return promote(ctx, dir, false) }
+
+// TakeOver promotes the standby in dir that decided by itself to take over
+// (Run returned ErrTakeOver; its lock released): as Promote, and the new
+// panel announces it was automatic.
+func TakeOver(ctx context.Context, dir string) (*Promoted, error) { return promote(ctx, dir, true) }
+
+func promote(ctx context.Context, dir string, auto bool) (*Promoted, error) {
 	if !IsStandby(dir) {
 		return nil, fmt.Errorf("%s does not belong to a standby panel", dir)
 	}
@@ -72,7 +79,7 @@ func Promote(ctx context.Context, dir string) (*Promoted, error) {
 	if last > 0 {
 		p.LastChange = time.Unix(last, 0)
 	}
-	if p.Epoch, err = db.Promote(ctx, c.cfg.StandbyID); err != nil {
+	if p.Epoch, err = db.Promote(ctx, c.cfg.StandbyID, auto, time.Now()); err != nil {
 		return nil, fmt.Errorf("promote the copy: %w", err)
 	}
 	p.PanelURL, p.Zone = panelZone(ctx, db)

@@ -22,6 +22,39 @@ const TypeSiteSyncRead = "site_sync_read"
 // then folders, writes and permission changes, in that order.
 const TypeSiteSyncWrite = "site_sync_write"
 
+// TypeSiteWatch (panel -> agent) names the sites whose files the agent
+// reports changes of: those it is the primary of, with replicas. The list
+// replaces the previous one.
+const TypeSiteWatch = "site_watch"
+
+// TypeSiteChanged (agent -> panel, notification) names sites whose files
+// changed, once they were quiet for a moment: the panel copies them to the
+// replicas then, without waiting for its round every minute.
+const TypeSiteChanged = "site_changed"
+
+// MaxWatchedSites bounds a site_watch list.
+const MaxWatchedSites = 10_000
+
+type SiteWatch struct {
+	Sites []int64 `json:"sites"`
+}
+
+func (w SiteWatch) Validate() error {
+	if len(w.Sites) > MaxWatchedSites {
+		return errors.New("too many sites to watch")
+	}
+	for _, id := range w.Sites {
+		if id <= 0 {
+			return fmt.Errorf("invalid site id %d", id)
+		}
+	}
+	return nil
+}
+
+type SiteChanged struct {
+	Sites []int64 `json:"sites"`
+}
+
 const (
 	// ManifestBatch is the number of entries in one frame of a manifest.
 	ManifestBatch = 4000

@@ -97,6 +97,7 @@ func (s *Server) SyncSites(ctx context.Context, serverID int64) {
 	}
 	s.PushProxy(ctx, serverID)
 	s.PushPeers(ctx, serverID, true)
+	s.pushSiteWatch(ctx, serverID)
 	if err := s.PushSFTP(ctx, serverID); err != nil {
 		s.log.Warn("push sftp accounts", "server_id", serverID, "err", err)
 	}
@@ -298,6 +299,7 @@ func (s *Server) handleDeleteSite(w http.ResponseWriter, r *http.Request, p *pri
 		s.healthChanged(r.Context())
 		s.syncAutoDNS(r.Context())
 		s.startDBReplication()
+		go s.pushSiteWatch(context.WithoutCancel(r.Context()), site.ServerID)
 	}
 	// Stop serving and revoke SFTP access first, then move the files to the trash.
 	for _, sid := range servers {
