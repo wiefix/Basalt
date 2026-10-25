@@ -153,6 +153,9 @@ export interface AppView {
   memory_mb: number;
   name: string;
   port: number;
+  pr_number?: number;
+  preview_domain?: string;
+  preview_of?: number;
   project_id: number;
   read_only: boolean;
   replicas: number[];
@@ -747,6 +750,7 @@ export interface InstallationView {
   all: boolean;
   html_url: string;
   id: number;
+  pull_requests: boolean;
   statuses: boolean;
 }
 
@@ -967,6 +971,10 @@ export interface PolicyView {
   next_run?: string;
   schedule: string;
   storage_id: number;
+}
+
+export interface PreviewsRequest {
+  domain?: string;
 }
 
 export interface ProjectMemberRequest {
@@ -1599,6 +1607,12 @@ export type GetAppsIdLogsResponse = {
 
 export type GetAppsIdMetricsResponse = {
   metrics: AppMetricsView[];
+};
+
+export type GetAppsIdPreviewsResponse = {
+  domain: string;
+  max: number;
+  previews: AppView[];
 };
 
 export type GetAppsIdSnapshotsResponse = {
@@ -2355,6 +2369,14 @@ export type PutAppsIdEnvResponse = {
 };
 
 export type PutAppsIdEnvBody = AppEnvRequest;
+
+export type PutAppsIdPreviewsResponse = {
+  domain: string;
+  max: number;
+  previews: AppView[];
+};
+
+export type PutAppsIdPreviewsBody = PreviewsRequest;
 
 export type PutAppsIdProjectResponse = void;
 

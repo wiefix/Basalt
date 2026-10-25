@@ -47,6 +47,13 @@ type App struct {
 	Template         string
 	TemplateRevision int
 
+	// Previews: PreviewDomain is where an app's pull requests are deployed
+	// (pr-<n>.<domain>; "": not); a preview is PreviewOf an app, for pull
+	// request PRNumber.
+	PreviewDomain string
+	PreviewOf     int64
+	PRNumber      int
+
 	Port      int
 	EnvSealed []byte // encrypted JSON object; nil when empty
 	Volumes   []agentproto.AppVolume
@@ -117,18 +124,22 @@ type AppSettings struct {
 	// Template and TemplateRevision: see App.
 	Template         string
 	TemplateRevision int
-	Image            string
-	Git              GitSettings
-	Port             int
-	Volumes          []agentproto.AppVolume
-	MemoryMB         int
-	CPUs             float64
-	ReadOnly         bool
+	// A preview: of an app, for a pull request.
+	PreviewOf int64
+	PRNumber  int
+	Image     string
+	Git       GitSettings
+	Port      int
+	Volumes   []agentproto.AppVolume
+	MemoryMB  int
+	CPUs      float64
+	ReadOnly  bool
 }
 
 var (
 	ErrDeployInProgress = errors.New("a deployment of this app is already running")
 	ErrMailServerExists = errors.New("a mail server already exists")
+	ErrPreviewExists    = errors.New("the pull request has a preview")
 )
 
 // CreateApp creates an app and the route that serves it (without domains
@@ -159,23 +170,26 @@ func (db *DB) CreateApp(ctx context.Context, serverID int64, name string, st App
 	a := &App{ServerID: serverID, ProjectID: st.ProjectID, Name: name, Source: st.Source, Image: st.Image, Git: st.Git, Port: st.Port,
 		Volumes: st.Volumes, MemoryMB: st.MemoryMB, CPUs: st.CPUs, Domains: domains, TLS: tls,
 		Engine: st.Engine, EngineVersion: st.EngineVersion, Links: []int64{}, ReadOnly: st.ReadOnly, Hostname: st.Hostname,
-		Template: st.Template, TemplateRevision: st.TemplateRevision}
+		Template: st.Template, TemplateRevision: st.TemplateRevision, PreviewOf: st.PreviewOf, PRNumber: st.PRNumber}
 	var created int64
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO apps (project_id, server_id, name, source, image, git_url, git_branch, git_dockerfile, git_context,
 		 port, volumes, memory_mb, cpus, engine, engine_version, read_only, hostname, template, template_revision,
-		 git_source_id, git_repo)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 git_source_id, git_repo, preview_of, pr_number)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id, created_at`,
 		st.ProjectID, serverID, name, st.Source, st.Image, st.Git.URL, st.Git.Branch, st.Git.Dockerfile, st.Git.Context,
 		st.Port, vols, st.MemoryMB, st.CPUs, st.Engine, st.EngineVersion, st.ReadOnly, st.Hostname, st.Template, st.TemplateRevision,
-		nullID(st.Git.SourceID), st.Git.Repo).Scan(&a.ID, &created)
+		nullID(st.Git.SourceID), st.Git.Repo, nullID(st.PreviewOf), st.PRNumber).Scan(&a.ID, &created)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: apps.name") {
 			return nil, ErrNameTaken
 		}
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: apps.source") {
 			return nil, ErrMailServerExists
+		}
+		if strings.Contains(err.Error(), "UNIQUE constraint failed: apps.preview_of") {
+			return nil, ErrPreviewExists
 		}
 		return nil, err
 	}
@@ -206,6 +220,7 @@ func marshalVolumes(v []agentproto.AppVolume) (string, error) {
 const appQuery = `SELECT a.id, a.server_id, a.project_id, a.name, a.source, a.image, a.git_url, a.git_branch, a.git_dockerfile,
 	a.git_context, COALESCE(a.git_source_id, 0), a.git_repo, a.deploy_key, a.deploy_key_public, a.webhook_secret, a.auto_deploy,
 	a.compose, a.compose_summary, a.service, a.engine, a.engine_version, a.hostname, a.template, a.template_revision,
+	a.preview_domain, COALESCE(a.preview_of, 0), a.pr_number,
 	(SELECT COALESCE(json_group_array(l.app_id), '[]') FROM (SELECT app_id FROM app_links WHERE database_id = a.id ORDER BY app_id) l),
 	(SELECT COALESCE(json_group_array(p.server_id), '[]') FROM (SELECT server_id FROM proxy_routes
 	 WHERE app_id = a.id AND server_id != a.server_id ORDER BY server_id) p),
@@ -222,7 +237,8 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 		var vols, domain, summary, links, replicas string
 		if err := rows.Scan(&a.ID, &a.ServerID, &a.ProjectID, &a.Name, &a.Source, &a.Image, &a.Git.URL, &a.Git.Branch,
 			&a.Git.Dockerfile, &a.Git.Context, &a.Git.SourceID, &a.Git.Repo, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
-			&a.ComposeSealed, &summary, &a.Service, &a.Engine, &a.EngineVersion, &a.Hostname, &a.Template, &a.TemplateRevision, &links, &replicas, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
+			&a.ComposeSealed, &summary, &a.Service, &a.Engine, &a.EngineVersion, &a.Hostname, &a.Template, &a.TemplateRevision,
+			&a.PreviewDomain, &a.PreviewOf, &a.PRNumber, &links, &replicas, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
 			return nil, err
 		}
 		if n := len(out); n > 0 && out[n-1].ID == a.ID {
@@ -293,6 +309,24 @@ func (db *DB) AppIDsOnServer(ctx context.Context, serverID int64) ([]int64, erro
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// Previews lists the previews of an app, by pull request.
+func (db *DB) Previews(ctx context.Context, appID int64) ([]*App, error) {
+	rows, err := db.R.QueryContext(ctx, appQuery+` WHERE a.preview_of = ? ORDER BY a.pr_number, d.domain`, appID)
+	if err != nil {
+		return nil, err
+	}
+	apps, err := scanApps(rows)
+	if apps == nil {
+		apps = []*App{}
+	}
+	return apps, err
+}
+
+// SetPreviewDomain sets where an app's pull requests are deployed ("": not).
+func (db *DB) SetPreviewDomain(ctx context.Context, appID int64, domain string) error {
+	return db.execOne(ctx, `UPDATE apps SET preview_domain = ? WHERE id = ?`, domain, appID)
 }
 
 // UpdateAppSettings changes what the next deployment runs.

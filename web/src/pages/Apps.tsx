@@ -10,7 +10,7 @@ export function AppsPage({ user }: { user: User }) {
   // Databases have their own page.
   const [project, setProject] = useProjectFilter();
   const canCreate = useCanCreate(user);
-  const list = apps.data?.apps.filter((a) => a.source !== "database" && a.source !== "mail" && (!project || a.project_id === project)) ?? [];
+  const list = apps.data?.apps.filter((a) => a.source !== "database" && a.source !== "mail" && !a.preview_of && (!project || a.project_id === project)) ?? [];
   const servers = useQuery({ queryKey: ["servers"], queryFn: api.servers });
   const [adding, setAdding] = useState(false);
   const serverName = (id: number) => servers.data?.servers.find((s) => s.id === id)?.name ?? `#${id}`;

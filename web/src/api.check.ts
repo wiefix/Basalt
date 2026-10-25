@@ -198,6 +198,8 @@ export const checks = [
   fits<Returns<A["regenerateDeployKey"]>>()<G.PostAppsIdDeployKeyResponse>(),
   fits<Returns<A["appWebhook"]>>()<G.GetAppsIdWebhookResponse>(),
   fits<Returns<A["setAppWebhook"]>>()<G.PutAppsIdWebhookResponse>(),
+  fits<Returns<A["previews"]>>()<G.GetAppsIdPreviewsResponse>(),
+  fits<Returns<A["setPreviews"]>>()<G.PutAppsIdPreviewsResponse>(),
   fits<Returns<A["appEnv"]>>()<G.GetAppsIdEnvResponse>(),
   fits<Returns<A["setAppEnv"]>>()<G.PutAppsIdEnvResponse>(),
   fits<Returns<A["deployApp"]>>()<G.PostAppsIdDeployResponse>(),

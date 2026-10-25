@@ -124,6 +124,8 @@ type installationView struct {
 	// Statuses: deployments are shown on the commits (the installation
 	// granted the Commit statuses permission).
 	Statuses bool `json:"statuses"`
+	// PullRequests: pull requests reach the panel (previews).
+	PullRequests bool `json:"pull_requests"`
 }
 
 func (s *Server) pathGitSource(w http.ResponseWriter, r *http.Request) (*store.GitSource, bool) {
@@ -417,6 +419,9 @@ func (s *Server) commitStatus(appID int64, sha, state, desc string) {
 	if panelURL, _ := s.db.Setting(ctx, settingPanelURL); panelURL != "" {
 		st.TargetURL = panelURL + appPage(a)
 	}
+	if a.PreviewOf != 0 && state == "success" && len(a.Domains) > 0 {
+		st.TargetURL = "https://" + a.Domains[0] // the preview itself
+	}
 	if err := s.githubClient().SetStatus(ctx, app, a.Git.Repo, sha, st); err != nil {
 		s.log.Warn("set the commit status on GitHub (the GitHub App may need the Commit statuses permission)",
 			"app_id", appID, "commit", sha, "err", err)
@@ -485,6 +490,21 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid signature")
 		return
 	}
+	if event == "pull_request" {
+		var pr pullRequest
+		if err := json.Unmarshal(body, &pr); err != nil || !github.ValidRepo(pr.Repository.FullName) || pr.Number <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid payload")
+			return
+		}
+		// Removing a preview waits for its deployment to stop: GitHub does not wait.
+		go func() {
+			if _, err := s.pullRequestEvent(source, pr); err != nil {
+				s.log.Warn("pull request", "repo", pr.Repository.FullName, "pr", pr.Number, "err", err)
+			}
+		}()
+		writeJSON(w, http.StatusAccepted, map[string]string{"result": "pull request " + pr.Action})
+		return
+	}
 	if event != "push" {
 		writeJSON(w, http.StatusAccepted, map[string]string{"result": "ignored: " + event})
 		return
@@ -516,7 +536,8 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	deployed := []string{}
 	for _, a := range apps {
-		if a.Git.Branch != branch || !a.AutoDeploy {
+		// Previews deploy on their pull request's events.
+		if a.Git.Branch != branch || !a.AutoDeploy || a.PreviewOf != 0 {
 			continue
 		}
 		queued, err := s.deployPush(a.ID, commit)

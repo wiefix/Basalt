@@ -48,6 +48,11 @@ type appView struct {
 	TemplateRevision int    `json:"template_revision,omitempty"`
 	// TemplateUpdate is the version a newer template revision brings.
 	TemplateUpdate string `json:"template_update,omitempty"`
+	// Previews: where the app's pull requests are deployed; a preview is of
+	// an app, for a pull request.
+	PreviewDomain string `json:"preview_domain,omitempty"`
+	PreviewOf     int64  `json:"preview_of,omitempty"`
+	PRNumber      int    `json:"pr_number,omitempty"`
 
 	Port    int      `json:"port"`
 	Domains []string `json:"domains"`
@@ -68,7 +73,8 @@ func viewApp(a *store.App) appView {
 	}
 	v := appView{ID: a.ID, ServerID: a.ServerID, ProjectID: a.ProjectID, Name: a.Name, Source: a.Source, Image: a.Image, Port: a.Port,
 		Domains: a.Domains, TLS: a.TLS, Volumes: vols, MemoryMB: a.MemoryMB, CPUs: a.CPUs, ReadOnly: a.ReadOnly, CreatedAt: a.CreatedAt,
-		Template: a.Template, TemplateRevision: a.TemplateRevision, Replicas: nonNil(a.Replicas)}
+		Template: a.Template, TemplateRevision: a.TemplateRevision, Replicas: nonNil(a.Replicas),
+		PreviewDomain: a.PreviewDomain, PreviewOf: a.PreviewOf, PRNumber: a.PRNumber}
 	switch a.Source {
 	case store.SourceGit:
 		v.Git = &gitView{URL: a.Git.URL, Branch: a.Git.Branch, Dockerfile: a.Git.Dockerfile, Context: a.Git.Context,
@@ -929,36 +935,62 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request, p *prin
 		return
 	}
 	volumes := r.URL.Query().Get("volumes") == "1"
-	images, err := s.db.SucceededImages(r.Context(), app.ID)
+	// Its previews go first, with their data.
+	previews, err := s.db.Previews(r.Context(), app.ID)
 	if err != nil {
-		s.internalError(w, r, "list deployed images", err)
+		s.internalError(w, r, "list previews", err)
 		return
 	}
-	servers, err := s.db.DeleteApp(r.Context(), app.ID)
+	var cleanup []string
+	for _, pv := range previews {
+		c, err := s.deleteApp(r.Context(), pv, true)
+		if err != nil {
+			s.internalError(w, r, "delete preview", err)
+			return
+		}
+		cleanup = append(cleanup, c...)
+	}
+	c, err := s.deleteApp(r.Context(), app, volumes)
 	if err != nil {
 		s.internalError(w, r, "delete app", err)
 		return
 	}
-	s.audit(r, &p.user.ID, "app.deleted", map[string]any{"app_id": app.ID, "name": app.Name, "volumes": volumes})
-	if len(servers) > 1 {
-		s.healthChanged(r.Context()) // the checks of its replicas are gone
-		s.syncAutoDNS(r.Context())
-	}
-	// Stop routing first, then remove the containers.
-	for _, id := range servers {
-		s.PushProxy(r.Context(), id)
-	}
+	cleanup = append(cleanup, c...)
+	s.audit(r, &p.user.ID, "app.deleted", map[string]any{"app_id": app.ID, "name": app.Name, "volumes": volumes, "previews": len(previews)})
 	resp := map[string]any{"sync": s.proxySync(r.Context(), app.ServerID)}
-	var cleanup []string
-	for _, id := range servers {
-		if err := s.removeAppFrom(r.Context(), id, app.ID, volumes, imagesToPrune(images, 0)); err != nil {
-			cleanup = append(cleanup, s.serverLabel(r.Context(), id, len(servers))+err.Error())
-		}
-	}
 	if len(cleanup) > 0 {
 		resp["cleanup_error"] = strings.Join(cleanup, "; ")
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// deleteApp removes an app: its record, its routes, then its containers
+// (and volumes, if asked) on every server. It returns what could not be
+// cleaned up yet (an offline server cleans up when it reconnects).
+func (s *Server) deleteApp(ctx context.Context, app *store.App, volumes bool) ([]string, error) {
+	images, err := s.db.SucceededImages(ctx, app.ID)
+	if err != nil {
+		return nil, err
+	}
+	servers, err := s.db.DeleteApp(ctx, app.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(servers) > 1 {
+		s.healthChanged(ctx) // the checks of its replicas are gone
+		s.syncAutoDNS(ctx)
+	}
+	// Stop routing first, then remove the containers.
+	for _, id := range servers {
+		s.PushProxy(ctx, id)
+	}
+	var cleanup []string
+	for _, id := range servers {
+		if err := s.removeAppFrom(ctx, id, app.ID, volumes, imagesToPrune(images, 0)); err != nil {
+			cleanup = append(cleanup, s.serverLabel(ctx, id, len(servers))+err.Error())
+		}
+	}
+	return cleanup, nil
 }
 
 // removeAppFrom removes an app's containers (and, if asked, its volumes)

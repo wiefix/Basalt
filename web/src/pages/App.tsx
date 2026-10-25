@@ -80,6 +80,7 @@ export function AppPage({ user: me }: { user: User }) {
           </div>
         </div>
       </div>
+      {a.preview_of ? <PreviewBanner app={a} /> : null}
       {server && server.status !== "online" && (
         <div className="alert warn" style={{ marginBottom: 16 }}>
           The server is {server.status}. The {isDB ? "database" : "app"} keeps running; it cannot be deployed or inspected
@@ -220,7 +221,8 @@ function Overview({ app, user, me, placements }: { app: App; user: User; me: Use
       </div>
 
       {app.template && <TemplateCard app={app} user={user} />}
-      {(app.source === "image" || app.source === "git" || app.source === "compose") && (
+      {app.source === "git" && !!app.git?.source_id && !app.preview_of && <PreviewsCard app={app} user={user} />}
+      {(app.source === "image" || app.source === "git" || app.source === "compose") && !app.preview_of && (
         <ServersCard app={app} user={user} me={me} placements={placements} />
       )}
       {app.source === "compose" && <ServicesCard app={app} services={st?.services} />}
@@ -1583,6 +1585,135 @@ function ConnectionTab({ app }: { app: App }) {
             <Icon name="key" size={14} /> {change.isPending ? "Changing…" : "Change password"}
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// PreviewBanner heads the page of a preview: what it is a copy of, and
+// that it goes with its pull request.
+function PreviewBanner({ app }: { app: App }) {
+  const parent = useQuery({ queryKey: ["app", app.preview_of], queryFn: () => api.app(app.preview_of!), retry: false });
+  return (
+    <div className="alert" style={{ marginBottom: 16 }}>
+      Preview of{" "}
+      {parent.data ? <Link to={`/apps/${app.preview_of}`}>{parent.data.app.name}</Link> : `app #${app.preview_of}`} for pull request #
+      {app.pr_number} (branch <span className="mono">{app.git?.branch}</span>). Every push to the pull request deploys it; it is
+      deleted, with its data, when the pull request closes.
+    </div>
+  );
+}
+
+// PreviewsCard sets where the app's pull requests are deployed and lists
+// their previews.
+function PreviewsCard({ app, user }: { app: App; user: User }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const data = useQuery({ queryKey: ["previews", app.id], queryFn: () => api.previews(app.id), refetchInterval: 30_000 });
+  const [editing, setEditing] = useState(false);
+  const [domain, setDomain] = useState("");
+  const save = useMutation({
+    mutationFn: (d: string) => api.setPreviews(app.id, d),
+    onSuccess: (r) => {
+      qc.setQueryData(["previews", app.id], r);
+      qc.invalidateQueries({ queryKey: ["app", app.id] });
+      setEditing(false);
+      toast(r.domain ? `Pull requests into ${app.git?.branch} are deployed at pr-<number>.${r.domain}` : "Previews turned off");
+    },
+  });
+  if (data.isPending) return null;
+  if (data.error) return <ErrorBox error={data.error} />;
+  const d = data.data;
+  const admin = can(user, "admin");
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Previews of pull requests</h2>
+        {admin && !editing && (
+          <button
+            className="btn sm"
+            onClick={() => {
+              setDomain(d.domain);
+              setEditing(true);
+            }}
+          >
+            <Icon name="edit" size={14} /> {d.domain ? "Change" : "Set up"}
+          </button>
+        )}
+      </div>
+      <div className="card-body stack">
+        {editing ? (
+          <form
+            className="form"
+            onSubmit={(e: FormEvent) => {
+              e.preventDefault();
+              save.mutate(domain.trim());
+            }}
+          >
+            <ErrorBox error={save.error} />
+            <Field
+              label="Domain for previews"
+              help={
+                <>
+                  Each pull request into <span className="mono">{app.git?.branch}</span> runs at{" "}
+                  <span className="mono">pr-&lt;number&gt;.{domain.trim() || "preview.example.com"}</span>. Point{" "}
+                  <span className="mono">*.{domain.trim() || "preview.example.com"}</span> at this app's server (automatic if
+                  the zone is under DNS). Empty: no previews.
+                </>
+              }
+            >
+              <input className="input mono" value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="preview.example.com" autoFocus />
+            </Field>
+            <div className="row">
+              <button className="btn primary sm" disabled={save.isPending}>
+                Save
+              </button>
+              <button type="button" className="btn sm" onClick={() => setEditing(false)}>
+                Cancel
+              </button>
+            </div>
+          </form>
+        ) : !d.domain ? (
+          <p className="muted" style={{ margin: 0 }}>
+            Off. With a domain for previews, each pull request into <span className="mono">{app.git?.branch}</span> gets its
+            own copy of the app, deployed at every push to it and deleted when it closes.
+          </p>
+        ) : d.previews.length === 0 ? (
+          <p className="muted" style={{ margin: 0 }}>
+            Pull requests into <span className="mono">{app.git?.branch}</span> are deployed at{" "}
+            <span className="mono">pr-&lt;number&gt;.{d.domain}</span>. None is open.
+          </p>
+        ) : (
+          <div className="table-wrap">
+            <table className="table">
+              <tbody>
+                {d.previews.map((pv) => (
+                  <tr key={pv.id}>
+                    <td>
+                      <Link to={`/apps/${pv.id}`}>
+                        <strong>#{pv.pr_number}</strong>
+                      </Link>{" "}
+                      <span className="mono faint small">{pv.git?.branch}</span>
+                    </td>
+                    <td>
+                      {pv.domains[0] && (
+                        <a href={`https://${pv.domains[0]}`} target="_blank" rel="noreferrer noopener" className="mono small">
+                          {pv.domains[0]} ↗
+                        </a>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {d.domain && !editing && (
+          <p className="faint small" style={{ margin: 0 }}>
+            Previews get the app's environment variables (not its linked databases or data), and at most {d.max} run at once.
+            Pull requests from forks are not built: their code would run on your server.
+          </p>
+        )}
       </div>
     </div>
   );

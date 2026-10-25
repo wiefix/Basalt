@@ -174,6 +174,7 @@ type Server struct {
 	checkLive   *liveLogs  // output of running integrity checks
 	panelRepoMu sync.Mutex // one restic job on the panel's repository at a time
 	pendMu      sync.Mutex
+	previewMu   sync.Mutex       // creating and removing previews
 	pending     map[int64]string // per app: commit pushed while a deployment ran
 	stopsMu     sync.Mutex
 	stops       map[int64]*deployStop // running deployments, by ID
@@ -491,6 +492,8 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("POST /api/v1/apps/{id}/deploy-key", s.requireProject(store.RoleAdmin, s.handleRegenerateDeployKey))
 	rt.Handle("GET /api/v1/apps/{id}/webhook", s.requireProject(store.RoleAdmin, s.handleGetWebhook))
 	rt.Handle("PUT /api/v1/apps/{id}/webhook", s.requireProject(store.RoleAdmin, s.handleSetWebhook))
+	rt.Handle("GET /api/v1/apps/{id}/previews", s.requireProject(store.RoleViewer, s.handlePreviews))
+	rt.Handle("PUT /api/v1/apps/{id}/previews", s.requireProject(store.RoleAdmin, s.handleSetPreviews))
 	rt.Handle("GET /api/v1/database-engines", s.requireRole(store.RoleUser, s.handleListEngines))
 	rt.Handle("GET /api/v1/apps/{id}/connection", s.requireProject(store.RoleAdmin, s.handleDatabaseConnection))
 	rt.Handle("POST /api/v1/apps/{id}/links", s.requireProject(store.RoleAdmin, s.handleLinkApp))

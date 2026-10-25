@@ -31,6 +31,7 @@ var (
 	recordResp   = obj("record", dnsRecordView{})
 	channelResp  = obj("channel", channelView{})
 	webhookResp  = obj("webhook", webhookView{})
+	previewsResp = obj("domain", "", "previews", []appView{}, "max", 0)
 	trashResp    = obj("entries", []agentproto.TrashEntry{}, "keep_days", 0)
 	bansResp     = obj("bans", []sftpd.Ban{})
 	accessResp   = obj("entries", []agentproto.AccessEntry{})
@@ -320,6 +321,9 @@ var apiDocs = map[string]apiDoc{
 	"POST /api/v1/apps/{id}/deploy-key":       {summary: "Replace a git app's deploy key", resp: appResp},
 	"GET /api/v1/apps/{id}/webhook":           {summary: "A git app's push webhook", resp: webhookResp},
 	"PUT /api/v1/apps/{id}/webhook":           {summary: "Turn deploy-on-push on or off, or make a new secret", body: webhookRequest{}, resp: webhookResp},
+	"GET /api/v1/apps/{id}/previews":          {summary: "Where a GitHub app's pull requests are deployed, and their previews", resp: previewsResp},
+	"PUT /api/v1/apps/{id}/previews": {summary: "Deploy each pull request into the app's branch at pr-<number>.<domain> (empty: no previews)",
+		body: previewsRequest{}, resp: previewsResp},
 	"POST /api/v1/webhooks/github": {summary: "Push webhook of a GitHub App the panel created: deploys the apps of the repository and branch (authenticated by its signature)",
 		resp: obj("result", "", "deploying?", []string{})},
 	"GET /api/v1/git-sources": {summary: "Git sources (GitHub Apps) apps can be built from; for those who can create apps",

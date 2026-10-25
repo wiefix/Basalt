@@ -287,6 +287,11 @@ export interface App {
   template?: string;
   template_revision?: number;
   template_update?: string;
+  // Previews: where the app's pull requests are deployed (GitHub apps); a
+  // preview is of an app, for a pull request.
+  preview_domain?: string;
+  preview_of?: number;
+  pr_number?: number;
   // Other servers the app runs on (image and git apps).
   replicas: number[];
   created_at: string;
@@ -1110,7 +1115,7 @@ export const api = {
 
   gitSources: () => get<{ sources: GitSource[]; panel_url: string }>("/api/v1/git-sources"),
   gitSource: (id: number) =>
-    get<{ source: GitSource; installations: { id: number; account: string; all: boolean; html_url: string; statuses: boolean }[]; error?: string }>(
+    get<{ source: GitSource; installations: { id: number; account: string; all: boolean; html_url: string; statuses: boolean; pull_requests: boolean }[]; error?: string }>(
       `/api/v1/git-sources/${id}`,
     ),
   deleteGitSource: (id: number) => del<void>(`/api/v1/git-sources/${id}`),
@@ -1236,6 +1241,9 @@ export const api = {
   appWebhook: (id: number) => get<{ webhook: Webhook }>(`/api/v1/apps/${id}/webhook`),
   setAppWebhook: (id: number, b: { auto_deploy: boolean; regenerate?: boolean }) =>
     put<{ webhook: Webhook }>(`/api/v1/apps/${id}/webhook`, b),
+  previews: (id: number) => get<{ domain: string; previews: App[]; max: number }>(`/api/v1/apps/${id}/previews`),
+  setPreviews: (id: number, domain: string) =>
+    put<{ domain: string; previews: App[]; max: number }>(`/api/v1/apps/${id}/previews`, { domain }),
   appEnv: (id: number) => get<{ env: Record<string, string> }>(`/api/v1/apps/${id}/env`),
   setAppEnv: (id: number, env: Record<string, string>) => put<{ ok: boolean }>(`/api/v1/apps/${id}/env`, { env }),
   deployApp: (id: number, rollbackTo?: number) =>

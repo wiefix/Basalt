@@ -122,16 +122,23 @@ function SourceCard({ source }: { source: GitSource }) {
         </p>
       )}
       {insts.length > 0 &&
-        (insts.every((i) => i.statuses) ? (
+        (insts.every((i) => i.statuses && i.pull_requests) ? (
           <p className="faint small" style={{ margin: 0 }}>
             Each deployment of a pushed commit shows on it in GitHub (“Basalt / app”: deploying, deployed or failed), linking to
-            the app here.
+            the app here; pull requests can get previews (an app's Overview).
           </p>
         ) : (
           <div className="alert small">
-            Deployments do not show on the commits yet: this GitHub App was created before Basalt asked for it. On GitHub: Settings (of the account or organization that owns
-            it) → Developer settings → GitHub Apps → {source.name} → Permissions & events → Repository permissions → Commit
-            statuses: Read and write; save, then accept the new permission on each installation (GitHub asks there).
+            This GitHub App was created before Basalt asked for{" "}
+            {[
+              !insts.every((i) => i.statuses) && "commit statuses (deployments shown on the commits)",
+              !insts.every((i) => i.pull_requests) && "pull requests (previews)",
+            ]
+              .filter(Boolean)
+              .join(" and ")}
+            . On GitHub: Settings (of the account or organization that owns it) → Developer settings → GitHub Apps → {source.name}{" "}
+            → Permissions & events: Repository permissions → Commit statuses: Read and write, Pull requests: Read-only; Subscribe to
+            events → Pull request. Save, then accept the new permissions on each installation (GitHub asks there).
           </div>
         ))}
     </div>

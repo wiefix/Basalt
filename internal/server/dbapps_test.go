@@ -19,11 +19,33 @@ type fakeHub struct {
 	mu      sync.Mutex
 	deploys []agentproto.AppSpec
 	servers []int64 // the server of each deployment
+	calls   []fakeCall
+}
+
+type fakeCall struct {
+	msgType string
+	req     any
 }
 
 func (h *fakeHub) Connected(int64) bool { return true }
-func (h *fakeHub) Call(context.Context, int64, string, any, any) error {
+func (h *fakeHub) Call(_ context.Context, _ int64, msgType string, req, _ any) error {
+	h.mu.Lock()
+	h.calls = append(h.calls, fakeCall{msgType, req})
+	h.mu.Unlock()
 	return nil
+}
+
+// called lists the requests of a type the agent got.
+func (h *fakeHub) called(msgType string) []any {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []any
+	for _, c := range h.calls {
+		if c.msgType == msgType {
+			out = append(out, c.req)
+		}
+	}
+	return out
 }
 func (h *fakeHub) Stream(_ context.Context, serverID int64, msgType string, req, resp any, _ func(json.RawMessage) error) error {
 	if spec, ok := req.(agentproto.AppSpec); ok && msgType == agentproto.TypeAppDeploy {

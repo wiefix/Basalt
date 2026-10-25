@@ -293,11 +293,14 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request, repos []Repo,
 			}
 			seen[rp.Installation] = true
 			owner, _, _ := strings.Cut(rp.FullName, "/")
-			perms := map[string]string{"contents": "read", "metadata": "read", "statuses": "write"}
-			if noStatus {
+			perms := map[string]string{"contents": "read", "metadata": "read", "statuses": "write", "pull_requests": "read"}
+			events := []string{"push", "pull_request"}
+			if noStatus { // an app from before Basalt asked for more
 				delete(perms, "statuses")
+				delete(perms, "pull_requests")
+				events = []string{"push"}
 			}
-			out = append(out, map[string]any{"id": rp.Installation, "account": map[string]string{"login": owner}, "permissions": perms,
+			out = append(out, map[string]any{"id": rp.Installation, "account": map[string]string{"login": owner}, "permissions": perms, "events": events,
 				"repository_selection": "selected", "html_url": fmt.Sprintf("https://github.example/settings/installations/%d", rp.Installation)})
 		}
 		s.json(w, http.StatusOK, out)

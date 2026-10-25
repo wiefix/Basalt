@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -133,7 +134,8 @@ func (c *Client) do(ctx context.Context, method, path, auth string, body, out an
 
 // Manifest describes the GitHub App the panel at panelURL asks GitHub to
 // create: read access to code, commit statuses (how a deployment of a
-// commit went), push events to the panel's webhook.
+// commit went), push and pull request events (previews) to the panel's
+// webhook.
 func Manifest(name, panelURL string) map[string]any {
 	return map[string]any{
 		"name":         name,
@@ -146,8 +148,8 @@ func Manifest(name, panelURL string) map[string]any {
 		},
 		"public":              false,
 		"setup_on_update":     true,
-		"default_permissions": map[string]string{"contents": "read", "metadata": "read", "statuses": "write"},
-		"default_events":      []string{"push"},
+		"default_permissions": map[string]string{"contents": "read", "metadata": "read", "statuses": "write", "pull_requests": "read"},
+		"default_events":      []string{"push", "pull_request"},
 	}
 }
 
@@ -241,6 +243,8 @@ type Installation struct {
 	// created before Basalt asked for it lack the permission until it is
 	// added in the app's settings and accepted on the installation).
 	Statuses bool `json:"statuses"`
+	// PullRequests: GitHub sends the app's pull requests (previews).
+	PullRequests bool `json:"pull_requests"`
 }
 
 // Installations lists where the app is installed.
@@ -257,6 +261,7 @@ func (c *Client) Installations(ctx context.Context, app App) ([]Installation, er
 		Selection   string            `json:"repository_selection"`
 		HTMLURL     string            `json:"html_url"`
 		Permissions map[string]string `json:"permissions"`
+		Events      []string          `json:"events"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/app/installations?per_page=100", "Bearer "+tok, nil, &raw); err != nil {
 		return nil, err
@@ -264,7 +269,8 @@ func (c *Client) Installations(ctx context.Context, app App) ([]Installation, er
 	out := make([]Installation, 0, len(raw))
 	for _, r := range raw {
 		out = append(out, Installation{ID: r.ID, Account: r.Account.Login, All: r.Selection == "all", HTMLURL: r.HTMLURL,
-			Statuses: r.Permissions["statuses"] == "write"})
+			Statuses:     r.Permissions["statuses"] == "write",
+			PullRequests: r.Permissions["pull_requests"] != "" && slices.Contains(r.Events, "pull_request")})
 	}
 	return out, nil
 }

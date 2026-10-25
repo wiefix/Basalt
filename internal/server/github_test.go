@@ -67,7 +67,7 @@ func TestGitHubSource(t *testing.T) {
 	if l := c.want(http.StatusOK, "GET", "/api/v1/git-sources", nil).body["sources"].([]any); len(l) != 1 {
 		t.Fatalf("sources: %v", l)
 	}
-	if in := c.want(http.StatusOK, "GET", base, nil).body["installations"].([]any); len(in) != 1 || in[0].(map[string]any)["account"] != "acme" || in[0].(map[string]any)["statuses"] != true {
+	if in := c.want(http.StatusOK, "GET", base, nil).body["installations"].([]any); len(in) != 1 || in[0].(map[string]any)["account"] != "acme" || in[0].(map[string]any)["statuses"] != true || in[0].(map[string]any)["pull_requests"] != true {
 		t.Fatalf("installations: %v", in)
 	}
 	repos := c.want(http.StatusOK, "GET", base+"/repos", nil).body["repos"].([]any)
@@ -171,7 +171,7 @@ func TestGitHubSource(t *testing.T) {
 	}
 	// An installation without the permission: deployments go on, no status.
 	gh.GrantStatuses(false)
-	if in := c.want(http.StatusOK, "GET", base, nil).body["installations"].([]any); in[0].(map[string]any)["statuses"] != false {
+	if in := c.want(http.StatusOK, "GET", base, nil).body["installations"].([]any); in[0].(map[string]any)["statuses"] != false || in[0].(map[string]any)["pull_requests"] != false {
 		t.Fatalf("installations: %v", in)
 	}
 	push(gh.WebhookSecret, "acme/shop", "refs/heads/dev", http.StatusAccepted)
