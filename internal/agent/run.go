@@ -647,6 +647,11 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return nil, err
 		}
+		if req.Restore != "" {
+			if err := a.sites.restoreTrash(ctx, req.Restore, req.SiteID); err != nil {
+				return nil, err
+			}
+		}
 		return a.sites.trash(ctx, req.Remove)
 	case agentproto.TypeSiteUsage:
 		var req agentproto.SiteUsageRequest

@@ -41,6 +41,12 @@ func TestInotifyWatch(t *testing.T) {
 	}
 	expect := func(what string, want bool, do func()) {
 		t.Helper()
+		// One write makes several events (modify, close): let those of
+		// the step before arrive before starting.
+		for changed() {
+			time.Sleep(100 * time.Millisecond)
+		}
+		time.Sleep(100 * time.Millisecond)
 		changed()
 		do()
 		wait := 2 * time.Second

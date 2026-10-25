@@ -19,6 +19,7 @@ import {
   useToast,
 } from "../components/ui";
 import { EnrollInstructions } from "./Servers";
+import { ProjectSelect, useNewProject } from "../components/projects";
 
 const UNINSTALL = "curl -fsSL https://github.com/wiefix/Basalt/releases/latest/download/install.sh | sudo sh -s -- uninstall";
 
@@ -224,7 +225,7 @@ export function ServerPage({ user }: { user: User }) {
 
           {s.status === "online" && <CertificatesCard serverId={id} />}
           {s.status === "online" && can(user, "admin") && <SFTPBansCard serverId={id} />}
-          {s.status === "online" && can(user, "admin") && <TrashCard serverId={id} />}
+          {s.status === "online" && can(user, "admin") && <TrashCard server={s} />}
           <RoutesCard serverId={id} user={user} />
         </>
       )}
@@ -504,10 +505,12 @@ function AddRouteModal({ serverId, onClose }: { serverId: number; onClose: () =>
 
 // TrashCard lists the files of deleted sites still on the server (hidden
 // when there are none).
-function TrashCard({ serverId }: { serverId: number }) {
+function TrashCard({ server }: { server: Server }) {
+  const serverId = server.id;
   const qc = useQueryClient();
   const toast = useToast();
   const confirm = useConfirm();
+  const [restoring, setRestoring] = useState<{ name: string; siteId: number } | null>(null);
   const trash = useQuery({ queryKey: ["trash", serverId], queryFn: () => api.trash(serverId), retry: false });
   const remove = useMutation({
     mutationFn: (name: string) => api.removeTrash(serverId, name),
@@ -527,7 +530,9 @@ function TrashCard({ serverId }: { serverId: number }) {
       </div>
       <div className="card-body muted small" style={{ paddingBottom: 0 }}>
         The files of deleted sites stay on the server for {trash.data.keep_days} days (in the sites folder, .trash), then go.
+        Restore makes them a new site; its databases and SFTP accounts went with the old one.
       </div>
+      {restoring && <RestoreSiteModal server={server} entry={restoring} onClose={() => setRestoring(null)} />}
       <div className="table-wrap">
         <table className="table">
           <tbody>
@@ -537,9 +542,14 @@ function TrashCard({ serverId }: { serverId: number }) {
                 <td className="muted small">deleted {formatDate(e.deleted_at)}</td>
                 <td className="num muted">{formatBytes(e.bytes)}</td>
                 <td className="num">
-                  <button className="btn sm" disabled={remove.isPending} onClick={() => ask(e.name, e.site_id)}>
-                    Delete now
-                  </button>
+                  <div className="row" style={{ justifyContent: "flex-end" }}>
+                    <button className="btn sm" onClick={() => setRestoring({ name: e.name, siteId: e.site_id })}>
+                      Restore
+                    </button>
+                    <button className="btn sm ghost" disabled={remove.isPending} onClick={() => ask(e.name, e.site_id)}>
+                      Delete now
+                    </button>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -547,6 +557,85 @@ function TrashCard({ serverId }: { serverId: number }) {
         </table>
       </div>
     </div>
+  );
+}
+
+function RestoreSiteModal({ server, entry, onClose }: { server: Server; entry: { name: string; siteId: number }; onClose: () => void }) {
+  const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [name, setName] = useState(`restored-${entry.siteId}`);
+  const [domains, setDomains] = useState("");
+  const [php, setPhp] = useState("");
+  const [tls, setTls] = useState("auto");
+  const [projectId, setProjectId] = useNewProject();
+  const restore = useMutation({
+    mutationFn: () =>
+      api.restoreTrash(server.id, entry.name, {
+        name: name.trim(),
+        domains: domains.split(/[\s,]+/).filter(Boolean),
+        tls,
+        php_version: php,
+        project_id: projectId,
+      }),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["trash", server.id] });
+      qc.invalidateQueries({ queryKey: ["sites"] });
+      navigate(`/sites/${r.site.id}`);
+    },
+  });
+  return (
+    <Modal
+      title={`Restore the files of site #${entry.siteId}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" form="restore-site" disabled={restore.isPending}>
+            Restore as a new site
+          </button>
+        </>
+      }
+    >
+      <form
+        id="restore-site"
+        className="form"
+        onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          restore.mutate();
+        }}
+      >
+        <ErrorBox error={restore.error} />
+        <ProjectSelect value={projectId} onChange={setProjectId} />
+        <Field label="Name">
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} required autoFocus />
+        </Field>
+        <Field label="Domains" help="Separate several with spaces; point their DNS at the server.">
+          <input className="input" value={domains} onChange={(e) => setDomains(e.target.value)} placeholder="example.com www.example.com" required />
+        </Field>
+        <Field label="Type">
+          <select className="input" value={php} onChange={(e) => setPhp(e.target.value)}>
+            <option value="">Static</option>
+            {(server.isolated ? server.php_versions : []).map((v) => (
+              <option key={v} value={v}>
+                PHP {v}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Certificate">
+          <select className="input" value={tls} onChange={(e) => setTls(e.target.value)}>
+            <option value="auto">Let's Encrypt (public domains)</option>
+            <option value="internal">Internal CA (private or test domains)</option>
+          </select>
+        </Field>
+        <p className="faint small" style={{ margin: 0 }}>
+          The files become the new site's, owned by its own user. Databases and SFTP accounts of the deleted site are not
+          restored.
+        </p>
+      </form>
+    </Modal>
   );
 }
 

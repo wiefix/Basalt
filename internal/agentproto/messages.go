@@ -526,11 +526,15 @@ type SiteInstallResponse struct {
 }
 
 // TypeSiteTrash lists the folders of deleted sites waiting in the trash;
-// with Remove (an entry's name) it deletes that one first.
+// with Remove (an entry's name) it deletes that one first, with Restore
+// it makes that one the folder of site SiteID (a new site), its files
+// given to the site's user.
 const TypeSiteTrash = "site_trash"
 
 type SiteTrash struct {
-	Remove string `json:"remove,omitempty"`
+	Remove  string `json:"remove,omitempty"`
+	Restore string `json:"restore,omitempty"`
+	SiteID  int64  `json:"site_id,omitempty"`
 }
 
 type TrashEntry struct {

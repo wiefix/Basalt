@@ -111,9 +111,43 @@ func TestSiteTrash(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.sitesRoot, ".trash", name)); !os.IsNotExist(err) {
 		t.Fatal("files still in the trash")
 	}
+
+	// Another deleted site comes back from the trash as a new site, with
+	// its files.
+	r = p.call(http.StatusCreated, "POST", "/api/v1/sites", map[string]any{
+		"server_id": mustAtoi(h.id), "name": "back", "domains": []string{"back.localhost"}, "tls": "internal",
+	})
+	old := jsonID(r["site"].(map[string]any)["id"])
+	if code, _, b := p.raw("PUT", "/api/v1/sites/"+old+"/files/content?path=%2Fpublic%2Fkept.txt", "", []byte("kept")); code != http.StatusCreated {
+		t.Fatalf("upload: %d %s", code, b)
+	}
+	p.call(http.StatusOK, "DELETE", "/api/v1/sites/"+old, nil)
+	name = p.call(http.StatusOK, "GET", trash, nil)["entries"].([]any)[0].(map[string]any)["name"].(string)
+	restore := func(code int, entry, site string) map[string]any {
+		return p.call(code, "POST", trash+"/"+entry+"/restore", map[string]any{"name": site, "domains": []string{site + ".localhost"}, "tls": "internal"})
+	}
+	restore(http.StatusUnprocessableEntity, "..%2Fx", "nope")
+	restore(http.StatusUnprocessableEntity, "99-1", "nope") // no such folder: nothing is left behind
+	if l := p.call(http.StatusOK, "GET", "/api/v1/sites", nil)["sites"].([]any); len(l) != 0 {
+		t.Fatalf("a failed restore left a site: %v", l)
+	}
+	restore(http.StatusUnprocessableEntity, name, "bad name!")
+	nid := jsonID(restore(http.StatusCreated, name, "back")["site"].(map[string]any)["id"])
+	if code, _, b := p.raw("GET", "/api/v1/sites/"+nid+"/files/content?path=%2Fpublic%2Fkept.txt", "", nil); code != http.StatusOK || string(b) != "kept" {
+		t.Fatalf("restored file: %d %q", code, b)
+	}
+	if l := p.call(http.StatusOK, "GET", trash, nil)["entries"].([]any); len(l) != 0 {
+		t.Fatalf("still in the trash: %v", l)
+	}
+	var n int
+	p.db.R.QueryRow(`SELECT COUNT(*) FROM audit_log WHERE action = 'site.restored'`).Scan(&n)
+	if n != 1 {
+		t.Fatal("no audit entry")
+	}
 	p.call(http.StatusCreated, "POST", "/api/v1/users", map[string]string{"email": "m@example.com", "name": "M", "password": "a long password 1", "role": "member"})
 	m := *p
 	m.hc = &http.Client{Jar: newJar()}
 	m.call(http.StatusOK, "POST", "/api/v1/auth/login", map[string]string{"email": "m@example.com", "password": "a long password 1"})
 	m.call(http.StatusForbidden, "GET", trash, nil)
+	m.call(http.StatusForbidden, "POST", trash+"/1-1/restore", map[string]any{"name": "x"})
 }

@@ -2191,6 +2191,13 @@ export type PostServersIdRoutesResponse = {
 
 export type PostServersIdRoutesBody = CreateRouteRequest;
 
+export type PostServersIdTrashNameRestoreResponse = {
+  provision_error?: string;
+  site: SiteView;
+};
+
+export type PostServersIdTrashNameRestoreBody = CreateSiteRequest;
+
 export type PostSetupResponse = {
   user: UserView;
 };

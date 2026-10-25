@@ -1308,6 +1308,8 @@ export const api = {
   deleteSFTPUser: (siteId: number, id: number) => del<{ ok: boolean }>(`/api/v1/sites/${siteId}/sftp-users/${id}`),
   accessLog: (base: string) => get<{ entries: AccessEntry[] }>(`${base}/access-log?limit=200`),
   trash: (serverId: number) => get<{ entries: TrashEntry[]; keep_days: number }>(`/api/v1/servers/${serverId}/trash`),
+  restoreTrash: (serverId: number, name: string, b: { name: string; domains: string[]; tls: string; php_version: string; project_id: number }) =>
+    post<{ site: Site; provision_error?: string }>(`/api/v1/servers/${serverId}/trash/${encodeURIComponent(name)}/restore`, b),
   removeTrash: (serverId: number, name: string) =>
     del<{ entries: TrashEntry[]; keep_days: number }>(`/api/v1/servers/${serverId}/trash/${encodeURIComponent(name)}`),
   sftpBans: (serverId: number) => get<{ bans: SFTPBan[] }>(`/api/v1/servers/${serverId}/sftp-bans`),

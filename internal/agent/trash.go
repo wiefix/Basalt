@@ -3,15 +3,19 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/sysuser"
 )
 
 // Deleted sites wait in <sites-root>/.trash/<id>-<unix time> for trashKeep,
@@ -86,4 +90,58 @@ func (m *sitesManager) cleanTrash(now time.Time) {
 		}
 		m.log.Info("removed a deleted site's files after 30 days", "entry", e.Name())
 	}
+}
+
+// restoreTrash makes the trash entry name the folder of site id (a new
+// site, whose folder does not exist yet). The deleted site's user is gone:
+// its files go to the new site's user (the www group stays), without
+// following symlinks.
+func (m *sitesManager) restoreTrash(ctx context.Context, name string, id int64) error {
+	if _, _, ok := parseTrashName(name); !ok || id <= 0 {
+		return errors.New("invalid trash entry")
+	}
+	src := filepath.Join(m.root, trashDir, name)
+	if fi, err := os.Lstat(src); err != nil || !fi.IsDir() {
+		return errors.New("no such folder in the trash")
+	}
+	dst, err := m.dir(id)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(dst); err == nil {
+		return fmt.Errorf("site %d has a folder already", id)
+	}
+	uid, gid, www := -1, -1, -1
+	if m.isolate {
+		if uid, gid, err = sysuser.EnsureUser(ctx, sysuser.SiteUser(id), dst); err != nil {
+			return err
+		}
+		if www, err = sysuser.LookupGroup(m.wwwGroup); err != nil {
+			return err
+		}
+	}
+	if err := os.Rename(src, dst); err != nil {
+		return publicError(err)
+	}
+	m.log.Info("restored a deleted site's files", "entry", name, "site_id", id)
+	if !m.isolate {
+		return nil
+	}
+	return filepath.WalkDir(dst, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		g := gid
+		if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Gid) == www {
+			g = www
+		}
+		return os.Lchown(p, uid, g)
+	})
 }

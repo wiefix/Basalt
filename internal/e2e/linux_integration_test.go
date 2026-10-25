@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -428,6 +429,42 @@ try {
 	}
 	if g, _ := filepath.Glob("/etc/php/*/fpm/pool.d/basalt-site-" + idA + ".conf"); len(g) != 0 {
 		t.Errorf("pool not removed: %v", g)
+	}
+
+	// Back from the trash as a new site: every file goes to its user, the
+	// www group stays on the folders that had it.
+	trash := "/api/v1/servers/" + sid + "/trash"
+	var entry string
+	for _, e := range p.call(200, "GET", trash, nil)["entries"].([]any) {
+		if e := e.(map[string]any); jsonID(e["site_id"]) == idA {
+			entry = e["name"].(string)
+		}
+	}
+	back := p.call(http.StatusCreated, "POST", trash+"/"+entry+"/restore", map[string]any{"name": "again", "domains": []string{"again.localhost"}, "tls": "internal"})
+	idBack := jsonID(back["site"].(map[string]any)["id"])
+	uidBack := mustUID(t, "basalt-s"+idBack)
+	wwwGroup, _ := user.LookupGroup("basalt-www")
+	n := 0
+	filepath.WalkDir(filepath.Join(sitesRoot, idBack), func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			t.Fatal(err)
+		}
+		fi, _ := d.Info()
+		st := fi.Sys().(*syscall.Stat_t)
+		if strconv.Itoa(int(st.Uid)) != uidBack {
+			t.Errorf("%s belongs to uid %d, not basalt-s%s", p, st.Uid, idBack)
+		}
+		n++
+		return nil
+	})
+	if pub, _ := os.Stat(filepath.Join(sitesRoot, idBack, "public")); strconv.Itoa(int(pub.Sys().(*syscall.Stat_t).Gid)) != wwwGroup.Gid {
+		t.Error("public lost the www group")
+	}
+	if n < 4 {
+		t.Fatalf("only %d entries restored", n)
+	}
+	if _, err := os.Stat(filepath.Join(sitesRoot, ".trash", entry)); !os.IsNotExist(err) {
+		t.Error("still in the trash")
 	}
 }
 

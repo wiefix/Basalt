@@ -309,3 +309,51 @@ func (s *Server) accessLog(w http.ResponseWriter, r *http.Request, serverID int6
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": resp.Entries})
 }
+
+// handleRestoreTrash makes the files of a deleted site, in the trash of
+// its server, a new site there: the site is recorded, the agent moves the
+// folder in place and gives it to the new site's user, then the site is
+// set up as any. Its databases and SFTP accounts went with the old site.
+func (s *Server) handleRestoreTrash(w http.ResponseWriter, r *http.Request, p *principal) {
+	srv, ok := s.pathServer(w, r)
+	if !ok {
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" || len(name) > 64 {
+		writeError(w, http.StatusNotFound, "no such folder in the trash")
+		return
+	}
+	var req createSiteRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if !s.agents.Connected(srv.ID) {
+		writeError(w, http.StatusConflict, "the server is offline")
+		return
+	}
+	req.ServerID = srv.ID
+	site, ok := s.newSite(w, r, p, req)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	var list agentproto.SiteTrashResponse
+	err := s.agents.Stream(ctx, srv.ID, agentproto.TypeSiteTrash, agentproto.SiteTrash{Restore: name, SiteID: site.ID}, &list,
+		func(json.RawMessage) error { return nil })
+	if err != nil {
+		if _, derr := s.db.DeleteSite(context.WithoutCancel(r.Context()), site.ID); derr != nil {
+			s.log.Error("remove the site of a failed restore", "site_id", site.ID, "err", derr)
+		}
+		writeAgentError(w, err)
+		return
+	}
+	s.audit(r, &p.user.ID, "site.restored", map[string]any{"site_id": site.ID, "server_id": srv.ID, "entry": name})
+	resp := map[string]any{"site": viewSite(site)}
+	if err := s.ensureSite(r.Context(), site); err != nil {
+		resp["provision_error"] = err.Error()
+	}
+	s.PushProxy(r.Context(), site.ServerID)
+	writeJSON(w, http.StatusCreated, resp)
+}

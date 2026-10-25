@@ -251,6 +251,7 @@ export const checks = [
   fits<Returns<A["accessLog"]>>()<G.GetAppsIdAccessLogResponse>(),
   fits<Returns<A["trash"]>>()<G.GetServersIdTrashResponse>(),
   fits<Returns<A["removeTrash"]>>()<G.DeleteServersIdTrashNameResponse>(),
+  fits<Returns<A["restoreTrash"]>>()<G.PostServersIdTrashNameRestoreResponse>(),
   fits<Returns<A["sftpBans"]>>()<G.GetServersIdSftpBansResponse>(),
   fits<Returns<A["sftpUnban"]>>()<G.DeleteServersIdSftpBansIpResponse>(),
 ];

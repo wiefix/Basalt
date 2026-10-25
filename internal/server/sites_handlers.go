@@ -127,57 +127,10 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, p *pri
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	project, ok := s.checkCreate(w, r, p, req.ProjectID)
+	site, ok := s.newSite(w, r, p, req)
 	if !ok {
 		return
 	}
-	req.ProjectID = project
-	name := strings.TrimSpace(req.Name)
-	if !serverNameRE.MatchString(name) {
-		writeError(w, http.StatusUnprocessableEntity, "name must be 1-63 characters: letters, digits, dot, dash, underscore")
-		return
-	}
-	domains, tls, err := normalizeDomains(req.Domains, req.TLS)
-	if err == nil {
-		err = s.checkWildcards(r.Context(), domains, tls)
-	}
-	if err != nil {
-		writeError(w, http.StatusUnprocessableEntity, err.Error())
-		return
-	}
-	if s.domainError(w, r, s.checkDomainProjects(r.Context(), domains, req.ProjectID)) {
-		return
-	}
-	srv, err := s.db.ServerByID(r.Context(), req.ServerID)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusUnprocessableEntity, "server not found")
-		return
-	} else if err != nil {
-		s.internalError(w, r, "load server", err)
-		return
-	}
-	if msg := checkPHP(srv, req.PHPVersion); msg != "" {
-		writeError(w, http.StatusUnprocessableEntity, msg)
-		return
-	}
-
-	site, err := s.db.CreateSite(r.Context(), req.ProjectID, req.ServerID, name, domains, tls, req.PHPVersion)
-	var taken *store.ErrDomainTaken
-	switch {
-	case errors.As(err, &taken):
-		writeError(w, http.StatusConflict, taken.Error())
-		return
-	case errors.Is(err, store.ErrNameTaken):
-		writeError(w, http.StatusConflict, "a site with this name already exists")
-		return
-	case projectError(w, err):
-		return
-	case err != nil:
-		s.internalError(w, r, "create site", err)
-		return
-	}
-	s.audit(r, &p.user.ID, "site.created", map[string]any{"site_id": site.ID, "name": site.Name, "domains": site.Domains})
-
 	resp := map[string]any{"site": viewSite(site)}
 	if s.agents.Connected(site.ServerID) {
 		if err := s.ensureSite(r.Context(), site); err != nil {
@@ -187,6 +140,62 @@ func (s *Server) handleCreateSite(w http.ResponseWriter, r *http.Request, p *pri
 	}
 	resp["sync"] = s.proxySync(r.Context(), site.ServerID)
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// newSite checks a new site and records it (on its server nothing is done
+// yet); it answers the request itself when it cannot.
+func (s *Server) newSite(w http.ResponseWriter, r *http.Request, p *principal, req createSiteRequest) (*store.Site, bool) {
+	project, ok := s.checkCreate(w, r, p, req.ProjectID)
+	if !ok {
+		return nil, false
+	}
+	req.ProjectID = project
+	name := strings.TrimSpace(req.Name)
+	if !serverNameRE.MatchString(name) {
+		writeError(w, http.StatusUnprocessableEntity, "name must be 1-63 characters: letters, digits, dot, dash, underscore")
+		return nil, false
+	}
+	domains, tls, err := normalizeDomains(req.Domains, req.TLS)
+	if err == nil {
+		err = s.checkWildcards(r.Context(), domains, tls)
+	}
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return nil, false
+	}
+	if s.domainError(w, r, s.checkDomainProjects(r.Context(), domains, req.ProjectID)) {
+		return nil, false
+	}
+	srv, err := s.db.ServerByID(r.Context(), req.ServerID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusUnprocessableEntity, "server not found")
+		return nil, false
+	} else if err != nil {
+		s.internalError(w, r, "load server", err)
+		return nil, false
+	}
+	if msg := checkPHP(srv, req.PHPVersion); msg != "" {
+		writeError(w, http.StatusUnprocessableEntity, msg)
+		return nil, false
+	}
+
+	site, err := s.db.CreateSite(r.Context(), req.ProjectID, req.ServerID, name, domains, tls, req.PHPVersion)
+	var taken *store.ErrDomainTaken
+	switch {
+	case errors.As(err, &taken):
+		writeError(w, http.StatusConflict, taken.Error())
+		return nil, false
+	case errors.Is(err, store.ErrNameTaken):
+		writeError(w, http.StatusConflict, "a site with this name already exists")
+		return nil, false
+	case projectError(w, err):
+		return nil, false
+	case err != nil:
+		s.internalError(w, r, "create site", err)
+		return nil, false
+	}
+	s.audit(r, &p.user.ID, "site.created", map[string]any{"site_id": site.ID, "name": site.Name, "domains": site.Domains})
+	return site, true
 }
 
 func (s *Server) handleListSites(w http.ResponseWriter, r *http.Request, p *principal) {
