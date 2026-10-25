@@ -54,6 +54,11 @@ type App struct {
 	PreviewOf     int64
 	PRNumber      int
 
+	// ForgeKeyID and ForgeHookID: the deploy key and push webhook the panel
+	// added to the app's repository on GitLab or Gitea.
+	ForgeKeyID  int64
+	ForgeHookID int64
+
 	Port      int
 	EnvSealed []byte // encrypted JSON object; nil when empty
 	Volumes   []agentproto.AppVolume
@@ -220,7 +225,7 @@ func marshalVolumes(v []agentproto.AppVolume) (string, error) {
 const appQuery = `SELECT a.id, a.server_id, a.project_id, a.name, a.source, a.image, a.git_url, a.git_branch, a.git_dockerfile,
 	a.git_context, COALESCE(a.git_source_id, 0), a.git_repo, a.deploy_key, a.deploy_key_public, a.webhook_secret, a.auto_deploy,
 	a.compose, a.compose_summary, a.service, a.engine, a.engine_version, a.hostname, a.template, a.template_revision,
-	a.preview_domain, COALESCE(a.preview_of, 0), a.pr_number,
+	a.preview_domain, COALESCE(a.preview_of, 0), a.pr_number, a.forge_key_id, a.forge_hook_id,
 	(SELECT COALESCE(json_group_array(l.app_id), '[]') FROM (SELECT app_id FROM app_links WHERE database_id = a.id ORDER BY app_id) l),
 	(SELECT COALESCE(json_group_array(p.server_id), '[]') FROM (SELECT server_id FROM proxy_routes
 	 WHERE app_id = a.id AND server_id != a.server_id ORDER BY server_id) p),
@@ -238,7 +243,7 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 		if err := rows.Scan(&a.ID, &a.ServerID, &a.ProjectID, &a.Name, &a.Source, &a.Image, &a.Git.URL, &a.Git.Branch,
 			&a.Git.Dockerfile, &a.Git.Context, &a.Git.SourceID, &a.Git.Repo, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
 			&a.ComposeSealed, &summary, &a.Service, &a.Engine, &a.EngineVersion, &a.Hostname, &a.Template, &a.TemplateRevision,
-			&a.PreviewDomain, &a.PreviewOf, &a.PRNumber, &links, &replicas, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
+			&a.PreviewDomain, &a.PreviewOf, &a.PRNumber, &a.ForgeKeyID, &a.ForgeHookID, &links, &replicas, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
 			return nil, err
 		}
 		if n := len(out); n > 0 && out[n-1].ID == a.ID {

@@ -8,27 +8,30 @@ import (
 	"time"
 )
 
-// GitSource is a GitHub App the panel created (manifest flow) to reach
-// the user's repositories.
+// GitSource reaches the user's repositories: a GitHub App the panel
+// created (manifest flow), or a GitLab or Gitea instance with an access
+// token.
 type GitSource struct {
 	ID      int64
-	Kind    string // "github"
+	Kind    string // "github", "gitlab" or "gitea"
 	Name    string
 	AppID   int64 // GitHub's id of the app
 	Slug    string
 	Owner   string // the account or organization it belongs to
 	HTMLURL string
+	// BaseURL is a GitLab or Gitea instance's address.
+	BaseURL string
 	// Secrets is the encrypted JSON of its credentials.
 	Secrets   []byte
 	CreatedAt time.Time
 }
 
-const gitSourceQuery = `SELECT id, kind, name, app_id, slug, owner, html_url, secrets, created_at FROM git_sources`
+const gitSourceQuery = `SELECT id, kind, name, app_id, slug, owner, html_url, base_url, secrets, created_at FROM git_sources`
 
 func scanGitSource(sc interface{ Scan(...any) error }) (*GitSource, error) {
 	var g GitSource
 	var created int64
-	if err := sc.Scan(&g.ID, &g.Kind, &g.Name, &g.AppID, &g.Slug, &g.Owner, &g.HTMLURL, &g.Secrets, &created); err != nil {
+	if err := sc.Scan(&g.ID, &g.Kind, &g.Name, &g.AppID, &g.Slug, &g.Owner, &g.HTMLURL, &g.BaseURL, &g.Secrets, &created); err != nil {
 		return nil, err
 	}
 	g.CreatedAt = time.Unix(created, 0)
@@ -40,9 +43,9 @@ func scanGitSource(sc interface{ Scan(...any) error }) (*GitSource, error) {
 func (db *DB) CreateGitSource(ctx context.Context, g *GitSource) error {
 	var created int64
 	err := db.W.QueryRowContext(ctx,
-		`INSERT INTO git_sources (kind, name, app_id, slug, owner, html_url, secrets) VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO git_sources (kind, name, app_id, slug, owner, html_url, base_url, secrets) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id, created_at`,
-		g.Kind, g.Name, g.AppID, g.Slug, g.Owner, g.HTMLURL, g.Secrets).Scan(&g.ID, &created)
+		g.Kind, g.Name, g.AppID, g.Slug, g.Owner, g.HTMLURL, g.BaseURL, g.Secrets).Scan(&g.ID, &created)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return ErrNameTaken
@@ -99,4 +102,10 @@ func (db *DB) AppsOfRepo(ctx context.Context, source int64, repo string) ([]*App
 		return nil, err
 	}
 	return scanApps(rows)
+}
+
+// SetForgeHooks records the deploy key and push webhook the panel added to
+// an app's repository on GitLab or Gitea (0: none).
+func (db *DB) SetForgeHooks(ctx context.Context, appID, keyID, hookID int64) error {
+	return db.execOne(ctx, `UPDATE apps SET forge_key_id = ?, forge_hook_id = ? WHERE id = ?`, keyID, hookID, appID)
 }

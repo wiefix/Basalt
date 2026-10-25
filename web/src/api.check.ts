@@ -91,6 +91,7 @@ export const checks = [
   fits<Returns<A["gitSources"]>>()<G.GetGitSourcesResponse>(),
   fits<Returns<A["gitSource"]>>()<G.GetGitSourcesIdResponse>(),
   fits<Returns<A["deleteGitSource"]>>()<G.DeleteGitSourcesIdResponse>(),
+  fits<Returns<A["createGitSource"]>>()<G.PostGitSourcesResponse>(),
   fits<Returns<A["gitSourceRepos"]>>()<G.GetGitSourcesIdReposResponse>(),
   fits<Returns<A["gitSourceBranches"]>>()<G.GetGitSourcesIdBranchesResponse>(),
   fits<Returns<A["githubManifest"]>>()<G.PostGitSourcesGithubManifestResponse>(),

@@ -12,7 +12,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/docker"
-	"github.com/wiefix/basalt/internal/github"
+	"github.com/wiefix/basalt/internal/forge"
 	"github.com/wiefix/basalt/internal/mailserver"
 	"github.com/wiefix/basalt/internal/proxy"
 	"github.com/wiefix/basalt/internal/store"
@@ -201,7 +201,7 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 			Dockerfile: strings.TrimSpace(req.Git.Dockerfile), Context: strings.TrimSpace(req.Git.Context)}
 		if req.Git.SourceID != 0 {
 			// The URL comes from GitHub (resolveGitSource).
-			if req.Git.SourceID < 0 || !github.ValidRepo(req.Git.Repo) {
+			if req.Git.SourceID < 0 || !forge.ValidRepo(req.Git.Repo) {
 				return st, errors.New("a repository from a git source needs the source and owner/name")
 			}
 			g.URL = "https://github.com/" + req.Git.Repo + ".git"
@@ -388,6 +388,12 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 			s.internalError(w, r, "create webhook secret", err)
 			return
 		}
+		// On GitLab or Gitea the panel connects the repository itself.
+		if err := s.connectForge(r.Context(), app); err != nil {
+			s.deleteApp(r.Context(), app, true)
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
 	}
 	if app.Source == store.SourceDatabase {
 		if err := s.initDatabase(r.Context(), app); err != nil {
@@ -481,9 +487,20 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *prin
 	if app.Source == store.SourceMail {
 		st.Hostname, st.Image = app.Hostname, app.Image
 	}
+	moved := app.Source == store.SourceGit && (app.Git.SourceID != st.Git.SourceID || !strings.EqualFold(app.Git.Repo, st.Git.Repo))
+	if moved {
+		s.disconnectForge(r.Context(), app, nil) // from the repository it leaves
+	}
 	if err := s.db.UpdateAppSettings(r.Context(), app.ID, st); err != nil {
 		s.internalError(w, r, "update app", err)
 		return
+	}
+	if moved {
+		app.Git = st.Git
+		if err := s.connectForge(r.Context(), app); err != nil {
+			writeError(w, http.StatusBadGateway, "saved, but "+err.Error())
+			return
+		}
 	}
 	s.audit(r, &p.user.ID, "app.updated", map[string]any{"app_id": app.ID, "image": st.Image, "git": st.Git.URL, "port": st.Port})
 	app.Image, app.Git, app.Port, app.Volumes, app.MemoryMB, app.CPUs = st.Image, st.Git, st.Port, st.Volumes, st.MemoryMB, st.CPUs
@@ -972,6 +989,7 @@ func (s *Server) deleteApp(ctx context.Context, app *store.App, volumes bool) ([
 	if err != nil {
 		return nil, err
 	}
+	s.disconnectForge(ctx, app, nil)
 	servers, err := s.db.DeleteApp(ctx, app.ID)
 	if err != nil {
 		return nil, err

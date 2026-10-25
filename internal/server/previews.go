@@ -60,7 +60,17 @@ func (s *Server) writePreviews(w http.ResponseWriter, r *http.Request, app *stor
 	for i, pv := range list {
 		out[i] = s.viewAppFull(pv)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"domain": app.PreviewDomain, "previews": out, "max": maxPreviews})
+	writeJSON(w, http.StatusOK, map[string]any{"domain": app.PreviewDomain, "previews": out, "max": maxPreviews,
+		"supported": previewParent(app) == nil && s.onGitHub(r.Context(), app)})
+}
+
+// onGitHub reports whether an app is built through a GitHub App.
+func (s *Server) onGitHub(ctx context.Context, app *store.App) bool {
+	if app.Git.SourceID == 0 {
+		return false
+	}
+	g, err := s.db.GitSourceByID(ctx, app.Git.SourceID)
+	return err == nil && g.Kind == "github"
 }
 
 func (s *Server) handleSetPreviews(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -74,6 +84,10 @@ func (s *Server) handleSetPreviews(w http.ResponseWriter, r *http.Request, p *pr
 	}
 	if err := previewParent(app); err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if !s.onGitHub(r.Context(), app) {
+		writeError(w, http.StatusUnprocessableEntity, "previews need a repository on GitHub (pull requests reach the panel through the GitHub App)")
 		return
 	}
 	domain := strings.TrimSpace(req.Domain)

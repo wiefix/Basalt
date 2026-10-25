@@ -901,8 +901,9 @@ function SourceTab({ app }: { app: App }) {
         <ErrorBox error={save.error} />
         {g.source_id ? (
           <p className="muted" style={{ margin: 0 }}>
-            <span className="mono">{g.repo}</span> through the GitHub App of{" "}
-            <Link to="/git-sources">Git sources</Link>: each build gets a token that reads this repository only.
+            <span className="mono">{g.repo}</span> through a <Link to="/git-sources">git source</Link>: Basalt connected the
+            repository (GitHub: a token for each build that reads it only; GitLab, Gitea: the app's read-only deploy key and a
+            push webhook it added there).
           </p>
         ) : (
           <Field label="URL" help="https://… for public repositories, git@host:org/repo.git with the deploy key below for private ones.">
@@ -1010,7 +1011,7 @@ function WebhookCard({ app, github }: { app: App; github: boolean }) {
       </div>
       {github ? (
         <p className="muted" style={{ margin: 0 }}>
-          GitHub tells the panel of every push to <span className="mono">{app.git?.branch}</span> through the GitHub App: that
+          The repository tells the panel of every push to <span className="mono">{app.git?.branch}</span> (Basalt set this up): that
           commit is deployed. A push during a deployment is deployed right after it.
         </p>
       ) : (
@@ -1624,6 +1625,7 @@ function PreviewsCard({ app, user }: { app: App; user: User }) {
   if (data.isPending) return null;
   if (data.error) return <ErrorBox error={data.error} />;
   const d = data.data;
+  if (!d.supported && d.previews.length === 0) return null; // GitHub only
   const admin = can(user, "admin");
   return (
     <div className="card">

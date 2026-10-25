@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/forge"
 	"github.com/wiefix/basalt/internal/github"
 	"github.com/wiefix/basalt/internal/store"
 )
@@ -84,13 +85,19 @@ type gitSourceView struct {
 	Owner     string    `json:"owner"`
 	HTMLURL   string    `json:"html_url"`
 	CreatedAt time.Time `json:"created_at"`
-	// InstallURL installs the app on more repositories.
+	// InstallURL installs the GitHub App on more repositories.
 	InstallURL string `json:"install_url"`
+	// BaseURL: a GitLab or Gitea instance.
+	BaseURL string `json:"base_url,omitempty"`
 }
 
 func (s *Server) viewGitSource(g *store.GitSource) gitSourceView {
-	return gitSourceView{ID: g.ID, Kind: g.Kind, Name: g.Name, Slug: g.Slug, Owner: g.Owner, HTMLURL: g.HTMLURL, CreatedAt: g.CreatedAt,
-		InstallURL: s.githubWeb + "/apps/" + url.PathEscape(g.Slug) + "/installations/new"}
+	v := gitSourceView{ID: g.ID, Kind: g.Kind, Name: g.Name, Slug: g.Slug, Owner: g.Owner, HTMLURL: g.HTMLURL, CreatedAt: g.CreatedAt,
+		BaseURL: g.BaseURL}
+	if g.Kind == "github" {
+		v.InstallURL = s.githubWeb + "/apps/" + url.PathEscape(g.Slug) + "/installations/new"
+	}
+	return v
 }
 
 // canCreateApps: a global admin, or an admin of some project.
@@ -152,12 +159,24 @@ func (s *Server) handleGitSource(w http.ResponseWriter, r *http.Request, p *prin
 	if !ok {
 		return
 	}
+	resp := map[string]any{"source": s.viewGitSource(g), "installations": []installationView{}}
+	if isForge(g.Kind) {
+		// Whether its token still works.
+		c, err := s.forgeClient(g)
+		if err == nil {
+			_, err = c.User(r.Context())
+		}
+		if err != nil {
+			resp["error"] = err.Error()
+		}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
 	_, app, err := s.openGitSource(g)
 	if err != nil {
 		s.internalError(w, r, "open git source", err)
 		return
 	}
-	resp := map[string]any{"source": s.viewGitSource(g), "installations": []installationView{}}
 	insts, err := s.githubClient().Installations(r.Context(), app)
 	if err != nil {
 		resp["error"] = err.Error()
@@ -305,6 +324,15 @@ func (s *Server) handleGitSourceRepos(w http.ResponseWriter, r *http.Request, p 
 	if !ok {
 		return
 	}
+	if isForge(g.Kind) {
+		out, err := s.forgeRepos(r.Context(), g)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"repos": out})
+		return
+	}
 	_, app, err := s.openGitSource(g)
 	if err != nil {
 		s.internalError(w, r, "open git source", err)
@@ -333,6 +361,24 @@ func (s *Server) handleGitSourceBranches(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	repo := r.URL.Query().Get("repo")
+	if !forge.ValidRepo(repo) {
+		writeError(w, http.StatusUnprocessableEntity, "repo must be owner/name")
+		return
+	}
+	if isForge(g.Kind) {
+		c, err := s.forgeClient(g)
+		if err != nil {
+			s.internalError(w, r, "open git source", err)
+			return
+		}
+		bs, err := c.Branches(r.Context(), repo)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"branches": bs})
+		return
+	}
 	if !github.ValidRepo(repo) {
 		writeError(w, http.StatusUnprocessableEntity, "repo must be owner/name")
 		return
@@ -361,6 +407,17 @@ func (s *Server) resolveGitSource(ctx context.Context, st *store.AppSettings) er
 		return errors.New("git source not found")
 	} else if err != nil {
 		return err
+	}
+	if isForge(g.Kind) {
+		u, err := s.resolveForgeRepo(ctx, g, st.Git.Repo)
+		if err != nil {
+			return err
+		}
+		st.Git.URL = u
+		return nil
+	}
+	if !github.ValidRepo(st.Git.Repo) {
+		return errors.New("a GitHub repository is owner/name")
 	}
 	_, app, err := s.openGitSource(g)
 	if err != nil {
@@ -408,6 +465,20 @@ func (s *Server) commitStatus(appID int64, sha, state, desc string) {
 	}
 	g, err := s.db.GitSourceByID(ctx, a.Git.SourceID)
 	if err != nil {
+		return
+	}
+	if isForge(g.Kind) {
+		target := ""
+		if panelURL, _ := s.db.Setting(ctx, settingPanelURL); panelURL != "" {
+			target = panelURL + appPage(a)
+		}
+		c, err := s.forgeClient(g)
+		if err == nil {
+			err = c.SetStatus(ctx, a.Git.Repo, sha, state, target, desc, truncate("Basalt / "+a.Name, 100))
+		}
+		if err != nil {
+			s.log.Warn("set the commit status", "app_id", appID, "commit", sha, "err", err)
+		}
 		return
 	}
 	_, app, err := s.openGitSource(g)

@@ -31,7 +31,7 @@ var (
 	recordResp   = obj("record", dnsRecordView{})
 	channelResp  = obj("channel", channelView{})
 	webhookResp  = obj("webhook", webhookView{})
-	previewsResp = obj("domain", "", "previews", []appView{}, "max", 0)
+	previewsResp = obj("domain", "", "previews", []appView{}, "max", 0, "supported", false)
 	trashResp    = obj("entries", []agentproto.TrashEntry{}, "keep_days", 0)
 	bansResp     = obj("bans", []sftpd.Ban{})
 	accessResp   = obj("entries", []agentproto.AccessEntry{})
@@ -328,6 +328,8 @@ var apiDocs = map[string]apiDoc{
 		resp: obj("result", "", "deploying?", []string{})},
 	"GET /api/v1/git-sources": {summary: "Git sources (GitHub Apps) apps can be built from; for those who can create apps",
 		resp: obj("sources", []gitSourceView{}, "panel_url", "")},
+	"POST /api/v1/git-sources": {summary: "Connect a GitLab or Gitea/Forgejo instance with an access token (checked first)",
+		body: forgeSourceRequest{}, resp: obj("source", gitSourceView{})},
 	"GET /api/v1/git-sources/{id}": {summary: "A git source and where its GitHub App is installed (asked of GitHub)",
 		resp: obj("source", gitSourceView{}, "installations", []installationView{}, "error?", "")},
 	"DELETE /api/v1/git-sources/{id}":    {summary: "Remove a git source (its apps keep their repository URL)", resp: noContent},

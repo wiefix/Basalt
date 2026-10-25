@@ -652,12 +652,21 @@ export interface FilesExtractResult {
   skipped?: string[];
 }
 
+export interface ForgeSourceRequest {
+  allow_private?: boolean;
+  kind?: string;
+  name?: string;
+  token?: string;
+  url?: string;
+}
+
 export interface ForwarderRequest {
   local?: string;
   recipients?: string[];
 }
 
 export interface GitSourceView {
+  base_url?: string;
   created_at: string;
   html_url: string;
   id: number;
@@ -1613,6 +1622,7 @@ export type GetAppsIdPreviewsResponse = {
   domain: string;
   max: number;
   previews: AppView[];
+  supported: boolean;
 };
 
 export type GetAppsIdSnapshotsResponse = {
@@ -2094,6 +2104,12 @@ export type PostDnsZonesIdRecordsResponse = {
 
 export type PostDnsZonesIdRecordsBody = DnsRecord;
 
+export type PostGitSourcesResponse = {
+  source: GitSourceView;
+};
+
+export type PostGitSourcesBody = ForgeSourceRequest;
+
 export type PostGitSourcesGithubCompleteResponse = {
   source: GitSourceView;
 };
@@ -2374,6 +2390,7 @@ export type PutAppsIdPreviewsResponse = {
   domain: string;
   max: number;
   previews: AppView[];
+  supported: boolean;
 };
 
 export type PutAppsIdPreviewsBody = PreviewsRequest;

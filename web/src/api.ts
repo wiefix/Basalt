@@ -229,10 +229,12 @@ export interface GitSettings {
   repo?: string; // owner/name, with source_id
 }
 
-// A GitHub App the panel created to reach the user's repositories.
+// Where the user's repositories are: a GitHub App the panel created, or a
+// GitLab or Gitea/Forgejo instance with an access token.
 export interface GitSource {
   id: number;
-  kind: "github";
+  kind: "github" | "gitlab" | "gitea";
+  base_url?: string; // GitLab, Gitea
   name: string;
   slug: string;
   owner: string;
@@ -1119,6 +1121,8 @@ export const api = {
       `/api/v1/git-sources/${id}`,
     ),
   deleteGitSource: (id: number) => del<void>(`/api/v1/git-sources/${id}`),
+  createGitSource: (b: { kind: "gitlab" | "gitea"; name: string; url: string; token: string; allow_private: boolean }) =>
+    post<{ source: GitSource }>("/api/v1/git-sources", b),
   gitSourceRepos: (id: number) => get<{ repos: GitRepo[] }>(`/api/v1/git-sources/${id}/repos`),
   gitSourceBranches: (id: number, repo: string) =>
     get<{ branches: string[] }>(`/api/v1/git-sources/${id}/branches?repo=${encodeURIComponent(repo)}`),
@@ -1241,9 +1245,9 @@ export const api = {
   appWebhook: (id: number) => get<{ webhook: Webhook }>(`/api/v1/apps/${id}/webhook`),
   setAppWebhook: (id: number, b: { auto_deploy: boolean; regenerate?: boolean }) =>
     put<{ webhook: Webhook }>(`/api/v1/apps/${id}/webhook`, b),
-  previews: (id: number) => get<{ domain: string; previews: App[]; max: number }>(`/api/v1/apps/${id}/previews`),
+  previews: (id: number) => get<{ domain: string; previews: App[]; max: number; supported: boolean }>(`/api/v1/apps/${id}/previews`),
   setPreviews: (id: number, domain: string) =>
-    put<{ domain: string; previews: App[]; max: number }>(`/api/v1/apps/${id}/previews`, { domain }),
+    put<{ domain: string; previews: App[]; max: number; supported: boolean }>(`/api/v1/apps/${id}/previews`, { domain }),
   appEnv: (id: number) => get<{ env: Record<string, string> }>(`/api/v1/apps/${id}/env`),
   setAppEnv: (id: number, env: Record<string, string>) => put<{ ok: boolean }>(`/api/v1/apps/${id}/env`, { env }),
   deployApp: (id: number, rollbackTo?: number) =>

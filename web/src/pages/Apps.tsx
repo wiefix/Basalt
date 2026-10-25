@@ -305,7 +305,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
                   <select className="input" value={gh} onChange={(e) => { setGhSource(Number(e.target.value)); setRepo(""); }}>
                     {ghSources.map((g) => (
                       <option key={g.id} value={g.id}>
-                        GitHub: {g.name} ({g.owner})
+                        {{ github: "GitHub", gitlab: "GitLab", gitea: "Gitea" }[g.kind]}: {g.name} ({g.owner})
                       </option>
                     ))}
                     <option value={0}>Any repository URL (deploy key)</option>
@@ -317,8 +317,10 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
                   label="Repository"
                   help={
                     <>
-                      Repositories the GitHub App may read; add more under <Link to="/git-sources">Git sources</Link>. Pushes to
-                      the branch deploy automatically.
+                      {ghSources.find((g) => g.id === gh)?.kind === "github"
+                        ? "Repositories the GitHub App may read; add more on GitHub (Git sources)."
+                        : "Repositories the token administers; Basalt adds the app's deploy key and webhook there."}{" "}
+                      Pushes to the branch deploy automatically (<Link to="/git-sources">Git sources</Link>).
                     </>
                   }
                 >

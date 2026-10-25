@@ -8,18 +8,29 @@ import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatDate, useCon
 // user's repositories, and connects new ones.
 export function GitSourcesPage({ user }: { user: User }) {
   const sources = useQuery({ queryKey: ["git-sources"], queryFn: api.gitSources, enabled: can(user, "admin") });
-  const [connecting, setConnecting] = useState(false);
+  const [connecting, setConnecting] = useState<"github" | "gitlab" | "gitea" | null>(null);
   if (!can(user, "admin")) return <div className="empty">You do not have access to this page.</div>;
+  const buttons = (
+    <div className="row wrap">
+      <button className="btn primary" onClick={() => setConnecting("github")}>
+        <Icon name="plus" /> GitHub
+      </button>
+      <button className="btn" onClick={() => setConnecting("gitlab")}>
+        <Icon name="plus" /> GitLab
+      </button>
+      <button className="btn" onClick={() => setConnecting("gitea")}>
+        <Icon name="plus" /> Gitea / Forgejo
+      </button>
+    </div>
+  );
   return (
     <>
       <div className="page-head">
         <div>
           <h1>Git sources</h1>
-          <div className="sub">Connect GitHub to pick repositories when creating apps, and deploy each push automatically.</div>
+          <div className="sub">Connect GitHub, GitLab or Gitea to pick repositories when creating apps, and deploy each push automatically.</div>
         </div>
-        <button className="btn primary" onClick={() => setConnecting(true)}>
-          <Icon name="plus" /> Connect GitHub
-        </button>
+        {buttons}
       </div>
       {sources.isPending ? (
         <Loading />
@@ -29,21 +40,19 @@ export function GitSourcesPage({ user }: { user: User }) {
         <div className="card empty">
           <h3>No git sources yet</h3>
           <p>
-            Basalt creates a GitHub App on your account or organization. You choose which repositories it may read; their
-            pushes then deploy the apps built from them. No keys or webhooks to copy.
+            For GitHub, Basalt creates a GitHub App on your account or organization; for GitLab and Gitea (or Forgejo), you give
+            it an access token. Either way it adds what each app needs to its repository: no keys or webhooks to copy.
           </p>
-          <button className="btn primary" onClick={() => setConnecting(true)}>
-            <Icon name="plus" /> Connect GitHub
-          </button>
         </div>
       ) : (
         <div className="stack">
-          {sources.data.sources.map((s) => (
-            <SourceCard key={s.id} source={s} />
-          ))}
+          {sources.data.sources.map((s) => (s.kind === "github" ? <SourceCard key={s.id} source={s} /> : <ForgeCard key={s.id} source={s} />))}
         </div>
       )}
-      {connecting && <ConnectModal panelURL={sources.data?.panel_url ?? ""} onClose={() => setConnecting(false)} />}
+      {connecting === "github" && <ConnectModal panelURL={sources.data?.panel_url ?? ""} onClose={() => setConnecting(null)} />}
+      {(connecting === "gitlab" || connecting === "gitea") && (
+        <ForgeModal kind={connecting} panelURL={sources.data?.panel_url ?? ""} onClose={() => setConnecting(null)} />
+      )}
     </>
   );
 }
@@ -247,5 +256,138 @@ export function GitHubCallback() {
         <Loading />
       )}
     </div>
+  );
+}
+
+const forgeName = { gitlab: "GitLab", gitea: "Gitea / Forgejo" } as const;
+
+// ForgeCard shows a GitLab or Gitea source.
+function ForgeCard({ source }: { source: GitSource }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const detail = useQuery({ queryKey: ["git-source", source.id], queryFn: () => api.gitSource(source.id) });
+  const kind = source.kind as "gitlab" | "gitea";
+  const remove = async () => {
+    const ok = await confirm({
+      title: `Remove ${source.name}?`,
+      body: (
+        <p>
+          Apps from its repositories keep building with their deploy keys and deploying on push; Basalt can no longer list
+          repositories, show deployments on commits or remove the keys and webhooks it added. Revoke the token there too.
+        </p>
+      ),
+      confirm: "Remove",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.deleteGitSource(source.id);
+      qc.invalidateQueries({ queryKey: ["git-sources"] });
+    } catch (e) {
+      toast(errorMessage(e), true);
+    }
+  };
+  return (
+    <div className="card card-body stack">
+      <div className="row wrap" style={{ justifyContent: "space-between" }}>
+        <div>
+          <div className="row">
+            <h2>{source.name}</h2>
+            <span className="badge plain">{forgeName[kind]}</span>
+          </div>
+          <div className="faint small">
+            <a href={source.base_url} target="_blank" rel="noreferrer noopener" className="mono">
+              {source.base_url}
+            </a>{" "}
+            · token of {source.owner} · connected {formatDate(source.created_at)}
+          </div>
+        </div>
+        <button className="btn sm icon ghost" title="Remove" onClick={remove}>
+          <Icon name="trash" size={14} />
+        </button>
+      </div>
+      {detail.data?.error ? (
+        <div className="alert err small">The token no longer works: {detail.data.error}</div>
+      ) : (
+        <p className="muted small" style={{ margin: 0 }}>
+          Create an app from one of its repositories under <Link to="/apps">Apps</Link>: Basalt adds the app's read-only deploy
+          key and a push webhook to the repository, and shows each deployment on its commit.
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ForgeModal connects a GitLab or Gitea instance with an access token.
+function ForgeModal({ kind, panelURL, onClose }: { kind: "gitlab" | "gitea"; panelURL: string; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [name, setName] = useState(kind === "gitlab" ? "GitLab" : "Gitea");
+  const [url, setURL] = useState(kind === "gitlab" ? "https://gitlab.com" : "https://");
+  const [token, setToken] = useState("");
+  const [allowPrivate, setAllowPrivate] = useState(false);
+  const save = useMutation({
+    mutationFn: () => api.createGitSource({ kind, name: name.trim(), url: url.trim(), token: token.trim(), allow_private: allowPrivate }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["git-sources"] });
+      onClose();
+    },
+  });
+  return (
+    <Modal
+      title={`Connect ${forgeName[kind]}`}
+      onClose={onClose}
+      footer={
+        <>
+          <button className="btn" onClick={onClose}>
+            Cancel
+          </button>
+          <button className="btn primary" form="forge-form" disabled={save.isPending || !panelURL}>
+            {save.isPending ? "Checking…" : "Connect"}
+          </button>
+        </>
+      }
+    >
+      <form
+        id="forge-form"
+        className="form"
+        onSubmit={(e: FormEvent) => {
+          e.preventDefault();
+          save.mutate();
+        }}
+      >
+        <ErrorBox error={save.error} />
+        {!panelURL && (
+          <div className="alert warn small">
+            Set the panel's address first under <Link to="/notifications">Notifications</Link> (Links in messages): the
+            repositories' webhooks call it, so it must be reachable from {forgeName[kind]}.
+          </div>
+        )}
+        <Field label="Name">
+          <input className="input" value={name} onChange={(e) => setName(e.target.value)} maxLength={34} required />
+        </Field>
+        <Field label="Address" help={kind === "gitlab" ? "https://gitlab.com, or your own GitLab." : "Your Gitea or Forgejo, e.g. https://git.example.com (or https://codeberg.org)."}>
+          <input className="input mono" value={url} onChange={(e) => setURL(e.target.value)} required />
+        </Field>
+        <Field
+          label="Access token"
+          help={
+            kind === "gitlab"
+              ? "A personal, group or project access token with the api scope, of someone who is a Maintainer of the repositories (User settings → Access tokens)."
+              : "A token with the write:repository and read:user scopes, of an admin of the repositories (Settings → Applications → Generate token)."
+          }
+        >
+          <input className="input mono" type="password" value={token} onChange={(e) => setToken(e.target.value)} required autoComplete="off" />
+        </Field>
+        <label className="row small">
+          <input type="checkbox" checked={allowPrivate} onChange={(e) => setAllowPrivate(e.target.checked)} />
+          It is on a private network (allows private addresses and plain http)
+        </label>
+        <p className="faint small" style={{ margin: 0 }}>
+          The token stays in the panel, encrypted: servers clone with each app's own read-only deploy key. Basalt uses it to list
+          repositories, add and remove apps' deploy keys and webhooks, and set the status of deployed commits.
+        </p>
+      </form>
+    </Modal>
   );
 }

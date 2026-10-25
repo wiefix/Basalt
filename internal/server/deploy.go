@@ -310,8 +310,9 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 		case <-ctx.Done():
 		}
 	}()
-	// Apps built through a GitHub App show the deployment on the commit.
-	statuses := &commitStatuses{s: s, appID: spec.AppID, on: spec.Git != nil && spec.Git.Token != ""}
+	// Apps built through a git source show the deployment on the commit
+	// (commitStatus finds out whether the app's repository is on one).
+	statuses := &commitStatuses{s: s, appID: spec.AppID, on: spec.Git != nil}
 	if spec.Git != nil {
 		statuses.set(spec.Git.Commit, "pending", fmt.Sprintf("Deploying (#%d)", depID))
 	}

@@ -86,6 +86,10 @@ func (s *Server) handleRegenerateDeployKey(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.audit(r, &p.user.ID, "app.deploy_key_regenerated", map[string]any{"app_id": app.ID})
+	if err := s.connectForge(r.Context(), app); err != nil {
+		writeError(w, http.StatusBadGateway, "new key made, but "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"app": viewApp(app)})
 }
 
@@ -146,6 +150,12 @@ func (s *Server) handleSetWebhook(w http.ResponseWriter, r *http.Request, p *pri
 	if err != nil {
 		s.internalError(w, r, "update webhook", err)
 		return
+	}
+	if req.Regenerate {
+		if err := s.connectForge(r.Context(), app); err != nil {
+			writeError(w, http.StatusBadGateway, "new secret made, but "+err.Error())
+			return
+		}
 	}
 	s.audit(r, &p.user.ID, "app.webhook_changed", map[string]any{
 		"app_id": app.ID, "auto_deploy": req.AutoDeploy, "regenerated": req.Regenerate})

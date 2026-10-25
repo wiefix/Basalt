@@ -357,6 +357,7 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("GET /api/v1/git-sources", s.requireRole(store.RoleUser, s.handleListGitSources))
 	rt.Handle("GET /api/v1/git-sources/{id}", s.requireRole(store.RoleAdmin, s.handleGitSource))
 	rt.Handle("DELETE /api/v1/git-sources/{id}", s.requireSession(store.RoleAdmin, s.handleDeleteGitSource))
+	rt.Handle("POST /api/v1/git-sources", s.requireSession(store.RoleAdmin, s.handleCreateForgeSource))
 	rt.Handle("GET /api/v1/git-sources/{id}/repos", s.requireRole(store.RoleUser, s.handleGitSourceRepos))
 	rt.Handle("GET /api/v1/git-sources/{id}/branches", s.requireRole(store.RoleUser, s.handleGitSourceBranches))
 	rt.Handle("POST /api/v1/git-sources/github/manifest", s.requireSession(store.RoleAdmin, s.handleGitHubManifest))
