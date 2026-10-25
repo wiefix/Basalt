@@ -228,7 +228,7 @@ const limitRows: { key: keyof ProjectLimits & keyof ProjectUsage; label: string;
 function LimitsCard({ project, usage, edit }: { project: Project; usage: ProjectUsage; edit: boolean }) {
   const [editing, setEditing] = useState(false);
   const l = project.limits;
-  const none = limitRows.every((r) => !l[r.key]) && !l.disk_mb;
+  const none = limitRows.every((r) => !l[r.key]) && !l.disk_mb && !l.memory_mb && !l.cpus;
   const diskPct = l.disk_mb ? Math.min(100, (usage.disk_bytes / (l.disk_mb * 1048576)) * 100) : 0;
   return (
     <div className="card">
@@ -262,6 +262,22 @@ function LimitsCard({ project, usage, edit }: { project: Project; usage: Project
                 );
               })}
               <tr>
+                <td>Memory (containers)</td>
+                <td>
+                  {usage.memory_mb} MB
+                  {l.memory_mb > 0 && <span className="muted"> of {l.memory_mb} MB</span>}
+                  {l.memory_mb > 0 && usage.memory_mb >= l.memory_mb && <span className="badge warn" style={{ marginLeft: 8 }}>full</span>}
+                </td>
+              </tr>
+              <tr>
+                <td>CPUs (containers)</td>
+                <td>
+                  {+usage.cpus.toFixed(2)}
+                  {l.cpus > 0 && <span className="muted"> of {l.cpus}</span>}
+                  {l.cpus > 0 && usage.cpus >= l.cpus && <span className="badge warn" style={{ marginLeft: 8 }}>full</span>}
+                </td>
+              </tr>
+              <tr>
                 <td>Disk (sites)</td>
                 <td>
                   {formatBytes(usage.disk_bytes)}
@@ -282,8 +298,10 @@ function LimitsCard({ project, usage, edit }: { project: Project; usage: Project
           </table>
         </div>
         <p className="faint small" style={{ margin: 0 }}>
-          At a limit, nothing more of that kind can be created in or moved to the project. The disk limit counts the files and
-          MariaDB databases of the sites (measured every 6 hours) and only notifies the project's channels.
+          At a limit, nothing more of that kind can be created in or moved to the project. Memory and CPUs add up the limits of
+          the deployed apps and databases (on every server they run on): with such a limit, each container needs its own, and a
+          deployment that would go over is refused. The disk limit counts the files and MariaDB databases of the sites (measured
+          every 6 hours) and only notifies the project's channels.
         </p>
       </div>
       {editing && <LimitsModal project={project} onClose={() => setEditing(false)} />}
@@ -301,7 +319,7 @@ function LimitsModal({ project, onClose }: { project: Project; onClose: () => vo
   const save = useMutation({
     mutationFn: () => {
       const l = {} as ProjectLimits;
-      for (const k of [...limitRows.map((r) => r.key), "disk_mb"] as (keyof ProjectLimits)[]) l[k] = Number(form[k]) || 0;
+      for (const k of [...limitRows.map((r) => r.key), "disk_mb", "memory_mb", "cpus"] as (keyof ProjectLimits)[]) l[k] = Number(form[k]) || 0;
       return api.setProjectLimits(project.id, l);
     },
     onSuccess: (r) => {
@@ -316,7 +334,8 @@ function LimitsModal({ project, onClose }: { project: Project; onClose: () => vo
         className="input"
         type="number"
         min={0}
-        inputMode="numeric"
+        step="any"
+        inputMode="decimal"
         placeholder="No limit"
         value={form[k]}
         onChange={(e) => setForm({ ...form, [k]: e.target.value })}
@@ -351,6 +370,8 @@ function LimitsModal({ project, onClose }: { project: Project; onClose: () => vo
           Empty or 0: no limit. What the project holds already stays when a limit is lower.
         </p>
         {limitRows.map((r) => field(r.key, r.label))}
+        {field("memory_mb", "Memory of containers, MB", "Each app and database then needs a memory limit; their limits add up to at most this.")}
+        {field("cpus", "CPUs of containers", "Each app and database then needs a CPU limit; e.g. 2 or 0.5.")}
         {field("disk_mb", "Disk, MB", "Files and databases of the sites; going over it notifies, nothing stops.")}
       </form>
     </Modal>

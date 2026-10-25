@@ -61,7 +61,7 @@ func (cf *composeFile) summary() store.ComposeSummary {
 	}
 	for _, svc := range cf.project.Services {
 		sum.Services = append(sum.Services, store.ComposeService{Name: svc.Name, Image: svc.Image,
-			Ports: cf.project.Ports[svc.Name], Job: svc.Job})
+			Ports: cf.project.Ports[svc.Name], Job: svc.Job, MemoryMB: svc.MemoryMB, CPUs: svc.CPUs})
 	}
 	return sum
 }

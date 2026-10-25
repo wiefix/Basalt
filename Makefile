@@ -38,7 +38,10 @@ lint:
 run: build
 	./bin/basalt server --data-dir .data --log-level debug --insecure-cookies --agent-listen 127.0.0.1:8443 --agent-url https://127.0.0.1:8443
 
+# Old bundles are removed first: Vite keeps dist/ (for dist/.keep), and
+# whatever is there is embedded in the binary.
 web:
+	rm -rf web/dist/assets
 	cd web && npm ci && npm run build
 
 # TypeScript types of the API (web/src/api.gen.ts) from its description; the

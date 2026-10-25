@@ -987,10 +987,12 @@ export interface ProjectRequest {
 
 export interface ProjectUsageView {
   apps: number;
+  cpus: number;
   databases: number;
   disk_bytes: number;
   dns_zones: number;
   health_checks: number;
+  memory_mb: number;
   sites: number;
 }
 
@@ -1262,8 +1264,10 @@ export interface StorageView {
 }
 
 export interface StoreComposeService {
+  cpus?: number;
   image: string;
   job?: boolean;
+  memory_mb?: number;
   name: string;
   ports?: number[];
 }
@@ -1275,19 +1279,23 @@ export interface StoreComposeSummary {
 
 export interface StoreProjectLimits {
   apps?: number;
+  cpus?: number;
   databases?: number;
   disk_mb?: number;
   dns_zones?: number;
   health_checks?: number;
+  memory_mb?: number;
   sites?: number;
 }
 
 export interface StoreProjectLimitsOut {
   apps: number;
+  cpus: number;
   databases: number;
   disk_mb: number;
   dns_zones: number;
   health_checks: number;
+  memory_mb: number;
   sites: number;
 }
 

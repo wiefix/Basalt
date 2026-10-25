@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -47,11 +48,14 @@ type projectUsageView struct {
 	DNSZones     int   `json:"dns_zones"`
 	HealthChecks int   `json:"health_checks"`
 	DiskBytes    int64 `json:"disk_bytes"`
+	// MemoryMB and CPUs add up the limits of the apps' containers.
+	MemoryMB int     `json:"memory_mb"`
+	CPUs     float64 `json:"cpus"`
 }
 
 func viewProjectUsage(u store.ProjectUsage) projectUsageView {
 	return projectUsageView{Sites: u.Sites, Apps: u.Apps, Databases: u.Databases, DNSZones: u.DNSZones,
-		HealthChecks: u.HealthChecks, DiskBytes: u.DiskBytes}
+		HealthChecks: u.HealthChecks, DiskBytes: u.DiskBytes, MemoryMB: u.MemoryMB, CPUs: u.CPUs}
 }
 
 // viewProjectFor describes a project with the principal's role in it.
@@ -160,6 +164,14 @@ func (s *Server) handleSetProjectLimits(w http.ResponseWriter, r *http.Request, 
 	}
 	if req.DiskMB < 0 || req.DiskMB > maxQuotaMB {
 		writeError(w, http.StatusUnprocessableEntity, "disk_mb must be 0 (none) or a number of MB")
+		return
+	}
+	if req.MemoryMB < 0 || req.MemoryMB > maxQuotaMB {
+		writeError(w, http.StatusUnprocessableEntity, "memory_mb must be 0 (none) or a number of MB")
+		return
+	}
+	if req.CPUs < 0 || req.CPUs > 4096 || math.IsNaN(req.CPUs) {
+		writeError(w, http.StatusUnprocessableEntity, "cpus must be 0 (none) to 4096")
 		return
 	}
 	if err := s.db.SetProjectLimits(r.Context(), pr.ID, req); err != nil {
@@ -476,11 +488,14 @@ func (s *Server) visibleIn(r *http.Request, p *principal) (func(project int64) b
 // project at its limit; it reports whether it did.
 func projectError(w http.ResponseWriter, err error) bool {
 	var limit *store.LimitError
+	var res *store.ResourceError
 	switch {
 	case errors.Is(err, store.ErrNoProject):
 		writeError(w, http.StatusUnprocessableEntity, "project not found")
 	case errors.As(err, &limit):
 		writeError(w, http.StatusUnprocessableEntity, limit.Error())
+	case errors.As(err, &res):
+		writeError(w, http.StatusUnprocessableEntity, res.Error())
 	default:
 		return false
 	}

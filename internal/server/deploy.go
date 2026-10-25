@@ -157,6 +157,9 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		}
 	}
 
+	if err := s.checkProjectResources(ctx, app, &spec); err != nil {
+		return nil, err
+	}
 	dep, err := s.db.CreateDeployment(ctx, app.ID, spec.Image, o.actorID)
 	if errors.Is(err, store.ErrDeployInProgress) {
 		return nil, &deployError{http.StatusConflict, err.Error(), err}
@@ -429,4 +432,47 @@ func (s *Server) deployPush(appID int64, commit string) (queued bool, err error)
 		return true, nil
 	}
 	return false, err
+}
+
+// checkProjectResources refuses a deployment whose containers would take
+// the app's project over its memory or CPU limit (with the other apps'
+// limits), or would run without a limit of their own while the project
+// has one. Each server the app runs on counts.
+func (s *Server) checkProjectResources(ctx context.Context, app *store.App, spec *agentproto.AppSpec) error {
+	if app.Source == store.SourceMail {
+		return nil // in no project
+	}
+	pr, err := s.db.Project(ctx, app.ProjectID)
+	if err != nil {
+		return err
+	}
+	l := pr.Limits
+	if l.MemoryMB == 0 && l.CPUs == 0 {
+		return nil
+	}
+	mem, cpus := spec.MemoryMB, spec.CPUs
+	if len(spec.Services) > 0 {
+		mem, cpus = 0, 0
+		noMem, noCPU := false, false
+		for _, svc := range spec.Services {
+			mem, cpus = mem+svc.MemoryMB, cpus+svc.CPUs
+			noMem, noCPU = noMem || svc.MemoryMB <= 0, noCPU || svc.CPUs <= 0
+		}
+		// One service without a limit: the app has none.
+		if noMem {
+			mem = 0
+		}
+		if noCPU {
+			cpus = 0
+		}
+	}
+	n := 1 + len(app.Replicas)
+	usedMem, usedCPUs, err := s.db.ProjectResources(ctx, app.ProjectID, app.ID)
+	if err != nil {
+		return err
+	}
+	if err := store.CheckResources(l, usedMem, usedCPUs, mem*n, cpus*float64(n)); err != nil {
+		return &deployError{status: http.StatusUnprocessableEntity, msg: err.Error(), cause: err}
+	}
+	return nil
 }

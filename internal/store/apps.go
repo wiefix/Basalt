@@ -99,6 +99,9 @@ type ComposeService struct {
 	Image string `json:"image"`
 	Ports []int  `json:"ports,omitempty"` // container ports mentioned in the file
 	Job   bool   `json:"job,omitempty"`
+	// MemoryMB and CPUs are its limits in the file (0: none).
+	MemoryMB int     `json:"memory_mb,omitempty"`
+	CPUs     float64 `json:"cpus,omitempty"`
 }
 
 // AppSettings are the fields an app is deployed with, other than env.

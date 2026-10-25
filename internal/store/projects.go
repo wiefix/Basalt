@@ -43,6 +43,11 @@ type ProjectLimits struct {
 	// several servers come with the app).
 	HealthChecks int `json:"health_checks"`
 	DiskMB       int `json:"disk_mb"`
+	// MemoryMB and CPUs bound the containers of the project's apps and
+	// databases, added up over every server they run on; with a limit,
+	// each container must have its own.
+	MemoryMB int     `json:"memory_mb"`
+	CPUs     float64 `json:"cpus"`
 }
 
 // ProjectUsage is what a project holds, counted as ProjectLimits counts.
@@ -50,12 +55,38 @@ type ProjectUsage struct {
 	Sites, Apps, Databases, DNSZones, HealthChecks int
 	// DiskBytes adds up the last measurement of the sites.
 	DiskBytes int64
+	// MemoryMB and CPUs add up the limits of the apps' containers.
+	MemoryMB int
+	CPUs     float64
 }
 
 // LimitError refuses one more resource in a project at its limit.
 type LimitError struct {
 	What  string // "sites", "apps", …
 	Limit int
+}
+
+// ResourceError refuses an app whose containers would take the project
+// over its memory or CPU limit, or have no limit of their own.
+type ResourceError struct{ Msg string }
+
+func (e *ResourceError) Error() string { return e.Msg }
+
+// CheckResources tells whether an app needing mem MB and cpus (0: no
+// limit of its own) fits in project with the project's other apps but
+// except.
+func CheckResources(l ProjectLimits, usedMem int, usedCPUs float64, mem int, cpus float64) error {
+	switch {
+	case l.MemoryMB > 0 && mem <= 0:
+		return &ResourceError{"the project limits memory: give each container a memory limit (in a compose file: mem_limit on every service)"}
+	case l.CPUs > 0 && cpus <= 0:
+		return &ResourceError{"the project limits CPU: give each container a CPU limit (in a compose file: cpus on every service)"}
+	case l.MemoryMB > 0 && usedMem+mem > l.MemoryMB:
+		return &ResourceError{fmt.Sprintf("the project's apps would use %d MB of memory, more than its %d MB: an admin of the panel can raise its limits", usedMem+mem, l.MemoryMB)}
+	case l.CPUs > 0 && usedCPUs+cpus > l.CPUs+1e-9:
+		return &ResourceError{fmt.Sprintf("the project's apps would use %g CPUs, more than its %g: an admin of the panel can raise its limits", usedCPUs+cpus, l.CPUs)}
+	}
+	return nil
 }
 
 func (e *LimitError) Error() string {
@@ -282,7 +313,74 @@ func projectUsage(ctx context.Context, q querier, id int64) (ProjectUsage, error
 		 AND id NOT IN (SELECT health_check_id FROM proxy_routes WHERE health_check_id IS NOT NULL)),
 		(SELECT COALESCE(SUM(disk_bytes + db_bytes), 0) FROM sites WHERE project_id = ?1)`, id).
 		Scan(&u.Sites, &u.Apps, &u.Databases, &u.DNSZones, &u.HealthChecks, &u.DiskBytes)
+	if err != nil {
+		return u, err
+	}
+	u.MemoryMB, u.CPUs, err = projectResources(ctx, q, id, 0)
 	return u, err
+}
+
+// projectResources adds up the memory and CPU limits of a project's
+// deployed apps (but except, and the mail server), each times the servers
+// it runs on; a compose app counts the limits of its services. An app
+// never deployed takes nothing: its deployment is checked.
+func projectResources(ctx context.Context, q querier, project, except int64) (int, float64, error) {
+	var mem int
+	var cpus float64
+	err := q.QueryRowContext(ctx, `SELECT
+		COALESCE(SUM(r.mem * r.n), 0), COALESCE(SUM(r.cpus * r.n), 0) FROM (
+		SELECT
+		  CASE WHEN a.source = 'compose' THEN (SELECT COALESCE(SUM(json_extract(s.value, '$.memory_mb')), 0)
+		    FROM json_each(a.compose_summary, '$.services') s) ELSE a.memory_mb END AS mem,
+		  CASE WHEN a.source = 'compose' THEN (SELECT COALESCE(SUM(json_extract(s.value, '$.cpus')), 0)
+		    FROM json_each(a.compose_summary, '$.services') s) ELSE a.cpus END AS cpus,
+		  MAX(1, (SELECT COUNT(*) FROM proxy_routes p WHERE p.app_id = a.id)) AS n
+		FROM apps a WHERE a.project_id = ? AND a.source <> 'mail' AND a.id <> ?
+		AND EXISTS (SELECT 1 FROM deployments d WHERE d.app_id = a.id AND d.status = 'succeeded')) r`, project, except).Scan(&mem, &cpus)
+	return mem, cpus, err
+}
+
+// checkAppResources refuses moving app into project if its containers
+// would take the project over its memory or CPU limit.
+func checkAppResources(ctx context.Context, q querier, project, app int64) error {
+	var limits string
+	if err := q.QueryRowContext(ctx, `SELECT limits FROM projects WHERE id = ?`, project).Scan(&limits); err != nil {
+		return err
+	}
+	var l ProjectLimits
+	if err := json.Unmarshal([]byte(limits), &l); err != nil || l.MemoryMB == 0 && l.CPUs == 0 {
+		return err
+	}
+	var source string
+	var deployed bool
+	if err := q.QueryRowContext(ctx, `SELECT source, EXISTS (SELECT 1 FROM deployments WHERE app_id = ?1 AND status = 'succeeded')
+		FROM apps WHERE id = ?1`, app).Scan(&source, &deployed); err != nil || source == SourceMail || !deployed {
+		return err // not running: its deployment is checked
+	}
+	usedMem, usedCPUs, err := projectResources(ctx, q, project, app)
+	if err != nil {
+		return err
+	}
+	var mem int
+	var cpus float64
+	err = q.QueryRowContext(ctx, `SELECT
+		  CASE WHEN a.source = 'compose' THEN (SELECT COALESCE(SUM(json_extract(s.value, '$.memory_mb')), 0)
+		    FROM json_each(a.compose_summary, '$.services') s) ELSE a.memory_mb END,
+		  CASE WHEN a.source = 'compose' THEN (SELECT COALESCE(SUM(json_extract(s.value, '$.cpus')), 0)
+		    FROM json_each(a.compose_summary, '$.services') s) ELSE a.cpus END
+		FROM apps a WHERE a.id = ?`, app).Scan(&mem, &cpus)
+	if err != nil {
+		return err
+	}
+	var n int
+	q.QueryRowContext(ctx, `SELECT MAX(1, COUNT(*)) FROM proxy_routes WHERE app_id = ?`, app).Scan(&n)
+	return CheckResources(l, usedMem, usedCPUs, mem*n, cpus*float64(n))
+}
+
+// ProjectResources is what the project's apps but except may use: their
+// memory and CPU limits added up.
+func (db *DB) ProjectResources(ctx context.Context, project, except int64) (int, float64, error) {
+	return projectResources(ctx, db.R, project, except)
 }
 
 // ProjectUsage reports what a project holds.
@@ -395,6 +493,11 @@ func (db *DB) MoveToProject(ctx context.Context, kind ProjectResource, id, proje
 		}
 		if current != projectID && what != "" {
 			if err := checkRoom(ctx, tx, projectID, what); err != nil {
+				return err
+			}
+		}
+		if kind == ResourceApp && current != projectID {
+			if err := checkAppResources(ctx, tx, projectID, id); err != nil {
 				return err
 			}
 		}

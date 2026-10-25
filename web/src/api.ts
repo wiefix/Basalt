@@ -760,6 +760,8 @@ export interface ProjectLimits {
   dns_zones: number;
   health_checks: number;
   disk_mb: number;
+  memory_mb: number; // containers' memory, added up
+  cpus: number;
 }
 
 export interface ProjectUsage {
@@ -769,6 +771,8 @@ export interface ProjectUsage {
   dns_zones: number;
   health_checks: number;
   disk_bytes: number; // the sites' last measurement
+  memory_mb: number; // limits of the deployed apps' containers, added up
+  cpus: number;
 }
 
 export type ProjectRole = "admin" | "member" | "viewer";
