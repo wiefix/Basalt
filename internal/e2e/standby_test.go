@@ -78,10 +78,11 @@ func TestStandbyPanel(t *testing.T) {
 	if int64(listed()["id"].(float64)) != id {
 		t.Fatal("another standby")
 	}
-	// A change on the panel reaches the copy.
+	// A change on the panel reaches the copy (it may arrive before the
+	// request returns: the time is taken before).
+	before := c.Status().Applied
 	zone := p.call(http.StatusCreated, "POST", "/api/v1/dns/zones", map[string]any{"name": "standby.test"})["zone"].(map[string]any)
-	after := time.Now()
-	eventually(t, "the copy takes the change", func() bool { return c.Status().Applied.After(after) })
+	eventually(t, "the copy takes the change", func() bool { return c.Status().Applied.After(before) })
 	time.Sleep(300 * time.Millisecond)
 	stop()
 	<-done
