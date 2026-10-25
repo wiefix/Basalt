@@ -747,6 +747,7 @@ export interface InstallationView {
   all: boolean;
   html_url: string;
   id: number;
+  statuses: boolean;
 }
 
 export interface LinkRequest {

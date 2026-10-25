@@ -132,7 +132,8 @@ func (c *Client) do(ctx context.Context, method, path, auth string, body, out an
 }
 
 // Manifest describes the GitHub App the panel at panelURL asks GitHub to
-// create: read access to code, push events to the panel's webhook.
+// create: read access to code, commit statuses (how a deployment of a
+// commit went), push events to the panel's webhook.
 func Manifest(name, panelURL string) map[string]any {
 	return map[string]any{
 		"name":         name,
@@ -145,7 +146,7 @@ func Manifest(name, panelURL string) map[string]any {
 		},
 		"public":              false,
 		"setup_on_update":     true,
-		"default_permissions": map[string]string{"contents": "read", "metadata": "read"},
+		"default_permissions": map[string]string{"contents": "read", "metadata": "read", "statuses": "write"},
 		"default_events":      []string{"push"},
 	}
 }
@@ -236,6 +237,10 @@ type Installation struct {
 	// All: on all its repositories, not chosen ones.
 	All     bool   `json:"all"`
 	HTMLURL string `json:"html_url"`
+	// Statuses: the installation lets the app set commit statuses (apps
+	// created before Basalt asked for it lack the permission until it is
+	// added in the app's settings and accepted on the installation).
+	Statuses bool `json:"statuses"`
 }
 
 // Installations lists where the app is installed.
@@ -249,15 +254,17 @@ func (c *Client) Installations(ctx context.Context, app App) ([]Installation, er
 		Account struct {
 			Login string `json:"login"`
 		} `json:"account"`
-		Selection string `json:"repository_selection"`
-		HTMLURL   string `json:"html_url"`
+		Selection   string            `json:"repository_selection"`
+		HTMLURL     string            `json:"html_url"`
+		Permissions map[string]string `json:"permissions"`
 	}
 	if err := c.do(ctx, http.MethodGet, "/app/installations?per_page=100", "Bearer "+tok, nil, &raw); err != nil {
 		return nil, err
 	}
 	out := make([]Installation, 0, len(raw))
 	for _, r := range raw {
-		out = append(out, Installation{ID: r.ID, Account: r.Account.Login, All: r.Selection == "all", HTMLURL: r.HTMLURL})
+		out = append(out, Installation{ID: r.ID, Account: r.Account.Login, All: r.Selection == "all", HTMLURL: r.HTMLURL,
+			Statuses: r.Permissions["statuses"] == "write"})
 	}
 	return out, nil
 }
@@ -272,11 +279,16 @@ type Token struct {
 // limited to the repositories named (names without owner; none: all it
 // may reach).
 func (c *Client) InstallationToken(ctx context.Context, app App, id int64, repos ...string) (*Token, error) {
+	return c.token(ctx, app, id, map[string]string{"contents": "read", "metadata": "read"}, repos)
+}
+
+// token mints an installation token with perms, limited to repos.
+func (c *Client) token(ctx context.Context, app App, id int64, perms map[string]string, repos []string) (*Token, error) {
 	tok, err := c.jwt(app)
 	if err != nil {
 		return nil, err
 	}
-	body := map[string]any{"permissions": map[string]string{"contents": "read", "metadata": "read"}}
+	body := map[string]any{"permissions": perms}
 	if len(repos) > 0 {
 		body["repositories"] = repos
 	}
@@ -373,6 +385,45 @@ func (c *Client) RepoToken(ctx context.Context, app App, repo string) (*Token, e
 	}
 	_, name, _ := strings.Cut(repo, "/")
 	return c.InstallationToken(ctx, app, id, name)
+}
+
+// Status is a commit status: how something (Context) about a commit went.
+type Status struct {
+	State       string `json:"state"` // pending, success, failure or error
+	TargetURL   string `json:"target_url,omitempty"`
+	Description string `json:"description"`
+	Context     string `json:"context"`
+}
+
+var shaRE = regexp.MustCompile(`^[0-9a-f]{40}$|^[0-9a-f]{64}$`)
+
+// SetStatus sets a status of commit sha of repo, with a token that may set
+// statuses of this repository only.
+func (c *Client) SetStatus(ctx context.Context, app App, repo, sha string, st Status) error {
+	if !shaRE.MatchString(sha) {
+		return errors.New("invalid commit")
+	}
+	switch st.State {
+	case "pending", "success", "failure", "error":
+	default:
+		return errors.New("invalid state")
+	}
+	if len(st.Description) > 140 {
+		st.Description = st.Description[:137] + "..."
+	}
+	if st.Context == "" || len(st.Context) > 100 {
+		return errors.New("invalid context")
+	}
+	id, err := c.RepoInstallation(ctx, app, repo)
+	if err != nil {
+		return err
+	}
+	_, name, _ := strings.Cut(repo, "/")
+	t, err := c.token(ctx, app, id, map[string]string{"statuses": "write"}, []string{name})
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodPost, "/repos/"+repoPath(repo)+"/statuses/"+sha, "token "+t.Token, st, nil)
 }
 
 // RepoInfo returns a repository the app reaches.

@@ -310,6 +310,11 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 		case <-ctx.Done():
 		}
 	}()
+	// Apps built through a GitHub App show the deployment on the commit.
+	statuses := &commitStatuses{s: s, appID: spec.AppID, on: spec.Git != nil && spec.Git.Token != ""}
+	if spec.Git != nil {
+		statuses.set(spec.Git.Commit, "pending", fmt.Sprintf("Deploying (#%d)", depID))
+	}
 	// One server after the other: the first that fails stops the rest, so
 	// they keep the previous version rather than a half-tested new one.
 	var resp agentproto.AppDeployResponse
@@ -375,6 +380,20 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 	}
 	if len(spec.Services) > 0 {
 		result.Digests = cleanDigests(resp.Digests)
+	}
+	if spec.Git != nil {
+		sha := resp.Commit
+		if sha == "" {
+			sha = spec.Git.Commit
+		}
+		switch {
+		case resp.OK:
+			statuses.set(sha, "success", fmt.Sprintf("Deployed (#%d)", depID))
+		case stop.stopped():
+			statuses.set(sha, "error", fmt.Sprintf("Deployment #%d canceled by %s", depID, stop.by))
+		default:
+			statuses.set(sha, "failure", fmt.Sprintf("#%d failed: %s", depID, resp.Error))
+		}
 	}
 	// Under pendMu: a push that arrives meanwhile either sees this
 	// deployment finished or is queued and started below.

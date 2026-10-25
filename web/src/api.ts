@@ -1110,7 +1110,7 @@ export const api = {
 
   gitSources: () => get<{ sources: GitSource[]; panel_url: string }>("/api/v1/git-sources"),
   gitSource: (id: number) =>
-    get<{ source: GitSource; installations: { id: number; account: string; all: boolean; html_url: string }[]; error?: string }>(
+    get<{ source: GitSource; installations: { id: number; account: string; all: boolean; html_url: string; statuses: boolean }[]; error?: string }>(
       `/api/v1/git-sources/${id}`,
     ),
   deleteGitSource: (id: number) => del<void>(`/api/v1/git-sources/${id}`),

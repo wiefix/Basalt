@@ -121,6 +121,9 @@ type installationView struct {
 	Account string `json:"account"`
 	All     bool   `json:"all"`
 	HTMLURL string `json:"html_url"`
+	// Statuses: deployments are shown on the commits (the installation
+	// granted the Commit statuses permission).
+	Statuses bool `json:"statuses"`
 }
 
 func (s *Server) pathGitSource(w http.ResponseWriter, r *http.Request) (*store.GitSource, bool) {
@@ -387,6 +390,61 @@ func (s *Server) repoToken(ctx context.Context, a *store.App) (string, error) {
 		return "", fmt.Errorf("GitHub: %w", err)
 	}
 	return t.Token, nil
+}
+
+// commitStatus tells GitHub how a deployment of a commit of an app built
+// through a GitHub App went: a status on the commit ("Basalt / <app>"),
+// linking to the app's page when the panel's address is set. It never
+// affects the deployment: a failure (an app created before Basalt asked for
+// the permission, GitHub unreachable) is logged.
+func (s *Server) commitStatus(appID int64, sha, state, desc string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*githubTimeout)
+	defer cancel()
+	a, err := s.db.AppByID(ctx, appID)
+	if err != nil || a.Source != store.SourceGit || a.Git.SourceID == 0 || a.Git.Repo == "" {
+		return
+	}
+	g, err := s.db.GitSourceByID(ctx, a.Git.SourceID)
+	if err != nil {
+		return
+	}
+	_, app, err := s.openGitSource(g)
+	if err != nil {
+		s.log.Warn("commit status", "app_id", appID, "err", err)
+		return
+	}
+	st := github.Status{State: state, Description: desc, Context: truncate("Basalt / "+a.Name, 100)}
+	if panelURL, _ := s.db.Setting(ctx, settingPanelURL); panelURL != "" {
+		st.TargetURL = panelURL + appPage(a)
+	}
+	if err := s.githubClient().SetStatus(ctx, app, a.Git.Repo, sha, st); err != nil {
+		s.log.Warn("set the commit status on GitHub (the GitHub App may need the Commit statuses permission)",
+			"app_id", appID, "commit", sha, "err", err)
+	}
+}
+
+// commitStatuses sends a deployment's commit statuses one after the other,
+// in the background.
+type commitStatuses struct {
+	s     *Server
+	appID int64
+	on    bool
+	last  chan struct{}
+}
+
+func (c *commitStatuses) set(sha, state, desc string) {
+	if !c.on || !agentproto.ValidCommit(sha) || len(sha) != 40 {
+		return
+	}
+	wait, done := c.last, make(chan struct{})
+	c.last = done
+	go func() {
+		defer close(done)
+		if wait != nil {
+			<-wait
+		}
+		c.s.commitStatus(c.appID, sha, state, desc)
+	}()
 }
 
 // handleGitHubWebhook deploys the apps of a repository on a push. Its

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/wiefix/basalt/internal/github"
@@ -78,5 +79,39 @@ func TestClient(t *testing.T) {
 	if m := github.Manifest("Basalt x", "https://panel.example.com"); m["redirect_url"] != "https://panel.example.com/git-sources/github/callback" ||
 		m["hook_attributes"].(map[string]any)["url"] != "https://panel.example.com/api/v1/webhooks/github" {
 		t.Fatalf("manifest: %v", m)
+	}
+}
+
+// TestSetStatus: a status goes to the commit with a token for statuses of
+// that repository only; bad input is refused before GitHub is asked, and an
+// installation without the permission refuses the token.
+func TestSetStatus(t *testing.T) {
+	gh := githubtest.New(t, githubtest.Repo{FullName: "acme/shop", Installation: 7}, githubtest.Repo{FullName: "acme/blog", Installation: 7})
+	c := &github.Client{API: gh.URL}
+	app := github.App{ID: gh.AppID, Key: gh.Key}
+	sha := strings.Repeat("0a", 20)
+	ctx := context.Background()
+	for _, bad := range []struct{ sha, state, ctx string }{
+		{"abc", "success", "x"}, {strings.Repeat("A", 40), "success", "x"}, {sha, "done", "x"}, {sha, "success", ""}, {sha, "success", strings.Repeat("x", 101)},
+	} {
+		if err := c.SetStatus(ctx, app, "acme/shop", bad.sha, github.Status{State: bad.state, Context: bad.ctx}); err == nil {
+			t.Errorf("%+v accepted", bad)
+		}
+	}
+	if err := c.SetStatus(ctx, app, "acme/shop", sha, github.Status{State: "failure", Context: "Basalt / shop", Description: strings.Repeat("e", 300)}); err != nil {
+		t.Fatal(err)
+	}
+	st := gh.Statuses()
+	if len(st) != 1 || st[0].Repo != "acme/shop" || st[0].SHA != sha || len(st[0].Description) != 140 {
+		t.Fatalf("statuses: %+v", st)
+	}
+	for tok, reads := range gh.Tokens() {
+		if !slices.Equal(reads, []string{"shop"}) {
+			t.Errorf("token %s reaches %v", tok, reads)
+		}
+	}
+	gh.GrantStatuses(false)
+	if err := c.SetStatus(ctx, app, "acme/shop", sha, github.Status{State: "success", Context: "Basalt / shop"}); err == nil {
+		t.Fatal("set without the permission")
 	}
 }

@@ -67,7 +67,7 @@ func TestGitHubSource(t *testing.T) {
 	if l := c.want(http.StatusOK, "GET", "/api/v1/git-sources", nil).body["sources"].([]any); len(l) != 1 {
 		t.Fatalf("sources: %v", l)
 	}
-	if in := c.want(http.StatusOK, "GET", base, nil).body["installations"].([]any); len(in) != 1 || in[0].(map[string]any)["account"] != "acme" {
+	if in := c.want(http.StatusOK, "GET", base, nil).body["installations"].([]any); len(in) != 1 || in[0].(map[string]any)["account"] != "acme" || in[0].(map[string]any)["statuses"] != true {
 		t.Fatalf("installations: %v", in)
 	}
 	repos := c.want(http.StatusOK, "GET", base+"/repos", nil).body["repos"].([]any)
@@ -149,6 +149,41 @@ func TestGitHubSource(t *testing.T) {
 	specs = hub.deployed()
 	if len(specs) != 2 || specs[1].Git.Commit != strings.Repeat("ab", 20) {
 		t.Fatalf("pushed commit: %+v", specs[len(specs)-1].Git)
+	}
+	// The deployment shows on the commit: deploying, then deployed (the
+	// manual one built an unknown commit: nothing to show).
+	waitStatuses := func(n int) []githubtest.SetStatus {
+		t.Helper()
+		for range 300 {
+			if st := gh.Statuses(); len(st) >= n {
+				return st
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("statuses: %+v", gh.Statuses())
+		return nil
+	}
+	st := waitStatuses(2)
+	if len(st) != 2 || st[0].State != "pending" || st[1].State != "success" || st[1].SHA != strings.Repeat("ab", 20) ||
+		st[1].Repo != "acme/shop" || st[1].Context != "Basalt / shop" || st[1].TargetURL != "https://panel.example.com/apps/"+appID ||
+		!strings.HasPrefix(st[1].Description, "Deployed (#") {
+		t.Fatalf("statuses: %+v", st)
+	}
+	// An installation without the permission: deployments go on, no status.
+	gh.GrantStatuses(false)
+	if in := c.want(http.StatusOK, "GET", base, nil).body["installations"].([]any); in[0].(map[string]any)["statuses"] != false {
+		t.Fatalf("installations: %v", in)
+	}
+	push(gh.WebhookSecret, "acme/shop", "refs/heads/dev", http.StatusAccepted)
+	waitIdle()
+	if specs = hub.deployed(); len(specs) != 3 {
+		t.Fatalf("deployed: %d", len(specs))
+	}
+	var ok string
+	srv.db.R.QueryRow(`SELECT status FROM deployments ORDER BY id DESC LIMIT 1`).Scan(&ok)
+	time.Sleep(100 * time.Millisecond)
+	if ok != "succeeded" || len(gh.Statuses()) != 2 {
+		t.Fatalf("without the permission: %s %+v", ok, gh.Statuses())
 	}
 
 	// The source goes: its apps keep their URL, without it.

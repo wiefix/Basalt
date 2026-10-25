@@ -121,6 +121,19 @@ function SourceCard({ source }: { source: GitSource }) {
           . Create an app from one under <Link to="/apps">Apps</Link>.
         </p>
       )}
+      {insts.length > 0 &&
+        (insts.every((i) => i.statuses) ? (
+          <p className="faint small" style={{ margin: 0 }}>
+            Each deployment of a pushed commit shows on it in GitHub (“Basalt / app”: deploying, deployed or failed), linking to
+            the app here.
+          </p>
+        ) : (
+          <div className="alert small">
+            Deployments do not show on the commits yet: this GitHub App was created before Basalt asked for it. On GitHub: Settings (of the account or organization that owns
+            it) → Developer settings → GitHub Apps → {source.name} → Permissions & events → Repository permissions → Commit
+            statuses: Read and write; save, then accept the new permission on each installation (GitHub asks there).
+          </div>
+        ))}
     </div>
   );
 }

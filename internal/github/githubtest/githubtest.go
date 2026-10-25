@@ -43,11 +43,35 @@ type Server struct {
 	// Code is the manifest code that converts (once).
 	Code string
 
-	mu       sync.Mutex
-	repos    []Repo
-	tokens   map[string][]string // token -> repositories it reads (nil: all of its installation)
-	tokenIns map[string]int64
-	used     bool
+	mu         sync.Mutex
+	repos      []Repo
+	tokens     map[string][]string // token -> repositories it reads (nil: all of its installation)
+	tokenIns   map[string]int64
+	tokenPerms map[string]map[string]string
+	statuses   []SetStatus
+	noStatus   bool // the installations did not grant commit statuses
+	used       bool
+}
+
+// SetStatus is a commit status set through the fake.
+type SetStatus struct {
+	Repo, SHA                              string
+	State, TargetURL, Description, Context string
+}
+
+// GrantStatuses sets whether the installations let the app set commit
+// statuses (default: they do).
+func (s *Server) GrantStatuses(ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noStatus = !ok
+}
+
+// Statuses returns the commit statuses set so far.
+func (s *Server) Statuses() []SetStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.statuses)
 }
 
 // New starts the fake with repos.
@@ -58,7 +82,7 @@ func New(t *testing.T, repos ...Repo) *Server {
 		t.Fatal(err)
 	}
 	s := &Server{AppID: 4242, Slug: "basalt-test", Owner: "acme", Key: key, WebhookSecret: "hook-secret-123",
-		Code: "manifestcode123", repos: repos, tokens: map[string][]string{}, tokenIns: map[string]int64{}}
+		Code: "manifestcode123", repos: repos, tokens: map[string][]string{}, tokenIns: map[string]int64{}, tokenPerms: map[string]map[string]string{}}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.handle))
 	t.Cleanup(s.Close)
 	return s
@@ -142,6 +166,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	s.mu.Lock()
 	repos := slices.Clone(s.repos)
+	noStatus := s.noStatus
 	s.mu.Unlock()
 	switch {
 	case r.Method == http.MethodPost && p == "/app-manifests/"+s.Code+"/conversions":
@@ -164,7 +189,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, http.StatusUnauthorized, "A JSON web token could not be decoded")
 			return
 		}
-		s.handleApp(w, r, repos)
+		s.handleApp(w, r, repos, noStatus)
 	case strings.HasPrefix(p, "/repos/") && strings.HasSuffix(p, "/installation"):
 		if !s.appJWT(r) {
 			s.fail(w, http.StatusUnauthorized, "Bad credentials")
@@ -201,6 +226,34 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 				out = []map[string]any{}
 			}
 			s.json(w, http.StatusOK, map[string]any{"total_count": len(out), "repositories": out})
+		case r.Method == http.MethodPost && strings.HasPrefix(p, "/repos/") && strings.Contains(p, "/statuses/"):
+			full, sha, _ := strings.Cut(strings.TrimPrefix(p, "/repos/"), "/statuses/")
+			tok, _ := strings.CutPrefix(r.Header.Get("Authorization"), "token ")
+			s.mu.Lock()
+			may := s.tokenPerms[tok]["statuses"] == "write"
+			s.mu.Unlock()
+			for _, rp := range repos {
+				if !strings.EqualFold(rp.FullName, full) || !reach(rp) {
+					continue
+				}
+				if !may {
+					s.fail(w, http.StatusForbidden, "Resource not accessible by integration")
+					return
+				}
+				var st struct {
+					State       string `json:"state"`
+					TargetURL   string `json:"target_url"`
+					Description string `json:"description"`
+					Context     string `json:"context"`
+				}
+				json.NewDecoder(r.Body).Decode(&st)
+				s.mu.Lock()
+				s.statuses = append(s.statuses, SetStatus{Repo: rp.FullName, SHA: sha, State: st.State, TargetURL: st.TargetURL, Description: st.Description, Context: st.Context})
+				s.mu.Unlock()
+				s.json(w, http.StatusCreated, map[string]any{"state": st.State})
+				return
+			}
+			s.fail(w, http.StatusNotFound, "Not Found")
 		case strings.HasPrefix(p, "/repos/"):
 			rest := strings.TrimPrefix(p, "/repos/")
 			full, branches := strings.CutSuffix(rest, "/branches")
@@ -229,7 +282,7 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleApp(w http.ResponseWriter, r *http.Request, repos []Repo) {
+func (s *Server) handleApp(w http.ResponseWriter, r *http.Request, repos []Repo, noStatus bool) {
 	p := r.URL.Path
 	if r.Method == http.MethodGet && p == "/app/installations" {
 		seen := map[int64]bool{}
@@ -240,7 +293,11 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request, repos []Repo)
 			}
 			seen[rp.Installation] = true
 			owner, _, _ := strings.Cut(rp.FullName, "/")
-			out = append(out, map[string]any{"id": rp.Installation, "account": map[string]string{"login": owner},
+			perms := map[string]string{"contents": "read", "metadata": "read", "statuses": "write"}
+			if noStatus {
+				delete(perms, "statuses")
+			}
+			out = append(out, map[string]any{"id": rp.Installation, "account": map[string]string{"login": owner}, "permissions": perms,
 				"repository_selection": "selected", "html_url": fmt.Sprintf("https://github.example/settings/installations/%d", rp.Installation)})
 		}
 		s.json(w, http.StatusOK, out)
@@ -253,15 +310,21 @@ func (s *Server) handleApp(w http.ResponseWriter, r *http.Request, repos []Repo)
 			return
 		}
 		var body struct {
-			Repositories []string `json:"repositories"`
+			Repositories []string          `json:"repositories"`
+			Permissions  map[string]string `json:"permissions"`
 		}
 		json.NewDecoder(r.Body).Decode(&body)
+		if body.Permissions["statuses"] != "" && noStatus {
+			s.fail(w, http.StatusUnprocessableEntity, "The permissions requested are not granted to this installation.")
+			return
+		}
 		b := make([]byte, 24)
 		rand.Read(b)
 		tok := "ghs_" + base64.RawURLEncoding.EncodeToString(b)
 		s.mu.Lock()
 		s.tokens[tok] = body.Repositories
 		s.tokenIns[tok] = id
+		s.tokenPerms[tok] = body.Permissions
 		s.mu.Unlock()
 		s.json(w, http.StatusCreated, map[string]any{"token": tok, "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
 		return
