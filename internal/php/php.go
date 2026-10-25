@@ -44,21 +44,23 @@ type Host struct {
 	// Units: each site's PHP runs as its own systemd service (its own FPM
 	// master in its own cgroup, so CPU and memory can be limited per site);
 	// without systemd, all sites' pools share the distribution's master.
-	Units     bool
-	UnitDir   string                     // /etc/systemd/system
-	ConfDir   string                     // per-site FPM configurations, /etc/basalt/php
-	Systemctl func(args ...string) error // runs systemctl
+	Units        bool
+	UnitDir      string                     // /etc/systemd/system
+	ConfDir      string                     // per-site FPM configurations, /etc/basalt/php
+	Systemctl    func(args ...string) error // runs systemctl
+	ExtensionDir string                     // PHP extensions, /usr/lib/php/<api>/*.so
 }
 
 func DefaultHost(runDir string) *Host {
 	h := &Host{
-		EtcDir:    "/etc/php",
-		RunDir:    runDir,
-		PIDFile:   func(v string) string { return "/run/php/php" + v + "-fpm.pid" },
-		Binary:    func(v string) string { return "/usr/sbin/php-fpm" + v },
-		UnitDir:   "/etc/systemd/system",
-		ConfDir:   "/etc/basalt/php",
-		Systemctl: systemctl,
+		EtcDir:       "/etc/php",
+		RunDir:       runDir,
+		PIDFile:      func(v string) string { return "/run/php/php" + v + "-fpm.pid" },
+		Binary:       func(v string) string { return "/usr/sbin/php-fpm" + v },
+		UnitDir:      "/etc/systemd/system",
+		ConfDir:      "/etc/basalt/php",
+		Systemctl:    systemctl,
+		ExtensionDir: "/usr/lib/php",
 	}
 	if _, err := os.Stat("/run/systemd/system"); err == nil && os.Geteuid() == 0 {
 		if _, err := exec.LookPath("systemctl"); err == nil {
@@ -394,6 +396,72 @@ func (h *Host) removePool(version string, siteID int64) error {
 		return err
 	}
 	return h.reload(version)
+}
+
+// RestartUpdated restarts the sites' services whose FPM master started
+// before its code was last installed: an update of PHP (a security fix)
+// or of one of its extensions. The package restarts the distribution's
+// master but not these, which would keep running the old code. A master
+// writes its pid file when it starts; dpkg keeps the packaged files'
+// modification times, so the change time (when the file was put in place)
+// tells when the code arrived. It returns the sites restarted.
+func (h *Host) RestartUpdated() ([]int64, error) {
+	if !h.Units {
+		return nil, nil
+	}
+	units, err := filepath.Glob(filepath.Join(h.UnitDir, "basalt-php-site-*.service"))
+	if err != nil {
+		return nil, err
+	}
+	extensions, _ := filepath.Glob(filepath.Join(h.ExtensionDir, "*", "*.so"))
+	var done []int64
+	var errs []error
+	for _, u := range units {
+		id, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(filepath.Base(u), "basalt-php-site-"), ".service"), 10, 64)
+		if err != nil || id <= 0 {
+			continue
+		}
+		pid, err := os.Stat(filepath.Join(h.RunDir, "site-"+strconv.FormatInt(id, 10)+".pid"))
+		if err != nil {
+			continue // not running
+		}
+		bin := unitBinary(u)
+		if bin == "" {
+			continue
+		}
+		stale := false
+		for _, f := range append([]string{bin}, extensions...) {
+			if fi, err := os.Stat(f); err == nil && changeTime(fi).After(pid.ModTime()) {
+				stale = true
+				break
+			}
+		}
+		if !stale {
+			continue
+		}
+		if err := h.Systemctl("restart", UnitName(id)); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		done = append(done, id)
+	}
+	return done, errors.Join(errs...)
+}
+
+// unitBinary is the php-fpm binary a site's unit starts.
+func unitBinary(unit string) string {
+	b, err := os.ReadFile(unit)
+	if err != nil {
+		return ""
+	}
+	for line := range strings.Lines(string(b)) {
+		if rest, ok := strings.CutPrefix(line, "ExecStart="); ok {
+			if f := strings.Fields(rest); len(f) > 0 && filepath.IsAbs(f[0]) {
+				return f[0]
+			}
+		}
+	}
+	return ""
 }
 
 func (h *Host) test(ctx context.Context, version string) error {

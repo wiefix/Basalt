@@ -142,6 +142,23 @@ for i in $(seq 30); do
   docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " && break; sleep 1
 done
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "site down after setting limits"; exit 1; }
+echo "### after an update of PHP, the site's PHP runs the new binary, not the replaced one left in memory"
+OLDPID=$(docker exec basalt-node1 systemctl show -p MainPID --value basalt-php-site-$SITE.service)
+# As a package update does: a new file renamed over the old one.
+docker exec basalt-node1 sh -c "cp -p /usr/sbin/php-fpm$PHPV /usr/sbin/php-fpm$PHPV.dpkg-new && mv /usr/sbin/php-fpm$PHPV.dpkg-new /usr/sbin/php-fpm$PHPV"
+docker exec basalt-node1 grep -q "php-fpm$PHPV (deleted)" /proc/$OLDPID/maps || { echo "the replaced binary is not marked deleted"; exit 1; }
+for i in $(seq 100); do
+  FPMPID=$(docker exec basalt-node1 systemctl show -p MainPID --value basalt-php-site-$SITE.service)
+  [ "$FPMPID" != 0 ] && [ "$FPMPID" != "$OLDPID" ] && break; sleep 1
+done
+[ "$FPMPID" != "$OLDPID" ] || { echo "the site's PHP was not restarted"; exit 1; }
+docker exec basalt-node1 sh -c "! grep -q 'php-fpm.*(deleted)' /proc/$FPMPID/maps" || { echo "the site's PHP still runs the replaced binary"; exit 1; }
+echo "  restarted after ${i}s"
+docker exec basalt-node1 systemctl is-active basalt-php-site-$SITE.service
+for i in $(seq 30); do
+  docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " && break; sleep 1
+done
+docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "site down after the PHP update"; exit 1; }
 
 echo "### app on node1 (container reached by its IP on a private network, no published port)"
 APP=$($API -d "{\"server_id\":$NODE,\"name\":\"who\",\"image\":\"traefik/whoami:v1.10\",\"port\":80,\"domains\":[\"who.test\"],\"tls\":\"internal\"}" http://127.0.0.1:8080/api/v1/apps | python3 -c 'import sys,json; print(json.load(sys.stdin)["app"]["id"])')

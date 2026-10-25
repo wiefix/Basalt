@@ -6,9 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRenderPool(t *testing.T) {
@@ -194,5 +197,78 @@ func TestApplyUnits(t *testing.T) {
 		if _, err := os.Stat(f); !os.IsNotExist(err) {
 			t.Fatalf("%s left", f)
 		}
+	}
+}
+
+// TestRestartUpdated: a site whose PHP master started before its binary or
+// an extension was installed is restarted; one started after, and one not
+// running, are left alone.
+func TestRestartUpdated(t *testing.T) {
+	dir := t.TempDir()
+	h := &Host{RunDir: filepath.Join(dir, "run"), UnitDir: filepath.Join(dir, "units"), ExtensionDir: filepath.Join(dir, "ext"), Units: true}
+	var calls []string
+	h.Systemctl = func(args ...string) error { calls = append(calls, strings.Join(args, " ")); return nil }
+	for _, d := range []string{h.RunDir, h.UnitDir, filepath.Join(h.ExtensionDir, "20250925")} {
+		os.MkdirAll(d, 0o755)
+	}
+	bin85, bin84 := filepath.Join(dir, "php-fpm8.5"), filepath.Join(dir, "php-fpm8.4")
+	os.WriteFile(bin85, []byte("new"), 0o755) // installed now
+	os.WriteFile(bin84, []byte("old"), 0o755)
+	now := time.Now()
+	site := func(id int, bin string, started time.Time) {
+		os.WriteFile(filepath.Join(h.UnitDir, UnitName(int64(id))), []byte("[Service]\nType=notify\nExecStart="+bin+" --nodaemonize --fpm-config /etc/basalt/php/site-"+strconv.Itoa(id)+".conf\n"), 0o644)
+		if started.IsZero() {
+			return
+		}
+		pid := filepath.Join(h.RunDir, "site-"+strconv.Itoa(id)+".pid")
+		os.WriteFile(pid, []byte("123\n"), 0o644)
+		os.Chtimes(pid, started, started)
+	}
+	site(1, bin85, now.Add(time.Hour))  // started after the update
+	site(2, bin85, now.Add(-time.Hour)) // before: runs the old binary
+	site(3, bin85, time.Time{})         // stopped
+	got, err := h.RestartUpdated()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []int64{2}) || strings.Join(calls, ";") != "restart basalt-php-site-2.service" {
+		t.Fatalf("restarted %v, calls %v", got, calls)
+	}
+	// An extension installed after site 1 started (php8.5-mysql…).
+	calls = nil
+	ext := filepath.Join(h.ExtensionDir, "20250925", "mysqli.so")
+	os.WriteFile(ext, nil, 0o644)
+	site(1, bin85, now.Add(-time.Minute)) // before the extension arrived
+	site(2, bin85, now.Add(time.Hour))    // restarted since
+	if got, _ := h.RestartUpdated(); !slices.Equal(got, []int64{1}) {
+		t.Fatalf("after an extension update: %v %v", got, calls)
+	}
+	h.Units = false
+	if got, _ := h.RestartUpdated(); got != nil {
+		t.Fatalf("without units: %v", got)
+	}
+}
+
+// TestChangeTimeLinux: a file put in place as dpkg does (its packaged
+// modification time kept) has a change time of when it was installed.
+func TestChangeTimeLinux(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux only")
+	}
+	dir := t.TempDir()
+	f := filepath.Join(dir, "php-fpm8.5")
+	start := time.Now().Add(-time.Second)
+	built := time.Now().Add(-72 * time.Hour)
+	os.WriteFile(f+".dpkg-new", []byte("x"), 0o755)
+	os.Chtimes(f+".dpkg-new", built, built)
+	if err := os.Rename(f+".dpkg-new", f); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.ModTime().After(start) || !changeTime(fi).After(start) {
+		t.Fatalf("modified %v, changed %v, started %v", fi.ModTime(), changeTime(fi), start)
 	}
 }

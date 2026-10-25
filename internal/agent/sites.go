@@ -422,9 +422,11 @@ func (m *sitesManager) removeTemps(ctx context.Context, before time.Time) {
 	}
 }
 
-// janitor aborts uploads abandoned by the panel (e.g. browser closed).
+// janitor aborts uploads abandoned by the panel (e.g. browser closed),
+// cleans up, and has the sites' PHP run its current code. Every minute: a
+// security update of PHP must reach the sites soon.
 func (m *sitesManager) janitor(ctx context.Context) {
-	t := time.NewTicker(5 * time.Minute)
+	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	var swept time.Time
 	for {
@@ -432,6 +434,16 @@ func (m *sitesManager) janitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+		}
+		if m.php != nil {
+			// After an update of PHP, sites must not keep running the old code.
+			ids, err := m.php.RestartUpdated()
+			if len(ids) > 0 {
+				m.log.Info("restarted the PHP of sites to run the updated PHP", "sites", ids)
+			}
+			if err != nil {
+				m.log.Warn("restart the PHP of sites after an update", "err", err)
+			}
 		}
 		if m.root != "" {
 			m.cleanTrash(time.Now())
