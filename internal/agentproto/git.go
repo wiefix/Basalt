@@ -22,6 +22,9 @@ type GitSource struct {
 	Context    string `json:"context"`    // build context directory in the repository
 	// DeployKey is an OpenSSH private key for ssh:// and scp-style URLs.
 	DeployKey string `json:"deploy_key,omitempty"`
+	// Token is a short-lived token for an https URL (a GitHub App's
+	// installation token, sent as x-access-token).
+	Token string `json:"token,omitempty"`
 	// ReuseImage is the image of an earlier deployment of Commit; when it is
 	// still on the host it is used instead of building (rollbacks).
 	ReuseImage string `json:"reuse_image,omitempty"`
@@ -31,9 +34,10 @@ type GitSource struct {
 }
 
 var (
-	branchRE = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
-	commitRE = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
-	scpRE    = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}@[A-Za-z0-9.-]{1,253}:[A-Za-z0-9._~/-]{1,512}$`)
+	branchRE   = regexp.MustCompile(`^[A-Za-z0-9._/-]{1,200}$`)
+	gitTokenRE = regexp.MustCompile(`^[A-Za-z0-9_.-]{20,512}$`)
+	commitRE   = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
+	scpRE      = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}@[A-Za-z0-9.-]{1,253}:[A-Za-z0-9._~/-]{1,512}$`)
 )
 
 // ValidateGitURL accepts https://host/path, ssh://[user@]host[:port]/path
@@ -104,6 +108,9 @@ func (g *GitSource) Validate() error {
 	}
 	if err := ValidateRepoPath(g.Context, true); err != nil {
 		return err
+	}
+	if g.Token != "" && (!gitTokenRE.MatchString(g.Token) || IsSSHGitURL(g.URL)) {
+		return errors.New("invalid repository token")
 	}
 	if len(g.DeployKey) > 16<<10 || g.ReuseImage != "" && !docker.ValidRef(g.ReuseImage) || len(g.RegistryAuths) > 50 {
 		return errors.New("invalid git source")

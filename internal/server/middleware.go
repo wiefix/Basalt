@@ -6,13 +6,15 @@ import (
 	"time"
 )
 
-// securityHeaders sets conservative defaults on every response.
-// HSTS is added once the panel terminates TLS itself.
-func securityHeaders(next http.Handler) http.Handler {
+// securityHeaders sets conservative defaults on every response. Forms
+// post to the panel only, and to formOrigin (GitHub: creating a GitHub
+// App posts its manifest there). HSTS is added once the panel terminates
+// TLS itself.
+func securityHeaders(next http.Handler, formOrigin string) http.Handler {
+	csp := "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self' " + formOrigin + "; object-src 'none'"
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy",
-			"default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'")
+		h.Set("Content-Security-Policy", csp)
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")

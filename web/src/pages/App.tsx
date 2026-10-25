@@ -871,7 +871,9 @@ function SourceTab({ app }: { app: App }) {
     mutationFn: () =>
       api.updateApp(app.id, {
         image: "",
-        git: { url: url.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim() },
+        git: g.source_id
+          ? { url: g.url, source_id: g.source_id, repo: g.repo, branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim() }
+          : { url: url.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim() },
         port: app.port,
         volumes: app.volumes,
         memory_mb: app.memory_mb,
@@ -895,9 +897,16 @@ function SourceTab({ app }: { app: App }) {
       >
         <h2>Repository</h2>
         <ErrorBox error={save.error} />
-        <Field label="URL" help="https://… for public repositories, git@host:org/repo.git with the deploy key below for private ones.">
-          <input className="input mono" value={url} onChange={(e) => setUrl(e.target.value)} required />
-        </Field>
+        {g.source_id ? (
+          <p className="muted" style={{ margin: 0 }}>
+            <span className="mono">{g.repo}</span> through the GitHub App of{" "}
+            <Link to="/git-sources">Git sources</Link>: each build gets a token that reads this repository only.
+          </p>
+        ) : (
+          <Field label="URL" help="https://… for public repositories, git@host:org/repo.git with the deploy key below for private ones.">
+            <input className="input mono" value={url} onChange={(e) => setUrl(e.target.value)} required />
+          </Field>
+        )}
         <div className="grid-2">
           <Field label="Branch">
             <input className="input mono" value={branch} onChange={(e) => setBranch(e.target.value)} required />
@@ -915,8 +924,8 @@ function SourceTab({ app }: { app: App }) {
           </button>
         </div>
       </form>
-      <DeployKeyCard app={app} ssh={ssh} />
-      <WebhookCard app={app} />
+      {!g.source_id && <DeployKeyCard app={app} ssh={ssh} />}
+      <WebhookCard app={app} github={!!g.source_id} />
     </div>
   );
 }
@@ -972,7 +981,7 @@ function DeployKeyCard({ app, ssh }: { app: App; ssh: boolean }) {
   );
 }
 
-function WebhookCard({ app }: { app: App }) {
+function WebhookCard({ app, github }: { app: App; github: boolean }) {
   const qc = useQueryClient();
   const toast = useToast();
   const hook = useQuery({ queryKey: ["webhook", app.id], queryFn: () => api.appWebhook(app.id), gcTime: 0 });
@@ -997,15 +1006,30 @@ function WebhookCard({ app }: { app: App }) {
           enabled
         </label>
       </div>
+      {github ? (
+        <p className="muted" style={{ margin: 0 }}>
+          GitHub tells the panel of every push to <span className="mono">{app.git?.branch}</span> through the GitHub App: that
+          commit is deployed. A push during a deployment is deployed right after it.
+        </p>
+      ) : (
+        <WebhookSetup app={app} secret={w.secret} path={w.path} onRegenerate={() => update.mutate({ auto_deploy: w.auto_deploy, regenerate: true })} pending={update.isPending} />
+      )}
+    </div>
+  );
+}
+
+function WebhookSetup({ app, secret, path, onRegenerate, pending }: { app: App; secret: string; path: string; onRegenerate: () => void; pending: boolean }) {
+  return (
+    <>
       <p className="muted" style={{ margin: 0 }}>
         Add a webhook at your git host; every push to <span className="mono">{app.git?.branch}</span> deploys that commit.
         A push during a deployment is deployed right after it.
       </p>
       <Field label="Payload URL" help="Must be reachable from your git host.">
-        <CodeBox text={window.location.origin + w.path} />
+        <CodeBox text={window.location.origin + path} />
       </Field>
       <Field label="Secret">
-        <CodeBox text={w.secret} />
+        <CodeBox text={secret} />
       </Field>
       <ul className="steps muted small">
         <li>GitHub: Settings → Webhooks → Add webhook; content type application/json, the secret above, "Just the push event".</li>
@@ -1013,11 +1037,11 @@ function WebhookCard({ app }: { app: App }) {
         <li>Gitea / Forgejo: Settings → Webhooks → Add webhook; POST, application/json, the secret above, push events.</li>
       </ul>
       <div>
-        <button className="btn sm" onClick={() => update.mutate({ auto_deploy: w.auto_deploy, regenerate: true })} disabled={update.isPending}>
+        <button className="btn sm" onClick={onRegenerate} disabled={pending}>
           <Icon name="refresh" size={14} /> New secret
         </button>
       </div>
-    </div>
+    </>
   );
 }
 

@@ -241,6 +241,8 @@ func runPanel(ctx context.Context, cfg config.Server, baseLog *slog.Logger) erro
 		ReleaseURL:          cfg.ReleaseURL,
 		ReleaseKey:          cfg.ReleaseKey,
 		ReleaseAllowPrivate: cfg.ReleaseAllowPrivate,
+		GitHubAPI:           cfg.GitHubAPI,
+		GitHubWeb:           cfg.GitHubURL,
 	})
 	hub.OnConnect(api.SyncSites)
 	hub.OnACMEChallenge(api.ACMEChallenge)

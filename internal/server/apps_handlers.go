@@ -12,6 +12,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/docker"
+	"github.com/wiefix/basalt/internal/github"
 	"github.com/wiefix/basalt/internal/mailserver"
 	"github.com/wiefix/basalt/internal/proxy"
 	"github.com/wiefix/basalt/internal/store"
@@ -70,7 +71,8 @@ func viewApp(a *store.App) appView {
 		Template: a.Template, TemplateRevision: a.TemplateRevision, Replicas: nonNil(a.Replicas)}
 	switch a.Source {
 	case store.SourceGit:
-		v.Git = &gitView{URL: a.Git.URL, Branch: a.Git.Branch, Dockerfile: a.Git.Dockerfile, Context: a.Git.Context}
+		v.Git = &gitView{URL: a.Git.URL, Branch: a.Git.Branch, Dockerfile: a.Git.Dockerfile, Context: a.Git.Context,
+			SourceID: a.Git.SourceID, Repo: a.Git.Repo}
 		v.DeployKey, v.AutoDeploy = a.DeployKeyPublic, a.AutoDeploy
 	case store.SourceCompose:
 		sum := a.Summary
@@ -94,6 +96,10 @@ type gitView struct {
 	Branch     string `json:"branch"`
 	Dockerfile string `json:"dockerfile"`
 	Context    string `json:"context"`
+	// SourceID is the git source (GitHub App) the repository Repo
+	// (owner/name) is reached through; URL then comes from GitHub.
+	SourceID int64  `json:"source_id,omitempty"`
+	Repo     string `json:"repo,omitempty"`
 }
 
 type deploymentView struct {
@@ -187,6 +193,13 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 		}
 		g := agentproto.GitSource{URL: strings.TrimSpace(req.Git.URL), Branch: strings.TrimSpace(req.Git.Branch),
 			Dockerfile: strings.TrimSpace(req.Git.Dockerfile), Context: strings.TrimSpace(req.Git.Context)}
+		if req.Git.SourceID != 0 {
+			// The URL comes from GitHub (resolveGitSource).
+			if req.Git.SourceID < 0 || !github.ValidRepo(req.Git.Repo) {
+				return st, errors.New("a repository from a git source needs the source and owner/name")
+			}
+			g.URL = "https://github.com/" + req.Git.Repo + ".git"
+		}
 		if g.Branch == "" {
 			g.Branch = "main"
 		}
@@ -200,6 +213,9 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 			return st, err
 		}
 		st.Git = store.GitSettings{URL: g.URL, Branch: g.Branch, Dockerfile: g.Dockerfile, Context: g.Context}
+		if req.Git.SourceID != 0 {
+			st.Git.SourceID, st.Git.Repo = req.Git.SourceID, req.Git.Repo
+		}
 	case store.SourceCompose:
 		// Everything else comes from the compose file.
 		st.Volumes, st.MemoryMB, st.CPUs, st.ReadOnly = nil, 0, 0, false
@@ -286,6 +302,9 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 		return
 	}
 	st, err := req.settings(req.Source)
+	if err == nil {
+		err = s.resolveGitSource(r.Context(), &st)
+	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -435,6 +454,9 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *prin
 		return
 	}
 	st, err := req.settings(app.Source)
+	if err == nil {
+		err = s.resolveGitSource(r.Context(), &st)
+	}
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return

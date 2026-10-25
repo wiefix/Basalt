@@ -68,6 +68,10 @@ type GitSettings struct {
 	Branch     string
 	Dockerfile string // path in the repository
 	Context    string // build context directory in the repository
+	// SourceID is the git source (a GitHub App) the repository Repo
+	// ("owner/name") is reached through; 0: URL with a deploy key.
+	SourceID int64
+	Repo     string
 }
 
 const (
@@ -156,11 +160,13 @@ func (db *DB) CreateApp(ctx context.Context, serverID int64, name string, st App
 	var created int64
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO apps (project_id, server_id, name, source, image, git_url, git_branch, git_dockerfile, git_context,
-		 port, volumes, memory_mb, cpus, engine, engine_version, read_only, hostname, template, template_revision)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 port, volumes, memory_mb, cpus, engine, engine_version, read_only, hostname, template, template_revision,
+		 git_source_id, git_repo)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id, created_at`,
 		st.ProjectID, serverID, name, st.Source, st.Image, st.Git.URL, st.Git.Branch, st.Git.Dockerfile, st.Git.Context,
-		st.Port, vols, st.MemoryMB, st.CPUs, st.Engine, st.EngineVersion, st.ReadOnly, st.Hostname, st.Template, st.TemplateRevision).Scan(&a.ID, &created)
+		st.Port, vols, st.MemoryMB, st.CPUs, st.Engine, st.EngineVersion, st.ReadOnly, st.Hostname, st.Template, st.TemplateRevision,
+		nullID(st.Git.SourceID), st.Git.Repo).Scan(&a.ID, &created)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: apps.name") {
 			return nil, ErrNameTaken
@@ -195,7 +201,7 @@ func marshalVolumes(v []agentproto.AppVolume) (string, error) {
 }
 
 const appQuery = `SELECT a.id, a.server_id, a.project_id, a.name, a.source, a.image, a.git_url, a.git_branch, a.git_dockerfile,
-	a.git_context, a.deploy_key, a.deploy_key_public, a.webhook_secret, a.auto_deploy,
+	a.git_context, COALESCE(a.git_source_id, 0), a.git_repo, a.deploy_key, a.deploy_key_public, a.webhook_secret, a.auto_deploy,
 	a.compose, a.compose_summary, a.service, a.engine, a.engine_version, a.hostname, a.template, a.template_revision,
 	(SELECT COALESCE(json_group_array(l.app_id), '[]') FROM (SELECT app_id FROM app_links WHERE database_id = a.id ORDER BY app_id) l),
 	(SELECT COALESCE(json_group_array(p.server_id), '[]') FROM (SELECT server_id FROM proxy_routes
@@ -212,7 +218,7 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 		var created int64
 		var vols, domain, summary, links, replicas string
 		if err := rows.Scan(&a.ID, &a.ServerID, &a.ProjectID, &a.Name, &a.Source, &a.Image, &a.Git.URL, &a.Git.Branch,
-			&a.Git.Dockerfile, &a.Git.Context, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
+			&a.Git.Dockerfile, &a.Git.Context, &a.Git.SourceID, &a.Git.Repo, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
 			&a.ComposeSealed, &summary, &a.Service, &a.Engine, &a.EngineVersion, &a.Hostname, &a.Template, &a.TemplateRevision, &links, &replicas, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
 			return nil, err
 		}
@@ -294,8 +300,9 @@ func (db *DB) UpdateAppSettings(ctx context.Context, id int64, st AppSettings) e
 	}
 	return db.execOne(ctx,
 		`UPDATE apps SET image = ?, git_url = ?, git_branch = ?, git_dockerfile = ?, git_context = ?,
-		 port = ?, volumes = ?, memory_mb = ?, cpus = ?, read_only = ? WHERE id = ?`,
-		st.Image, st.Git.URL, st.Git.Branch, st.Git.Dockerfile, st.Git.Context, st.Port, vols, st.MemoryMB, st.CPUs, st.ReadOnly, id)
+		 port = ?, volumes = ?, memory_mb = ?, cpus = ?, read_only = ?, git_source_id = ?, git_repo = ? WHERE id = ?`,
+		st.Image, st.Git.URL, st.Git.Branch, st.Git.Dockerfile, st.Git.Context, st.Port, vols, st.MemoryMB, st.CPUs, st.ReadOnly,
+		nullID(st.Git.SourceID), st.Git.Repo, id)
 }
 
 // SetAppCompose stores a compose app's file (encrypted), its summary and

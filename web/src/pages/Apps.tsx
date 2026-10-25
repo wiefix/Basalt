@@ -112,7 +112,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
   const [service, setService] = useState("");
   const [name, setName] = useState("");
   const [image, setImage] = useState("");
-  const [repo, setRepo] = useState("");
+  const [repoURL, setRepoURL] = useState("");
   const [branch, setBranch] = useState("main");
   const [dockerfile, setDockerfile] = useState("Dockerfile");
   const [port, setPort] = useState("80");
@@ -121,6 +121,18 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
   const [domains, setDomains] = useState("");
   const [tls, setTls] = useState("auto");
   const [projectId, setProjectId] = useNewProject();
+  // Repositories through a connected GitHub App (0: any URL).
+  const sources = useQuery({ queryKey: ["git-sources"], queryFn: api.gitSources, enabled: source === "git", retry: false });
+  const ghSources = sources.data?.sources ?? [];
+  const [ghSource, setGhSource] = useState<number | null>(null);
+  const gh = ghSource ?? ghSources[0]?.id ?? 0;
+  const [repo, setRepo] = useState("");
+  const repos = useQuery({ queryKey: ["git-source-repos", gh], queryFn: () => api.gitSourceRepos(gh), enabled: source === "git" && gh > 0 });
+  const branches = useQuery({
+    queryKey: ["git-source-branches", gh, repo],
+    queryFn: () => api.gitSourceBranches(gh, repo),
+    enabled: source === "git" && gh > 0 && repo !== "",
+  });
   const create = useMutation({
     mutationFn: async () => {
       const r = await api.createApp({
@@ -128,7 +140,12 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
         name: name.trim(),
         source,
         image: source === "image" ? image.trim() : "",
-        git: source === "git" ? { url: repo.trim(), branch: branch.trim(), dockerfile: dockerfile.trim() } : undefined,
+        git:
+          source !== "git"
+            ? undefined
+            : gh > 0
+              ? { url: "", source_id: gh, repo, branch: branch.trim(), dockerfile: dockerfile.trim() }
+              : { url: repoURL.trim(), branch: branch.trim(), dockerfile: dockerfile.trim() },
         compose: source === "compose" ? compose : undefined,
         service: source === "compose" ? service.trim() : undefined,
         // A compose app's port defaults to the one its file mentions for the service.
@@ -140,7 +157,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
         cpus: 0,
         project_id: projectId,
       });
-      const waitForKey = source === "git" && isSSH(repo);
+      const waitForKey = source === "git" && gh === 0 && isSSH(repoURL);
       // Compose files usually need variables first: they are deployed from the app page.
       const deployNow = !waitForKey && source !== "compose";
       if (deployNow) await api.deployApp(r.app.id).catch(() => {});
@@ -194,7 +211,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
             Cancel
           </button>
           <button className="btn primary" form="new-app" disabled={create.isPending || withDocker.length === 0}>
-            {(source === "git" && isSSH(repo) && repo) || source === "compose" ? "Create" : "Create and deploy"}
+            {(source === "git" && gh === 0 && isSSH(repoURL) && repoURL) || source === "compose" ? "Create" : "Create and deploy"}
           </button>
         </>
       }
@@ -283,15 +300,84 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
             </Field>
           ) : (
             <>
-              <Field
-                label="Repository"
-                help="https://… for public repositories; git@host:org/repo.git for private ones (you add the app's deploy key next)."
-              >
-                <input className="input mono" value={repo} onChange={(e) => setRepo(e.target.value)} placeholder="git@github.com:org/app.git" required />
-              </Field>
+              {ghSources.length > 0 && (
+                <Field label="From">
+                  <select className="input" value={gh} onChange={(e) => { setGhSource(Number(e.target.value)); setRepo(""); }}>
+                    {ghSources.map((g) => (
+                      <option key={g.id} value={g.id}>
+                        GitHub: {g.name} ({g.owner})
+                      </option>
+                    ))}
+                    <option value={0}>Any repository URL (deploy key)</option>
+                  </select>
+                </Field>
+              )}
+              {gh > 0 ? (
+                <Field
+                  label="Repository"
+                  help={
+                    <>
+                      Repositories the GitHub App may read; add more under <Link to="/git-sources">Git sources</Link>. Pushes to
+                      the branch deploy automatically.
+                    </>
+                  }
+                >
+                  {repos.isPending ? (
+                    <Loading />
+                  ) : repos.error ? (
+                    <ErrorBox error={repos.error} />
+                  ) : (
+                    <select
+                      className="input mono"
+                      value={repo}
+                      required
+                      onChange={(e) => {
+                        setRepo(e.target.value);
+                        const r = repos.data.repos.find((x) => x.full_name === e.target.value);
+                        if (r) setBranch(r.default_branch);
+                      }}
+                    >
+                      <option value="">Choose a repository…</option>
+                      {repos.data.repos.map((r) => (
+                        <option key={r.full_name} value={r.full_name}>
+                          {r.full_name}
+                          {r.private ? " (private)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </Field>
+              ) : (
+                <Field
+                  label="Repository"
+                  help={
+                    ghSources.length === 0 ? (
+                      <>
+                        https://… for public repositories; git@host:org/repo.git for private ones (you add the app's deploy key
+                        next). Or <Link to="/git-sources">connect GitHub</Link> to pick from your repositories.
+                      </>
+                    ) : (
+                      "https://… for public repositories; git@host:org/repo.git for private ones (you add the app's deploy key next)."
+                    )
+                  }
+                >
+                  <input className="input mono" value={repoURL} onChange={(e) => setRepoURL(e.target.value)} placeholder="git@github.com:org/app.git" required />
+                </Field>
+              )}
               <div className="grid-2">
                 <Field label="Branch">
-                  <input className="input mono" value={branch} onChange={(e) => setBranch(e.target.value)} required />
+                  {gh > 0 && branches.data ? (
+                    <select className="input mono" value={branch} onChange={(e) => setBranch(e.target.value)}>
+                      {!branches.data.branches.includes(branch) && <option value={branch}>{branch}</option>}
+                      {branches.data.branches.map((b) => (
+                        <option key={b} value={b}>
+                          {b}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input className="input mono" value={branch} onChange={(e) => setBranch(e.target.value)} required />
+                  )}
                 </Field>
                 <Field label="Dockerfile" help="Path in the repository.">
                   <input className="input mono" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} required />

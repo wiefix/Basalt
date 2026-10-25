@@ -178,6 +178,12 @@ func (m *appsManager) gitEnv(spec agentproto.AppSpec, work, home string) ([]stri
 	if m.gitCAFile != "" {
 		env = append(env, "GIT_SSL_CAINFO="+m.gitCAFile)
 	}
+	if t := spec.Git.Token; t != "" {
+		// Through the environment, not the command line: the token is not
+		// in the process list. GitHub takes it as x-access-token.
+		auth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + t))
+		env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.extraHeader", "GIT_CONFIG_VALUE_0=Authorization: Basic "+auth)
+	}
 	knownHosts := filepath.Join(m.dataDir, "known_hosts")
 	if err := os.MkdirAll(knownHosts, 0o700); err != nil {
 		return nil, err
@@ -209,6 +215,9 @@ func (m *appsManager) gitEnv(spec agentproto.AppSpec, work, home string) ([]stri
 func accessHint(g *agentproto.GitSource) string {
 	if agentproto.IsSSHGitURL(g.URL) {
 		return " (check that the app's deploy key is added to the repository)"
+	}
+	if g.Token != "" {
+		return " (check that the GitHub App is still installed on the repository)"
 	}
 	return ""
 }

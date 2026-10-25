@@ -225,6 +225,27 @@ export interface GitSettings {
   branch: string;
   dockerfile: string;
   context: string;
+  source_id?: number; // a git source (GitHub App) the repository is reached through
+  repo?: string; // owner/name, with source_id
+}
+
+// A GitHub App the panel created to reach the user's repositories.
+export interface GitSource {
+  id: number;
+  kind: "github";
+  name: string;
+  slug: string;
+  owner: string;
+  html_url: string;
+  created_at: string;
+  install_url: string;
+}
+
+export interface GitRepo {
+  full_name: string;
+  private: boolean;
+  default_branch: string;
+  html_url: string;
 }
 
 export interface ComposeService {
@@ -1083,6 +1104,18 @@ export const api = {
     post<{ credentials: DatabaseCredentials }>(`/api/v1/sites/${siteId}/databases/${id}/password`),
   deleteDatabase: (siteId: number, id: number) => del<void>(`/api/v1/sites/${siteId}/databases/${id}`),
 
+  gitSources: () => get<{ sources: GitSource[]; panel_url: string }>("/api/v1/git-sources"),
+  gitSource: (id: number) =>
+    get<{ source: GitSource; installations: { id: number; account: string; all: boolean; html_url: string }[]; error?: string }>(
+      `/api/v1/git-sources/${id}`,
+    ),
+  deleteGitSource: (id: number) => del<void>(`/api/v1/git-sources/${id}`),
+  gitSourceRepos: (id: number) => get<{ repos: GitRepo[] }>(`/api/v1/git-sources/${id}/repos`),
+  gitSourceBranches: (id: number, repo: string) =>
+    get<{ branches: string[] }>(`/api/v1/git-sources/${id}/branches?repo=${encodeURIComponent(repo)}`),
+  githubManifest: (b: { name: string; organization: string }) =>
+    post<{ action: string; manifest: string; state: string }>("/api/v1/git-sources/github/manifest", b),
+  githubComplete: (b: { code: string; state: string }) => post<{ source: GitSource }>("/api/v1/git-sources/github/complete", b),
   registries: () => get<{ registries: Registry[] }>("/api/v1/registries"),
   createRegistry: (b: { host: string; username: string; password: string }) =>
     post<{ registry: Registry }>("/api/v1/registries", b),

@@ -13,6 +13,7 @@ import { AppPage } from "./pages/App";
 import { DatabasesPage } from "./pages/Databases";
 import { UsersPage } from "./pages/Users";
 import { RegistriesPage } from "./pages/Registries";
+import { GitHubCallback, GitSourcesPage } from "./pages/GitSources";
 import { BackupsPage } from "./pages/Backups";
 import { DNSPage, ZonePage } from "./pages/DNS";
 import { MailPage } from "./pages/Mail";
@@ -147,6 +148,11 @@ function Shell({ user }: { user: User }) {
           </NavLink>
         )}
         {can(user, "admin") && (
+          <NavLink className="nav-link" to="/git-sources">
+            <Icon name="link" /> Git sources
+          </NavLink>
+        )}
+        {can(user, "admin") && (
           <NavLink className="nav-link" to="/registries">
             <Icon name="key" /> Registries
           </NavLink>
@@ -198,6 +204,8 @@ function Shell({ user }: { user: User }) {
           <Route path="/dns" element={<DNSPage user={user} />} />
           <Route path="/dns/:id" element={<ZonePage user={user} />} />
           <Route path="/registries" element={<RegistriesPage user={user} />} />
+          <Route path="/git-sources" element={<GitSourcesPage user={user} />} />
+          <Route path="/git-sources/github/callback" element={<GitHubCallback />} />
           <Route path="/backups" element={<BackupsPage user={user} />} />
           <Route path="/users" element={<UsersPage user={user} />} />
           <Route path="/audit" element={<AuditPage user={user} />} />

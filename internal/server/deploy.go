@@ -251,6 +251,15 @@ type deploymentExtras struct {
 // private base images.
 func (s *Server) gitSource(ctx context.Context, app *store.App) (*agentproto.GitSource, error) {
 	g := &agentproto.GitSource{URL: app.Git.URL, Branch: app.Git.Branch, Dockerfile: app.Git.Dockerfile, Context: app.Git.Context}
+	if app.Git.SourceID != 0 && !agentproto.IsSSHGitURL(g.URL) {
+		// A token for this build only: it reads this repository and
+		// expires within the hour.
+		tok, err := s.repoToken(ctx, app)
+		if err != nil {
+			return nil, err
+		}
+		g.Token = tok
+	}
 	if agentproto.IsSSHGitURL(g.URL) && app.DeployKey != nil {
 		key, err := s.box.Open(app.DeployKey, deployKeyAD(app.ID))
 		if err != nil {

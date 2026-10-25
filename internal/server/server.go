@@ -9,12 +9,14 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/wiefix/basalt/internal/auth"
 	"github.com/wiefix/basalt/internal/catalog"
+	"github.com/wiefix/basalt/internal/github"
 	"github.com/wiefix/basalt/internal/notify"
 	"github.com/wiefix/basalt/internal/secrets"
 	"github.com/wiefix/basalt/internal/store"
@@ -71,6 +73,10 @@ type Options struct {
 	// they go out, merged into one when there are several (default 10
 	// seconds; negative: each goes out at once).
 	NotifyWindow time.Duration
+	// GitHubAPI and GitHubWeb are GitHub's API and site (tests: a fake;
+	// then private addresses are allowed).
+	GitHubAPI string
+	GitHubWeb string
 	// FailoverMinAfter is the shortest delay a standby may be given to
 	// take over by itself (default a minute; tests make it shorter).
 	FailoverMinAfter time.Duration
@@ -137,6 +143,10 @@ type Server struct {
 	batches           map[string][]notify.Message // by event, until sent
 	offlineAfter      time.Duration
 	failoverMin       time.Duration
+	githubAPI         string
+	githubWeb         string
+	githubPrivate     bool
+	manifests         manifestStates
 	certCheckEvery    time.Duration
 	auditCheckEvery   time.Duration
 	auditWatch        auditWatch
@@ -199,6 +209,13 @@ func New(o Options) *Server {
 	if o.OfflineAfter <= 0 {
 		o.OfflineAfter = 5 * time.Minute
 	}
+	githubPrivate := o.GitHubAPI != ""
+	if o.GitHubAPI == "" {
+		o.GitHubAPI = github.DefaultAPI
+	}
+	if o.GitHubWeb == "" {
+		o.GitHubWeb = github.DefaultWeb
+	}
 	if o.FailoverMinAfter <= 0 {
 		o.FailoverMinAfter = time.Minute
 	}
@@ -243,6 +260,9 @@ func New(o Options) *Server {
 		notifySem:       make(chan struct{}, notifyWorkers),
 		offlineAfter:    o.OfflineAfter,
 		failoverMin:     o.FailoverMinAfter,
+		githubAPI:       o.GitHubAPI,
+		githubWeb:       strings.TrimRight(o.GitHubWeb, "/"),
+		githubPrivate:   githubPrivate,
 		certCheckEvery:  o.CertCheckEvery,
 		auditCheckEvery: o.AuditCheckEvery,
 		usageEvery:      usageEvery,
@@ -333,6 +353,14 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("POST /api/v1/standbys", s.requireSession(store.RoleOwner, s.handleCreateStandby))
 	rt.Handle("DELETE /api/v1/standbys/{id}", s.requireSession(store.RoleOwner, s.handleDeleteStandby))
 	rt.Handle("PUT /api/v1/standbys/failover", s.requireSession(store.RoleOwner, s.handleSetFailover))
+	rt.Handle("GET /api/v1/git-sources", s.requireRole(store.RoleUser, s.handleListGitSources))
+	rt.Handle("GET /api/v1/git-sources/{id}", s.requireRole(store.RoleAdmin, s.handleGitSource))
+	rt.Handle("DELETE /api/v1/git-sources/{id}", s.requireSession(store.RoleAdmin, s.handleDeleteGitSource))
+	rt.Handle("GET /api/v1/git-sources/{id}/repos", s.requireRole(store.RoleUser, s.handleGitSourceRepos))
+	rt.Handle("GET /api/v1/git-sources/{id}/branches", s.requireRole(store.RoleUser, s.handleGitSourceBranches))
+	rt.Handle("POST /api/v1/git-sources/github/manifest", s.requireSession(store.RoleAdmin, s.handleGitHubManifest))
+	rt.Handle("POST /api/v1/git-sources/github/complete", s.requireSession(store.RoleAdmin, s.handleGitHubComplete))
+	rt.HandleFunc("POST /api/v1/webhooks/github", s.handleGitHubWebhook)
 	rt.Handle("GET /api/v1/servers/{id}/metrics", s.requireRole(store.RoleViewer, s.handleServerMetrics))
 	rt.Handle("GET /api/v1/servers/{id}/certificates", s.requireRole(store.RoleViewer, s.handleServerCerts))
 	rt.Handle("POST /api/v1/servers/{id}/ping", s.requireRole(store.RoleMember, s.handlePingServer))
@@ -493,7 +521,7 @@ func (s *Server) Handler() http.Handler {
 	// Rejects cross-origin state-changing browser requests (CSRF) using
 	// Sec-Fetch-Site and Origin. Complements SameSite=Strict cookies.
 	h = http.NewCrossOriginProtection().Handler(h)
-	h = securityHeaders(h)
+	h = securityHeaders(h, s.githubWeb)
 	h = s.logRequests(h)
 	h = realIP(s.trusted, h)
 	h = s.recoverPanics(h)

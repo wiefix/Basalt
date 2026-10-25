@@ -654,10 +654,23 @@ export interface ForwarderRequest {
   recipients?: string[];
 }
 
+export interface GitSourceView {
+  created_at: string;
+  html_url: string;
+  id: number;
+  install_url: string;
+  kind: string;
+  name: string;
+  owner: string;
+  slug: string;
+}
+
 export interface GitView {
   branch?: string;
   context?: string;
   dockerfile?: string;
+  repo?: string;
+  source_id?: number;
   url?: string;
 }
 
@@ -665,6 +678,8 @@ export interface GitViewOut {
   branch: string;
   context: string;
   dockerfile: string;
+  repo?: string;
+  source_id?: number;
   url: string;
 }
 
@@ -725,6 +740,13 @@ export interface InstallRequest {
   name?: string;
   project_id?: number;
   server_id?: number;
+}
+
+export interface InstallationView {
+  account: string;
+  all: boolean;
+  html_url: string;
+  id: number;
 }
 
 export interface LinkRequest {
@@ -811,6 +833,16 @@ export interface MailserverMailbox {
   name: string;
   quota_mb: number;
   used_mb: number;
+}
+
+export interface ManifestCompleteRequest {
+  code?: string;
+  state?: string;
+}
+
+export interface ManifestRequest {
+  name?: string;
+  organization?: string;
 }
 
 export interface MetricsView {
@@ -1010,6 +1042,13 @@ export interface RenamePasskeyRequest {
 
 export interface ReplicaRequest {
   server_id?: number;
+}
+
+export interface RepoView {
+  default_branch: string;
+  full_name: string;
+  html_url: string;
+  private: boolean;
 }
 
 export interface ResetPasswordRequest {
@@ -1419,6 +1458,8 @@ export type DeleteDnsZonesIdResponse = void;
 
 export type DeleteDnsZonesIdRecordsRidResponse = void;
 
+export type DeleteGitSourcesIdResponse = void;
+
 export type DeleteHealthChecksIdResponse = void;
 
 export type DeleteMailDomainsIdResponse = void;
@@ -1626,6 +1667,25 @@ export type GetDnsZonesIdResponse = {
   records: DnsRecordView[];
   types: string[];
   zone: DnsZoneView;
+};
+
+export type GetGitSourcesResponse = {
+  panel_url: string;
+  sources: GitSourceView[];
+};
+
+export type GetGitSourcesIdResponse = {
+  error?: string;
+  installations: InstallationView[];
+  source: GitSourceView;
+};
+
+export type GetGitSourcesIdBranchesResponse = {
+  branches: string[];
+};
+
+export type GetGitSourcesIdReposResponse = {
+  repos: RepoView[];
 };
 
 export type GetHealthChecksResponse = {
@@ -2011,6 +2071,20 @@ export type PostDnsZonesIdRecordsResponse = {
 
 export type PostDnsZonesIdRecordsBody = DnsRecord;
 
+export type PostGitSourcesGithubCompleteResponse = {
+  source: GitSourceView;
+};
+
+export type PostGitSourcesGithubCompleteBody = ManifestCompleteRequest;
+
+export type PostGitSourcesGithubManifestResponse = {
+  action: string;
+  manifest: string;
+  state: string;
+};
+
+export type PostGitSourcesGithubManifestBody = ManifestRequest;
+
 export type PostHealthChecksResponse = {
   check: {
     id: number;
@@ -2222,6 +2296,11 @@ export type PostUsersBody = CreateUserRequest;
 
 export type PostWebhooksAppsIdResponse = {
   commit?: string;
+  result: string;
+};
+
+export type PostWebhooksGithubResponse = {
+  deploying?: string[];
   result: string;
 };
 
