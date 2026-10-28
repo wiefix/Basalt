@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeDaemon serves h on a unix socket and returns a client for it.
@@ -242,5 +243,22 @@ func TestSecurityAndMemory(t *testing.T) {
 	st.MemoryStats.Stats = map[string]uint64{"total_inactive_file": 500}
 	if st.MemoryUsed() != 0 {
 		t.Fatalf("v1 memory = %d", st.MemoryUsed())
+	}
+}
+
+// TestBuildPrune: the daemon is asked to remove all build cache unused for
+// the given time, and its count of bytes freed is returned.
+func TestBuildPrune(t *testing.T) {
+	var got string
+	c := fakeDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		got = r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery
+		w.Write([]byte(`{"CachesDeleted":["a"],"SpaceReclaimed":12345}`))
+	})
+	n, err := c.BuildPrune(context.Background(), 168*time.Hour)
+	if err != nil || n != 12345 {
+		t.Fatalf("pruned %d: %v", n, err)
+	}
+	if !strings.Contains(got, "POST /v1.44/build/prune?") || !strings.Contains(got, "all=1") || !strings.Contains(got, "until%22%3A%5B%22168h0m0s") {
+		t.Fatalf("request: %s", got)
 	}
 }

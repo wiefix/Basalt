@@ -655,8 +655,13 @@ func (m *appsManager) run(ctx context.Context) {
 	}
 	t := time.NewTicker(appRefreshGap)
 	defer t.Stop()
+	pruned := time.Now().Add(buildPruneFirst - buildPruneEvery)
 	for {
 		m.refresh(ctx)
+		if time.Since(pruned) >= buildPruneEvery {
+			pruned = time.Now()
+			m.pruneBuildCache(ctx)
+		}
 		select {
 		case <-ctx.Done():
 			return

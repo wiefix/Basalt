@@ -225,3 +225,40 @@ func (m *appsManager) ensureBuilder(ctx context.Context, dockerBin string, env [
 	}
 	return nil
 }
+
+// The build cache a week unused goes, checked daily (first 10 minutes
+// after the agent starts): builds keep it fast, but left alone it fills
+// the disk.
+const (
+	buildCacheKeep  = 7 * 24 * time.Hour
+	buildPruneEvery = 24 * time.Hour
+	buildPruneFirst = 10 * time.Minute
+)
+
+// pruneBuildCache removes old build cache of Docker's builder and of the
+// agent's own builder, if it made one.
+func (m *appsManager) pruneBuildCache(ctx context.Context) {
+	dc, err := m.client()
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	if n, err := dc.BuildPrune(ctx, buildCacheKeep); err != nil {
+		m.log.Warn("prune the build cache", "err", err)
+	} else if n > 0 {
+		m.log.Info("pruned the build cache", "freed_bytes", n)
+	}
+	dockerBin, err := exec.LookPath("docker")
+	buildx := filepath.Join(m.dataDir, "buildx")
+	if _, serr := os.Stat(buildx); err != nil || serr != nil {
+		return
+	}
+	cmd := exec.CommandContext(ctx, dockerBin, "buildx", "prune", "--builder", m.railpackBuilder(), "--force", "--all",
+		"--filter", "until="+buildCacheKeep.String())
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + buildx, "DOCKER_HOST=unix://" + m.socket, "BUILDX_CONFIG=" + buildx}
+	cmd.WaitDelay = 5 * time.Second
+	if out, err := cmd.CombinedOutput(); err != nil && !strings.Contains(string(out), "no builder") && !strings.Contains(string(out), "not found") {
+		m.log.Warn("prune the build cache of the builder for builds without a Dockerfile", "err", err, "output", lastLines(string(out), 2))
+	}
+}

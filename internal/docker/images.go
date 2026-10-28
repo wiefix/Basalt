@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // PullProgress is one status line of an image pull.
@@ -205,3 +206,14 @@ var refRE = func() *regexp.Regexp {
 
 // ValidRef reports whether ref is a well-formed image reference.
 func ValidRef(ref string) bool { return len(ref) <= 255 && refRE.MatchString(ref) }
+
+// BuildPrune removes the build cache of the daemon's builder not used for
+// olderThan, and returns the bytes freed.
+func (c *Client) BuildPrune(ctx context.Context, olderThan time.Duration) (uint64, error) {
+	f, _ := json.Marshal(map[string][]string{"until": {olderThan.String()}})
+	var out struct {
+		SpaceReclaimed uint64 `json:"SpaceReclaimed"`
+	}
+	err := c.call(ctx, http.MethodPost, "/build/prune", url.Values{"all": {"1"}, "filters": {string(f)}}, nil, &out)
+	return out.SpaceReclaimed, err
+}

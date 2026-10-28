@@ -91,9 +91,21 @@ func TestGitEnvToken(t *testing.T) {
 	}
 	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token))
 	mu.Lock()
-	defer mu.Unlock()
 	if len(seen) == 0 || seen[0] != want {
 		t.Fatalf("authorization sent: %q", seen)
+	}
+	seen = nil
+	mu.Unlock()
+	// Another repository on the same host (a submodule): no token.
+	other := exec.Command(gitBin, "ls-remote", srv.URL+"/someone/else.git")
+	other.Env = env
+	other.Run()
+	mu.Lock()
+	defer mu.Unlock()
+	for _, a := range seen {
+		if a != "" {
+			t.Fatalf("the token went to another repository: %q", seen)
+		}
 	}
 	for _, bad := range []agentproto.GitSource{
 		{URL: "https://github.com/a/b.git", Branch: "main", Dockerfile: "Dockerfile", Context: ".", Token: "short"},

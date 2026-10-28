@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -114,6 +115,14 @@ func (m *appsManager) buildImage(ctx context.Context, dc *docker.Client, spec ag
 	if _, err := run(gitBin, "-C", src, "checkout", "-q", "--detach", target); err != nil {
 		return "", "", fmt.Errorf("checkout: %w", err)
 	}
+	// Submodules, with the same transports (https, ssh) and credentials:
+	// the deploy key, or a token that reaches the repository itself only.
+	if fi, err := os.Lstat(filepath.Join(src, ".gitmodules")); err == nil && fi.Mode().IsRegular() {
+		lg.printf("Fetching submodules")
+		if _, err := run(gitBin, "-C", src, "-c", "protocol.file.allow=never", "submodule", "update", "--init", "--recursive", "--depth", "1"); err != nil {
+			return "", "", fmt.Errorf("submodules: %w", err)
+		}
+	}
 	if commit, err = run(gitBin, "-C", src, "rev-parse", "HEAD"); err != nil {
 		return "", "", err
 	}
@@ -191,9 +200,15 @@ func (m *appsManager) gitEnv(spec agentproto.AppSpec, work, home string) ([]stri
 	}
 	if t := spec.Git.Token; t != "" {
 		// Through the environment, not the command line: the token is not
-		// in the process list. GitHub takes it as x-access-token.
+		// in the process list. GitHub takes it as x-access-token. Only for
+		// the repository's URL: submodules elsewhere must not get it.
+		u, err := url.Parse(spec.Git.URL)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return nil, errors.New("a repository token needs an https URL")
+		}
 		auth := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + t))
-		env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.extraHeader", "GIT_CONFIG_VALUE_0=Authorization: Basic "+auth)
+		env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http."+u.Scheme+"://"+u.Host+u.EscapedPath()+".extraHeader",
+			"GIT_CONFIG_VALUE_0=Authorization: Basic "+auth)
 	}
 	knownHosts := filepath.Join(m.dataDir, "known_hosts")
 	if err := os.MkdirAll(knownHosts, 0o700); err != nil {

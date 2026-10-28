@@ -86,6 +86,21 @@ func (g *gitServer) commit(files map[string]string, msg string) string {
 
 func (g *gitServer) push() { g.git(g.work, "push", "-q", "origin", "main") }
 
+// addRepo serves another repository, name.git, with files; it returns its
+// URL and head commit.
+func (g *gitServer) addRepo(name string, files map[string]string) (string, string) {
+	g.t.Helper()
+	work := filepath.Join(filepath.Dir(g.work), name)
+	g.git(filepath.Dir(work), "init", "-q", "-b", "main", work)
+	for n, body := range files {
+		os.WriteFile(filepath.Join(work, n), []byte(body), 0o644)
+	}
+	g.git(work, "add", "-A")
+	g.git(work, "commit", "-q", "-m", "lib")
+	g.git(filepath.Dir(work), "clone", "-q", "--bare", work, filepath.Join(filepath.Dir(g.bare), name+".git"))
+	return strings.TrimSuffix(g.URL, "/app.git") + "/" + name + ".git", g.git(work, "rev-parse", "HEAD")
+}
+
 // deliver posts a push event for branch signed like GitHub does.
 func (p *panel) deliver(appID, secret, branch, after string) (int, map[string]any) {
 	p.t.Helper()
@@ -401,4 +416,52 @@ func TestBuildEnvWithDocker(t *testing.T) {
 	if err != nil || strings.Contains(string(out), "7f3a") {
 		t.Fatalf("history: %v %s", err, out)
 	}
+}
+
+// TestSubmodulesWithDocker: a repository's submodules are fetched before the
+// build.
+func TestSubmodulesWithDocker(t *testing.T) {
+	if os.Getenv("BASALT_DOCKER_TESTS") != "1" {
+		t.Skip("set BASALT_DOCKER_TESTS=1 to run against the local Docker daemon")
+	}
+	sock := os.Getenv("DOCKER_SOCKET")
+	if sock == "" {
+		sock = "/var/run/docker.sock"
+	}
+	g := startGitServer(t, map[string]string{"Dockerfile": "FROM busybox:1.37\nCOPY lib/hello.txt /www/index.html\nCMD [\"httpd\", \"-f\", \"-p\", \"80\", \"-h\", \"/www\"]\n"})
+	libURL, libSHA := g.addRepo("lib", map[string]string{"hello.txt": "from the submodule 5c1e\n"})
+	os.WriteFile(filepath.Join(g.work, ".gitmodules"), []byte("[submodule \"lib\"]\n\tpath = lib\n\turl = "+libURL+"\n"), 0o644)
+	g.git(g.work, "update-index", "--add", "--cacheinfo", "160000,"+libSHA+",lib")
+	g.git(g.work, "add", ".gitmodules")
+	g.git(g.work, "commit", "-q", "-m", "add the submodule")
+	g.push()
+	p := startPanel(t)
+	h := startHostWith(t, p, sock, func(c *agent.Config) { c.GitCAFile = g.CAFile })
+	dc := docker.New(sock)
+	r := p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{
+		"server_id": mustAtoi(h.id), "name": "sub", "source": "git", "port": 80,
+		"git": map[string]any{"url": g.URL}, "domains": []string{"sub.localhost"}, "tls": "internal",
+	})
+	aid := jsonID(r["app"].(map[string]any)["id"])
+	base := "/api/v1/apps/" + aid
+	t.Cleanup(func() {
+		ctx := context.Background()
+		list, _ := dc.ContainerList(ctx, appLabels(aid))
+		for _, c := range list {
+			dc.ContainerRemove(ctx, c.ID, true)
+		}
+		dc.NetworkRemove(ctx, appNet(aid))
+		for _, d := range p.call(200, "GET", base+"/deployments", nil)["deployments"].([]any) {
+			dc.ImageRemove(ctx, d.(map[string]any)["image"].(string))
+		}
+	})
+	dep := p.call(http.StatusAccepted, "POST", base+"/deploy", map[string]any{})["deployment"].(map[string]any)
+	d, log := followDeployment(t, p, base, jsonID(dep["id"]))
+	if d["status"] != "succeeded" || !strings.Contains(log, "Fetching submodules") {
+		t.Fatalf("deployment: %v\n%s", d, log)
+	}
+	eventually(t, "the submodule's file served", func() bool {
+		_, body := h.get("sub.localhost", "/")
+		return strings.Contains(body, "from the submodule 5c1e")
+	})
 }

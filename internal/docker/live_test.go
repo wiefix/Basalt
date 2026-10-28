@@ -29,6 +29,10 @@ func TestLiveDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("docker %s, API %s", v.Version, v.APIVersion)
+	// The daemon accepts the prune of old build cache (none is that old).
+	if _, err := c.BuildPrune(ctx, 10000*time.Hour); err != nil {
+		t.Fatalf("build prune: %v", err)
+	}
 
 	const image = "busybox:1.37"
 	pulls := 0
