@@ -52,6 +52,7 @@ type serverView struct {
 	Docker         string           `json:"docker"`
 	DockerSecurity *docker.Security `json:"docker_security,omitempty"`
 	Restic         string           `json:"restic"`
+	Railpack       string           `json:"railpack"` // builds apps without a Dockerfile
 	MariaDB        string           `json:"mariadb"`
 	PHPLimits      bool             `json:"php_limits"`
 	// PeerPort is the port of the agent's tunnel to other servers (0: off);
@@ -84,7 +85,7 @@ func (s *Server) viewServer(srv *store.Server) serverView {
 		CPUCount: srv.CPUCount, MemTotal: srv.MemTotal, LastSeen: srv.LastSeen, LastIP: srv.LastIP,
 		CertExpires: srv.CertExpires, EnrollExpires: srv.EnrollExpires, CreatedAt: srv.CreatedAt,
 		PHPVersions: srv.PHPVersions, Isolated: srv.Isolated, Docker: srv.Docker,
-		DockerSecurity: srv.DockerSecurity, Restic: srv.Restic, MariaDB: srv.MariaDB, PHPLimits: srv.PHPLimits,
+		DockerSecurity: srv.DockerSecurity, Restic: srv.Restic, Railpack: srv.Railpack, MariaDB: srv.MariaDB, PHPLimits: srv.PHPLimits,
 		PeerPort: srv.PeerPort, PeerError: srv.PeerError,
 		DetectedIPs: nonNil(srv.DetectedIPs), PublicIPs: nonNil(srv.PublicIPs), DNSIPs: dnsIPs,
 	}
@@ -94,7 +95,7 @@ func (s *Server) viewServer(srv *store.Server) serverView {
 // they need to place sites and apps on it, not how it is run.
 func placementOnly(v serverView) serverView {
 	return serverView{ID: v.ID, Name: v.Name, Status: v.Status, PHPVersions: v.PHPVersions, Isolated: v.Isolated,
-		Docker: v.Docker, Restic: v.Restic, MariaDB: v.MariaDB, PHPLimits: v.PHPLimits,
+		Docker: v.Docker, Restic: v.Restic, Railpack: v.Railpack, MariaDB: v.MariaDB, PHPLimits: v.PHPLimits,
 		DetectedIPs: []string{}, PublicIPs: []string{}, DNSIPs: v.DNSIPs, CreatedAt: v.CreatedAt}
 }
 

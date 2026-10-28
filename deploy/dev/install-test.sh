@@ -175,6 +175,25 @@ for i in $(seq 30); do
   docker exec basalt-panel curl -sk --resolve who.test:443:$NODEIP https://who.test/ | grep -q basalt-on-node1 && break; sleep 1
 done
 docker exec basalt-panel curl -sk --resolve who.test:443:$NODEIP https://who.test/ | grep -E "^(Name|IP: 172)"
+echo "### an app without a Dockerfile, built by Railpack on node1 (BuildKit builder under userns-remap)"
+RPV=$(sed -n 's/^RAILPACK_VERSION=//p' deploy/install.sh)
+[ "$(docker exec basalt-node1 railpack --version | awk '{print $3}')" = "$RPV" ] || { echo "Railpack $RPV not installed on node1"; exit 1; }
+for i in $(seq 30); do
+  [ "$($API http://127.0.0.1:8080/api/v1/servers/$NODE | python3 -c 'import sys,json; print(json.load(sys.stdin)["server"]["railpack"])')" = "$RPV" ] && break; sleep 1
+done
+RPAPP=$($API -d "{\"server_id\":$NODE,\"name\":\"auto\",\"source\":\"git\",\"port\":3000,\"domains\":[\"auto.test\"],\"tls\":\"internal\",\"git\":{\"url\":\"https://github.com/wiefix/Basalt.git\",\"branch\":\"main\",\"context\":\"deploy/dev/railpack-app\",\"builder\":\"railpack\"}}" http://127.0.0.1:8080/api/v1/apps | python3 -c 'import sys,json; print(json.load(sys.stdin)["app"]["id"])')
+DEP=$($API -d '{}' http://127.0.0.1:8080/api/v1/apps/$RPAPP/deploy | python3 -c 'import sys,json; print(json.load(sys.stdin)["deployment"]["id"])')
+for i in $(seq 900); do
+  ST=$($API http://127.0.0.1:8080/api/v1/apps/$RPAPP/deployments/$DEP | python3 -c 'import sys,json; print(json.load(sys.stdin)["deployment"]["status"])')
+  [ "$ST" != running ] && break; sleep 1
+done
+echo "  deployment: $ST after ${i}s"
+[ "$ST" = succeeded ] || { $API http://127.0.0.1:8080/api/v1/apps/$RPAPP/deployments/$DEP | python3 -c 'import sys,json; d=json.load(sys.stdin)["deployment"]; print(d.get("error")); print(d.get("log","")[-3000:])'; exit 1; }
+for i in $(seq 30); do
+  docker exec basalt-panel curl -sk --resolve auto.test:443:$NODEIP https://auto.test/ | grep -q "built by railpack, listening on 3000" && break; sleep 1
+done
+docker exec basalt-panel curl -sk --resolve auto.test:443:$NODEIP https://auto.test/; echo
+docker exec basalt-panel curl -sk --resolve auto.test:443:$NODEIP https://auto.test/ | grep -q "built by railpack" || { echo "the Railpack app does not answer"; exit 1; }
 echo "### node1 serves DNS (--with-dns), zones from the panel"
 ZONE=$($API -d '{"name":"zone.test"}' http://127.0.0.1:8080/api/v1/dns/zones | python3 -c 'import sys,json; print(json.load(sys.stdin)["zone"]["id"])')
 $API -d '{"name":"www","type":"A","value":"192.0.2.44"}' http://127.0.0.1:8080/api/v1/dns/zones/$ZONE/records >/dev/null

@@ -188,6 +188,12 @@ export function ServerPage({ user }: { user: User }) {
               <dd>{s.php_versions?.length ? s.php_versions.join(", ") : "not installed"}</dd>
               <dt>Docker</dt>
               <dd>{s.docker || "not installed"}</dd>
+              {s.docker && (
+                <>
+                  <dt>Builds without Dockerfile</dt>
+                  <dd>{s.railpack ? `Railpack ${s.railpack}` : "not available (re-run the installer with --with-docker)"}</dd>
+                </>
+              )}
               {s.docker && s.docker_security && (
                 <>
                   <dt>Container isolation</dt>

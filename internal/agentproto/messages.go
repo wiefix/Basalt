@@ -100,6 +100,9 @@ type Hello struct {
 	DockerSecurity *docker.Security `json:"docker_security,omitempty"`
 	// Restic is the version of restic backups run with ("" if absent).
 	Restic string `json:"restic,omitempty"`
+	// Railpack is the version apps without a Dockerfile are built with
+	// ("" if absent, or no Docker).
+	Railpack string `json:"railpack,omitempty"`
 	// DNSPort is the port the authoritative DNS server listens on (0:
 	// disabled); DNSError says why it could not listen.
 	DNSPort  int    `json:"dns_port,omitempty"`

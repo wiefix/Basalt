@@ -372,6 +372,11 @@ func (db *DB) SetServerRestic(ctx context.Context, serverID int64, version strin
 	return db.execOne(ctx, `UPDATE servers SET restic = ? WHERE id = ?`, version, serverID)
 }
 
+// SetServerRailpack records the Railpack version a server builds with.
+func (db *DB) SetServerRailpack(ctx context.Context, serverID int64, version string) error {
+	return db.execOne(ctx, `UPDATE servers SET railpack = ? WHERE id = ?`, version, serverID)
+}
+
 // ServerRestic returns the restic version of a server ("" if none).
 func (db *DB) ServerRestic(ctx context.Context, serverID int64) (string, error) {
 	var v string

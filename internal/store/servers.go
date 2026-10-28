@@ -37,6 +37,7 @@ type Server struct {
 	// DockerSecurity is how the daemon isolates containers; nil if unknown.
 	DockerSecurity *docker.Security
 	Restic         string // restic version, "" if backups cannot run
+	Railpack       string // Railpack version, "" if apps cannot be built without a Dockerfile
 	// DetectedIPs are public addresses on the host's interfaces; PublicIPs
 	// are set by an admin and replace them when not empty.
 	DetectedIPs []string
@@ -83,7 +84,7 @@ var ErrNameTaken = errors.New("name already in use")
 
 const serverColumns = `id, name, enrolled_at IS NOT NULL, enroll_expires_at, COALESCE(cert_fp, ''),
 	COALESCE(prev_cert_fp, ''), cert_expires_at, hostname, os, arch, kernel, distro, agent_version,
-	cpu_count, mem_total, last_seen_at, last_ip, php_versions, isolated, docker, docker_security, restic,
+	cpu_count, mem_total, last_seen_at, last_ip, php_versions, isolated, docker, docker_security, restic, railpack,
 	detected_ips, public_ips, https_port, updatable, mariadb, php_limits, peer_port, peer_error, created_at`
 
 func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
@@ -93,7 +94,7 @@ func scanServer(row interface{ Scan(...any) error }) (*Server, error) {
 	var phpVersions, dockerSec, detected, public string
 	err := row.Scan(&s.ID, &s.Name, &s.Enrolled, &enrollExp, &s.CertFP, &s.PrevCertFP, &certExp,
 		&s.Hostname, &s.OS, &s.Arch, &s.Kernel, &s.Distro, &s.AgentVersion,
-		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &phpVersions, &s.Isolated, &s.Docker, &dockerSec, &s.Restic,
+		&s.CPUCount, &s.MemTotal, &lastSeen, &s.LastIP, &phpVersions, &s.Isolated, &s.Docker, &dockerSec, &s.Restic, &s.Railpack,
 		&detected, &public, &s.HTTPSPort, &s.Updatable, &s.MariaDB, &s.PHPLimits, &s.PeerPort, &s.PeerError, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

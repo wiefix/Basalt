@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -141,6 +142,13 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		rand.Read(b[:])
 		spec.Image = fmt.Sprintf("basalt/app-%d:build-%s", app.ID, hex.EncodeToString(b[:]))
 		spec.Git.Commit = o.commit
+		// Apps Railpack builds listen on $PORT, as on Railway.
+		if app.Git.Builder == agentproto.BuilderRailpack && app.Port > 0 && spec.Env["PORT"] == "" {
+			if spec.Env == nil {
+				spec.Env = map[string]string{}
+			}
+			spec.Env["PORT"] = strconv.Itoa(app.Port)
+		}
 		if prev != nil {
 			spec.Git.Commit, spec.Git.ReuseImage = prev.CommitSHA, prev.Image
 		}
@@ -253,7 +261,8 @@ type deploymentExtras struct {
 // repository, the deploy key for SSH URLs and the registry credentials for
 // private base images.
 func (s *Server) gitSource(ctx context.Context, app *store.App) (*agentproto.GitSource, error) {
-	g := &agentproto.GitSource{URL: app.Git.URL, Branch: app.Git.Branch, Dockerfile: app.Git.Dockerfile, Context: app.Git.Context}
+	g := &agentproto.GitSource{URL: app.Git.URL, Branch: app.Git.Branch, Dockerfile: app.Git.Dockerfile, Context: app.Git.Context,
+		Builder: app.Git.Builder}
 	if app.Git.SourceID != 0 && !agentproto.IsSSHGitURL(g.URL) {
 		// A token for this build only: it reads this repository and
 		// expires within the hour.

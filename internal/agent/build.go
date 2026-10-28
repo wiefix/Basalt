@@ -125,10 +125,6 @@ func (m *appsManager) buildImage(ctx context.Context, dc *docker.Client, spec ag
 		return "", "", err
 	}
 	defer root.Close()
-	dockerfile, err := readLimited(root, g.Dockerfile, maxDockerfile)
-	if err != nil {
-		return "", "", fmt.Errorf("Dockerfile %s: %w", g.Dockerfile, err)
-	}
 	if fi, err := root.Stat(g.Context); err != nil || !fi.IsDir() {
 		return "", "", fmt.Errorf("build context %s is not a directory in the repository", g.Context)
 	}
@@ -138,6 +134,17 @@ func (m *appsManager) buildImage(ctx context.Context, dc *docker.Client, spec ag
 	cfg, err := writeDockerConfig(filepath.Join(work, "docker"), g.RegistryAuths)
 	if err != nil {
 		return "", "", err
+	}
+	if g.Builder == agentproto.BuilderRailpack {
+		if err := m.railpackBuild(ctx, dc, spec, lg, dockerBin, filepath.Join(src, g.Context), work, home, cfg, commit); err != nil {
+			return "", "", err
+		}
+		lg.printf("Image built")
+		return commit, subject, nil
+	}
+	dockerfile, err := readLimited(root, g.Dockerfile, maxDockerfile)
+	if err != nil {
+		return "", "", fmt.Errorf("Dockerfile %s: %w", g.Dockerfile, err)
 	}
 
 	lg.printf("Building %s from %s", spec.Image, g.Dockerfile)

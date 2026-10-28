@@ -361,6 +361,25 @@ if ! restic_ok "$installed"; then
 	fi
 fi
 
+# ---------- railpack (apps without a Dockerfile) ----------
+
+# The release Basalt's agents expect (its BuildKit frontend is pinned in the
+# agent), checked against the checksum here.
+RAILPACK_VERSION=0.43.0
+RAILPACK_SHA256_amd64=248a8f60f36854aabed6124113631078a802de3461660855fc4de9c26065c1fb
+RAILPACK_SHA256_arm64=732ece14eb4f4676a43ebba19431f954edf7b130acb76159ef0f2ff86ac42ac9
+if [ "$WITH_DOCKER" -eq 1 ] && [ "$(railpack --version 2>/dev/null | awk '{print $3}')" != "$RAILPACK_VERSION" ]; then
+	say "Downloading Railpack $RAILPACK_VERSION"
+	case "$ARCH" in amd64) rp_arch=x86_64 ;; *) rp_arch=arm64 ;; esac
+	eval "sum=\$RAILPACK_SHA256_$ARCH"
+	curl -fsSL --retry 3 -o "$TMP/railpack.tar.gz" \
+		"https://github.com/railwayapp/railpack/releases/download/v$RAILPACK_VERSION/railpack-v$RAILPACK_VERSION-$rp_arch-unknown-linux-musl.tar.gz"
+	echo "$sum  $TMP/railpack.tar.gz" | sha256sum -c - >/dev/null 2>&1 || die "the Railpack download does not match its checksum"
+	mkdir -p "$TMP/railpack"
+	tar -xzf "$TMP/railpack.tar.gz" -C "$TMP/railpack" railpack
+	install -m 0755 "$TMP/railpack/railpack" /usr/local/bin/railpack
+fi
+
 # ---------- binary ----------
 
 # fetch_from_panel PATH OUT: download from the panel's agent channel, trusting

@@ -389,6 +389,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		DockerNamespace: cfg.DockerNamespace,
 		GitCAFile:       cfg.GitCAFile,
 		Restic:          cfg.Restic,
+		Railpack:        cfg.Railpack,
 		PanelDomain:     cfg.PanelDomain,
 		ReleaseKey:      cfg.ReleaseKey,
 		WordPressURL:    cfg.WordPressURL,

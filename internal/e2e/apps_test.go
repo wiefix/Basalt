@@ -355,12 +355,15 @@ func waitLog(t *testing.T, ch <-chan sseEvent, want string) {
 
 // followDeployment reads a deployment's event stream to the end and returns
 // the outcome and the log text received.
+// deployWait is how long followDeployment waits for a deployment.
+var deployWait = 3 * time.Minute
+
 func followDeployment(t *testing.T, p *panel, base, did string) (map[string]any, string) {
 	t.Helper()
 	ch, stop := p.events(base + "/deployments/" + did + "/stream")
 	defer stop()
 	var log strings.Builder
-	timeout := time.After(3 * time.Minute)
+	timeout := time.After(deployWait)
 	for {
 		select {
 		case ev, ok := <-ch:
@@ -378,7 +381,13 @@ func followDeployment(t *testing.T, p *panel, base, did string) (map[string]any,
 				return d, log.String()
 			}
 		case <-timeout:
-			t.Fatalf("deployment %s did not finish", did)
+			t.Fatalf("deployment %s did not finish; its log ends:\n%s", did, lastLines(log.String(), 30))
 		}
 	}
+}
+
+// lastLines is the end of a log.
+func lastLines(s string, n int) string {
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	return strings.Join(lines[max(0, len(lines)-n):], "\n")
 }

@@ -82,6 +82,7 @@ type appsManager struct {
 
 	dataDir   string        // builds and known hosts live here
 	gitCAFile string        // extra CA bundle for https git remotes
+	railpack  string        // railpack binary, for apps without a Dockerfile
 	builds    chan struct{} // limits concurrent builds
 
 	stats appStats
@@ -91,7 +92,7 @@ func newAppsManager(cfg Config, log *slog.Logger) *appsManager {
 	m := &appsManager{
 		log: log, socket: cfg.DockerSocket, publish: runtime.GOOS != "linux", namespace: cfg.DockerNamespace,
 		locks: map[int64]*sync.Mutex{}, upstreams: map[int64]string{}, onChange: func() {},
-		dataDir: cfg.DataDir, gitCAFile: cfg.GitCAFile, builds: make(chan struct{}, maxConcurrentBuilds),
+		dataDir: cfg.DataDir, gitCAFile: cfg.GitCAFile, railpack: cfg.Railpack, builds: make(chan struct{}, maxConcurrentBuilds),
 	}
 	if cfg.DockerSocket != "" {
 		m.dc = docker.New(cfg.DockerSocket)

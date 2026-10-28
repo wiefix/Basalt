@@ -10,11 +10,23 @@ import (
 // Info is the part of the daemon's /info that describes how containers
 // are isolated.
 type Info struct {
-	SecurityOptions []string `json:"SecurityOptions"` // e.g. "name=seccomp,profile=builtin"
-	CgroupVersion   string   `json:"CgroupVersion"`
-	CgroupDriver    string   `json:"CgroupDriver"`
-	DockerRootDir   string   `json:"DockerRootDir"`
-	MemTotal        uint64   `json:"MemTotal"` // memory of the host (or VM) containers run on
+	SecurityOptions []string    `json:"SecurityOptions"` // e.g. "name=seccomp,profile=builtin"
+	CgroupVersion   string      `json:"CgroupVersion"`
+	CgroupDriver    string      `json:"CgroupDriver"`
+	DockerRootDir   string      `json:"DockerRootDir"`
+	MemTotal        uint64      `json:"MemTotal"` // memory of the host (or VM) containers run on
+	DriverStatus    [][2]string `json:"DriverStatus"`
+}
+
+// ContainerdStore reports whether the daemon keeps images in containerd
+// (its builder then has every BuildKit feature, e.g. merge operations).
+func (i Info) ContainerdStore() bool {
+	for _, kv := range i.DriverStatus {
+		if kv[0] == "driver-type" && kv[1] == "io.containerd.snapshotter.v1" {
+			return true
+		}
+	}
+	return false
 }
 
 // Info returns daemon-wide settings.

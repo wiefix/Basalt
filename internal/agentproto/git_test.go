@@ -64,4 +64,13 @@ func TestValidateBranchAndPaths(t *testing.T) {
 	if g.Validate() == nil {
 		t.Error("symbolic commit accepted")
 	}
+	g.Commit = ""
+	g.Builder = BuilderRailpack
+	if err := g.Validate(); err != nil {
+		t.Errorf("railpack: %v", err)
+	}
+	g.Builder = "nixpacks"
+	if g.Validate() == nil {
+		t.Error("unknown builder accepted")
+	}
 }

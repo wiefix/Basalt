@@ -347,6 +347,9 @@ func (h *Hub) handleAgentMessage(ctx context.Context, id int64, ip, typ string, 
 		if err := h.db.SetServerRestic(ctx, id, clean(m.Restic)); err != nil {
 			return nil, err
 		}
+		if err := h.db.SetServerRailpack(ctx, id, clean(m.Railpack)); err != nil {
+			return nil, err
+		}
 		if err := h.db.SetServerDNS(ctx, id, max(0, min(m.DNSPort, 65535)), clean(m.DNSError)); err != nil {
 			return nil, err
 		}

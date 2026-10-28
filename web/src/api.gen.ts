@@ -679,6 +679,7 @@ export interface GitSourceView {
 
 export interface GitView {
   branch?: string;
+  builder?: string;
   context?: string;
   dockerfile?: string;
   repo?: string;
@@ -688,6 +689,7 @@ export interface GitView {
 
 export interface GitViewOut {
   branch: string;
+  builder?: string;
   context: string;
   dockerfile: string;
   repo?: string;
@@ -1126,6 +1128,7 @@ export interface ServerView {
   php_limits: boolean;
   php_versions: string[];
   public_ips: string[];
+  railpack: string;
   restic: string;
   status: string;
 }

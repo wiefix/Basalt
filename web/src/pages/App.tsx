@@ -206,8 +206,8 @@ function Overview({ app, user, me, placements }: { app: App; user: User; me: Use
             </>
           ) : app.source === "git" ? (
             <>
-              A deployment builds branch <span className="mono">{app.git?.branch}</span> with{" "}
-              <span className="mono">{app.git?.dockerfile}</span>
+              A deployment builds branch <span className="mono">{app.git?.branch}</span>{" "}
+              {app.git?.builder === "railpack" ? "(worked out by Railpack)" : <>with <span className="mono">{app.git?.dockerfile}</span></>}
               {app.auto_deploy ? " (also on every push, through the webhook)" : ""},
             </>
           ) : (
@@ -868,14 +868,15 @@ function SourceTab({ app }: { app: App }) {
   const [url, setUrl] = useState(g.url);
   const [branch, setBranch] = useState(g.branch);
   const [dockerfile, setDockerfile] = useState(g.dockerfile);
+  const [builder, setBuilder] = useState<"" | "railpack">(g.builder ?? "");
   const [context, setContext] = useState(g.context);
   const save = useMutation({
     mutationFn: () =>
       api.updateApp(app.id, {
         image: "",
         git: g.source_id
-          ? { url: g.url, source_id: g.source_id, repo: g.repo, branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim() }
-          : { url: url.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim() },
+          ? { url: g.url, source_id: g.source_id, repo: g.repo, branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim(), builder }
+          : { url: url.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim(), builder },
         port: app.port,
         volumes: app.volumes,
         memory_mb: app.memory_mb,
@@ -914,8 +915,14 @@ function SourceTab({ app }: { app: App }) {
           <Field label="Branch">
             <input className="input mono" value={branch} onChange={(e) => setBranch(e.target.value)} required />
           </Field>
-          <Field label="Dockerfile">
-            <input className="input mono" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} required />
+          <Field label="Build" help={builder ? "Railpack works out how to build it; the app listens on $PORT." : undefined}>
+            <div className="row">
+              <select className="input" style={{ width: "auto" }} value={builder} onChange={(e) => setBuilder(e.target.value as "" | "railpack")}>
+                <option value="">Dockerfile</option>
+                <option value="railpack">Automatic</option>
+              </select>
+              {!builder && <input className="input mono" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} required />}
+            </div>
           </Field>
         </div>
         <Field label="Build context" help="Directory sent to the build; . is the repository root.">

@@ -268,3 +268,85 @@ func TestGitAppWithDocker(t *testing.T) {
 	_ = io.Discard
 	_ = time.Second
 }
+
+// TestRailpackWithDocker: an app from a repository without a Dockerfile is
+// built by Railpack (BUILDKIT_SYNTAX frontend, pinned) and answers on the
+// port Basalt gives it as $PORT; a repository linking outside itself is
+// refused before railpack reads it. Needs the railpack command (RAILPACK
+// or PATH).
+func TestRailpackWithDocker(t *testing.T) {
+	if os.Getenv("BASALT_DOCKER_TESTS") != "1" {
+		t.Skip("set BASALT_DOCKER_TESTS=1 to run against the local Docker daemon")
+	}
+	railpack := os.Getenv("RAILPACK")
+	if railpack == "" {
+		railpack = "railpack"
+	}
+	if _, err := exec.LookPath(railpack); err != nil {
+		t.Skip("railpack is not installed")
+	}
+	// A first build downloads Railpack's images and the language runtime.
+	deployWait = 15 * time.Minute
+	t.Cleanup(func() { deployWait = 3 * time.Minute })
+	sock := os.Getenv("DOCKER_SOCKET")
+	if sock == "" {
+		sock = "/var/run/docker.sock"
+	}
+	g := startGitServer(t, map[string]string{
+		"package.json": `{"name":"hello","version":"1.0.0","scripts":{"start":"node server.js"},"engines":{"node":"22"}}`,
+		"server.js":    `require("http").createServer((q, s) => s.end("railpack built me, port " + process.env.PORT)).listen(process.env.PORT);`,
+	})
+	p := startPanel(t)
+	h := startHostWith(t, p, sock, func(c *agent.Config) { c.GitCAFile, c.Railpack = g.CAFile, railpack })
+	eventually(t, "railpack version reported", func() bool {
+		s := p.call(200, "GET", "/api/v1/servers/"+h.id, nil)["server"].(map[string]any)
+		return s["railpack"] != nil && s["railpack"] != ""
+	})
+	dc := docker.New(sock)
+	r := p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{
+		"server_id": mustAtoi(h.id), "name": "auto", "source": "git", "port": 3000,
+		"git":     map[string]string{"url": g.URL, "builder": "railpack"},
+		"domains": []string{"auto.localhost"}, "tls": "internal",
+	})
+	aid := jsonID(r["app"].(map[string]any)["id"])
+	base := "/api/v1/apps/" + aid
+	t.Cleanup(func() {
+		ctx := context.Background()
+		list, _ := dc.ContainerList(ctx, appLabels(aid))
+		for _, c := range list {
+			dc.ContainerRemove(ctx, c.ID, true)
+		}
+		dc.NetworkRemove(ctx, appNet(aid))
+		for _, d := range p.call(200, "GET", base+"/deployments", nil)["deployments"].([]any) {
+			dc.ImageRemove(ctx, d.(map[string]any)["image"].(string))
+		}
+		// The agent's BuildKit builder, if Docker needed one.
+		dc.ContainerRemove(ctx, "buildx_buildkit_basalt-"+e2eNamespace+"-railpack0", true)
+		dc.VolumeRemove(ctx, "buildx_buildkit_basalt-"+e2eNamespace+"-railpack0_state")
+	})
+	dep := p.call(http.StatusAccepted, "POST", base+"/deploy", map[string]any{})["deployment"].(map[string]any)
+	d1, log := followDeployment(t, p, base, jsonID(dep["id"]))
+	if d1["status"] != "succeeded" || !strings.Contains(log, "Detected: node") || !strings.Contains(log, "Image built") {
+		t.Fatalf("deployment: %v\n%s", d1, log)
+	}
+	eventually(t, "the built app served", func() bool {
+		_, body := h.get("auto.localhost", "/")
+		return strings.Contains(body, "railpack built me, port 3000")
+	})
+
+	// A link to this host's files: refused.
+	if err := os.Symlink("/etc/passwd", filepath.Join(g.work, "leak")); err != nil {
+		t.Fatal(err)
+	}
+	g.commit(nil, "link out")
+	g.push()
+	dep = p.call(http.StatusAccepted, "POST", base+"/deploy", map[string]any{})["deployment"].(map[string]any)
+	d2, log := followDeployment(t, p, base, jsonID(dep["id"]))
+	if d2["status"] != "failed" || !strings.Contains(fmt.Sprint(d2["error"]), "outside the repository") {
+		t.Fatalf("a link outside: %v\n%s", d2, log)
+	}
+	eventually(t, "the previous version still served", func() bool {
+		_, body := h.get("auto.localhost", "/")
+		return strings.Contains(body, "railpack built me")
+	})
+}

@@ -78,7 +78,7 @@ func viewApp(a *store.App) appView {
 	switch a.Source {
 	case store.SourceGit:
 		v.Git = &gitView{URL: a.Git.URL, Branch: a.Git.Branch, Dockerfile: a.Git.Dockerfile, Context: a.Git.Context,
-			SourceID: a.Git.SourceID, Repo: a.Git.Repo}
+			SourceID: a.Git.SourceID, Repo: a.Git.Repo, Builder: a.Git.Builder}
 		v.DeployKey, v.AutoDeploy = a.DeployKeyPublic, a.AutoDeploy
 	case store.SourceCompose:
 		sum := a.Summary
@@ -106,6 +106,9 @@ type gitView struct {
 	// (owner/name) is reached through; URL then comes from GitHub.
 	SourceID int64  `json:"source_id,omitempty"`
 	Repo     string `json:"repo,omitempty"`
+	// Builder: "" builds Dockerfile; "railpack" works out how to build the
+	// context without one (Node, Python, Go, PHP, Ruby, Java, static sites…).
+	Builder string `json:"builder,omitempty"`
 }
 
 type deploymentView struct {
@@ -198,7 +201,7 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 			return st, errors.New("git repository settings are required")
 		}
 		g := agentproto.GitSource{URL: strings.TrimSpace(req.Git.URL), Branch: strings.TrimSpace(req.Git.Branch),
-			Dockerfile: strings.TrimSpace(req.Git.Dockerfile), Context: strings.TrimSpace(req.Git.Context)}
+			Dockerfile: strings.TrimSpace(req.Git.Dockerfile), Context: strings.TrimSpace(req.Git.Context), Builder: req.Git.Builder}
 		if req.Git.SourceID != 0 {
 			// The URL comes from GitHub (resolveGitSource).
 			if req.Git.SourceID < 0 || !forge.ValidRepo(req.Git.Repo) {
@@ -218,7 +221,7 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 		if err := g.Validate(); err != nil {
 			return st, err
 		}
-		st.Git = store.GitSettings{URL: g.URL, Branch: g.Branch, Dockerfile: g.Dockerfile, Context: g.Context}
+		st.Git = store.GitSettings{URL: g.URL, Branch: g.Branch, Dockerfile: g.Dockerfile, Context: g.Context, Builder: g.Builder}
 		if req.Git.SourceID != 0 {
 			st.Git.SourceID, st.Git.Repo = req.Git.SourceID, req.Git.Repo
 		}
@@ -359,6 +362,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 	}
 	if srv.Docker == "" {
 		writeError(w, http.StatusUnprocessableEntity, "Docker is not installed on this server")
+		return
+	}
+	if st.Git.Builder == agentproto.BuilderRailpack && srv.Railpack == "" {
+		writeError(w, http.StatusUnprocessableEntity, "this server cannot build without a Dockerfile: re-run the installer on it with --with-docker (it adds Railpack)")
 		return
 	}
 	st.ProjectID = req.ProjectID

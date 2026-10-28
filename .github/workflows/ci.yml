@@ -42,6 +42,7 @@ jobs:
         with:
           go-version-file: go.mod
       - run: deploy/dev/ci-restic.sh
+      - run: deploy/dev/ci-railpack.sh
       # The catalog, database and mail tests pull several GB of images: the
       # runner's preinstalled toolchains we do not use make room for them.
       - name: Free disk space

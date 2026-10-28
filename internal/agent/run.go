@@ -95,6 +95,9 @@ type Config struct {
 	GitCAFile string
 	// Restic is the restic binary backups run with ("" disables backups).
 	Restic string
+	// Railpack is the railpack binary apps without a Dockerfile are built
+	// with ("" or missing: they cannot be).
+	Railpack string
 	// PanelDomain and PanelUpstream publish the panel itself through this
 	// host's proxy (set on the panel's own host). The route exists even
 	// before the panel has sent any state, so the UI is reachable at once.
@@ -360,6 +363,9 @@ func (a *Agent) session(ctx context.Context, url string) (connected bool, err er
 	hello.MariaDB = a.mariadbVersion(ctx)
 	hello.Docker, hello.DockerSecurity = a.dockerVersion(ctx)
 	hello.Restic = a.backups.Version(ctx)
+	if hello.Docker != "" {
+		hello.Railpack = a.apps.railpackVersion(ctx)
+	}
 	hello.Updatable = a.updater.updatable()
 	hello.PHPLimits = a.sites.isolate && a.sites.php.Units
 	hello.DNSPort, hello.DNSError = a.dns.Status()

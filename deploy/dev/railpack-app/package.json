@@ -1,0 +1,6 @@
+{
+  "name": "basalt-railpack-check",
+  "private": true,
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": "22" }
+}

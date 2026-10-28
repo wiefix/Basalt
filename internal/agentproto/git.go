@@ -20,6 +20,9 @@ type GitSource struct {
 	Commit     string `json:"commit,omitempty"`
 	Dockerfile string `json:"dockerfile"` // path in the repository
 	Context    string `json:"context"`    // build context directory in the repository
+	// Builder: "" builds Dockerfile; BuilderRailpack works out how to build
+	// the context (Node, Python, Go, PHP…) without one.
+	Builder string `json:"builder,omitempty"`
 	// DeployKey is an OpenSSH private key for ssh:// and scp-style URLs.
 	DeployKey string `json:"deploy_key,omitempty"`
 	// Token is a short-lived token for an https URL (a GitHub App's
@@ -103,6 +106,9 @@ func (g *GitSource) Validate() error {
 	if g.Commit != "" && !commitRE.MatchString(g.Commit) {
 		return errors.New("invalid commit")
 	}
+	if g.Builder != BuilderDockerfile && g.Builder != BuilderRailpack {
+		return errors.New(`builder must be "" (Dockerfile) or "railpack"`)
+	}
 	if err := ValidateRepoPath(g.Dockerfile, false); err != nil {
 		return err
 	}
@@ -117,6 +123,21 @@ func (g *GitSource) Validate() error {
 	}
 	return nil
 }
+
+// Builders of a git app.
+const (
+	BuilderDockerfile = "" // the repository's Dockerfile
+	BuilderRailpack   = "railpack"
+)
+
+// Railpack: the BuildKit frontend that builds Railpack's plans, of the
+// version the agents' railpack command is (the installer installs it), and
+// the BuildKit a builder of Basalt runs where Docker's own cannot build them.
+const (
+	RailpackVersion  = "0.43.0"
+	RailpackFrontend = "ghcr.io/railwayapp/railpack-frontend:v0.43.0@sha256:355ef61fae6f2551103cd8b10c710cb07167dd353d561f15c69b8d7ac1c676cc"
+	BuildKitImage    = "moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c"
+)
 
 // ValidCommit reports whether s is a full commit hash.
 func ValidCommit(s string) bool { return commitRE.MatchString(s) }

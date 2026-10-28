@@ -46,6 +46,7 @@ export interface Server {
   php_versions: string[];
   isolated: boolean;
   restic: string; // version, "" when backups cannot run there
+  railpack?: string; // version, "" when apps cannot be built there without a Dockerfile
   docker: string;
   // How Docker isolates containers (absent when unknown).
   docker_security?: { userns: boolean; rootless?: boolean; seccomp?: string; apparmor: boolean; selinux?: boolean; cgroup_v2: boolean };
@@ -227,6 +228,7 @@ export interface GitSettings {
   context: string;
   source_id?: number; // a git source (GitHub App) the repository is reached through
   repo?: string; // owner/name, with source_id
+  builder?: "" | "railpack"; // "": its Dockerfile; railpack: works out how to build it
 }
 
 // Where the user's repositories are: a GitHub App the panel created, or a

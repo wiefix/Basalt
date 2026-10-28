@@ -96,6 +96,7 @@ type Agent struct {
 	DockerNamespace string
 	GitCAFile       string
 	Restic          string
+	Railpack        string
 	PanelDomain     string
 	PanelUpstream   string
 	ReleaseKey      string
@@ -230,6 +231,7 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs.StringVar(&cfg.DockerSocket, "docker-socket", env("DOCKER_SOCKET", "/var/run/docker.sock"), "local Docker Engine socket (empty disables apps)")
 	fs.StringVar(&cfg.DockerNamespace, "docker-namespace", env("DOCKER_NAMESPACE", ""), "keep this agent's containers, networks and volumes apart from another panel's agent on the same Docker (lowercase letters and digits; empty for the usual names)")
 	fs.StringVar(&cfg.Restic, "restic", env("RESTIC", "restic"), "restic binary used for backups")
+	fs.StringVar(&cfg.Railpack, "railpack", env("RAILPACK", "railpack"), "railpack binary used to build apps without a Dockerfile")
 	fs.StringVar(&cfg.GitCAFile, "git-ca-file", env("GIT_CA_FILE", ""), "extra CA certificates (PEM) trusted for https git repositories")
 	fs.StringVar(&cfg.ReleaseKey, "release-key", env("RELEASE_KEY", ""), "public key (authorized_keys line) updates must be signed with (default: the Basalt release key)")
 	fs.StringVar(&cfg.WordPressURL, "wordpress-url", env("WORDPRESS_URL", ""), "WordPress .tar.gz to install (with a .sha1 next to it; default wordpress.org latest)")

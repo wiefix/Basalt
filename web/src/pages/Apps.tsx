@@ -115,6 +115,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
   const [repoURL, setRepoURL] = useState("");
   const [branch, setBranch] = useState("main");
   const [dockerfile, setDockerfile] = useState("Dockerfile");
+  const [builder, setBuilder] = useState<"" | "railpack">("");
   const [port, setPort] = useState("80");
   const [warnings, setWarnings] = useState<string[] | null>(null);
   const [createdId, setCreatedId] = useState<number | null>(null);
@@ -144,8 +145,8 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
           source !== "git"
             ? undefined
             : gh > 0
-              ? { url: "", source_id: gh, repo, branch: branch.trim(), dockerfile: dockerfile.trim() }
-              : { url: repoURL.trim(), branch: branch.trim(), dockerfile: dockerfile.trim() },
+              ? { url: "", source_id: gh, repo, branch: branch.trim(), dockerfile: dockerfile.trim(), builder }
+              : { url: repoURL.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), builder },
         compose: source === "compose" ? compose : undefined,
         service: source === "compose" ? service.trim() : undefined,
         // A compose app's port defaults to the one its file mentions for the service.
@@ -381,10 +382,29 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
                     <input className="input mono" value={branch} onChange={(e) => setBranch(e.target.value)} required />
                   )}
                 </Field>
-                <Field label="Dockerfile" help="Path in the repository.">
-                  <input className="input mono" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} required />
+                <Field label="Build" help={builder ? "Works out the language, versions and commands (Railpack); the app listens on $PORT." : "Path of the Dockerfile in the repository."}>
+                  <div className="row">
+                    <select className="input" style={{ width: "auto" }} value={builder} onChange={(e) => setBuilder(e.target.value as "" | "railpack")}>
+                      <option value="">Dockerfile</option>
+                      <option value="railpack">Automatic</option>
+                    </select>
+                    {!builder && <input className="input mono" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} required />}
+                  </div>
                 </Field>
               </div>
+              {builder === "railpack" && (() => {
+                const srv = withDocker.find((s) => s.id === Number(serverId || withDocker[0]?.id));
+                return srv && !srv.railpack ? (
+                  <div className="alert warn small">
+                    {srv.name} cannot build without a Dockerfile yet: re-run the installer there with --with-docker (it adds Railpack).
+                  </div>
+                ) : (
+                  <p className="faint small" style={{ margin: 0 }}>
+                    Node, Python, Go, PHP, Ruby, Java, Rust, Elixir, static sites and more. Settings can go in a railpack.json in the
+                    repository.
+                  </p>
+                );
+              })()}
             </>
           )}
           {source !== "compose" && (
