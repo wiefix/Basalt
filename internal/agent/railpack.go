@@ -119,8 +119,16 @@ func (m *appsManager) railpackBuild(ctx context.Context, dc *docker.Client, spec
 	}
 	plan, info := filepath.Join(work, "railpack-plan.json"), filepath.Join(work, "railpack-info.json")
 	lg.printf("Working out how to build it (Railpack %s)", agentproto.RailpackVersion)
-	prep := exec.CommandContext(ctx, bin, "prepare", ctxDir, "--plan-out", plan, "--info-out", info, "--hide-pretty-plan")
-	prep.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}
+	secretArgs, secretEnv, secretsHash := buildSecrets(spec.Git.BuildEnv)
+	prepArgs := []string{"prepare", ctxDir, "--plan-out", plan, "--info-out", info, "--hide-pretty-plan"}
+	for _, kv := range secretEnv {
+		// Names only: railpack takes the values from its environment and
+		// keeps them out of the plan.
+		k, _, _ := strings.Cut(kv, "=")
+		prepArgs = append(prepArgs, "--env", k)
+	}
+	prep := exec.CommandContext(ctx, bin, prepArgs...)
+	prep.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + home}, secretEnv...)
 	prep.Dir, prep.WaitDelay = work, 5*time.Second
 	out, prepErr := prep.CombinedOutput()
 	var ri railpackInfo
@@ -155,11 +163,12 @@ func (m *appsManager) railpackBuild(ctx context.Context, dc *docker.Client, spec
 	}
 	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DOCKER_CONFIG=" + cfg, "DOCKER_HOST=unix://" + m.socket,
 		"DOCKER_BUILDKIT=1", "BUILDX_NO_DEFAULT_ATTESTATIONS=1", "BUILDX_CONFIG=" + filepath.Join(m.dataDir, "buildx")}
+	toolEnv := env
 	args := []string{"buildx", "build", "--progress=plain", "--load"}
 	if sysInfo.ContainerdStore() {
 		args = []string{"build", "--progress=plain"}
 	} else {
-		if err := m.ensureBuilder(ctx, dockerBin, env, lg); err != nil {
+		if err := m.ensureBuilder(ctx, dockerBin, toolEnv, lg); err != nil {
 			return err
 		}
 		args = append(args, "--builder", m.railpackBuilder())
@@ -168,8 +177,12 @@ func (m *appsManager) railpackBuild(ctx context.Context, dc *docker.Client, spec
 		"--build-arg", "BUILDKIT_SYNTAX="+agentproto.RailpackFrontend,
 		// Each app its own build cache.
 		"--build-arg", "cache-key="+m.network(spec.AppID),
-		"--tag", spec.Image, "--label", labelApp+"="+strconv.FormatInt(spec.AppID, 10), "--label", "basalt.commit="+commit,
-		ctxDir)
+		"--tag", spec.Image, "--label", labelApp+"="+strconv.FormatInt(spec.AppID, 10), "--label", "basalt.commit="+commit)
+	if len(secretArgs) > 0 {
+		args = append(append(args, secretArgs...), "--build-arg", "secrets-hash="+secretsHash)
+	}
+	args = append(args, ctxDir)
+	env = append(env, secretEnv...)
 	lg.printf("Building %s", spec.Image)
 	cmd := exec.CommandContext(ctx, dockerBin, args...)
 	cmd.Env, cmd.Dir, cmd.WaitDelay = env, work, 10*time.Second

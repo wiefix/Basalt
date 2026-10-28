@@ -293,8 +293,8 @@ func TestRailpackWithDocker(t *testing.T) {
 		sock = "/var/run/docker.sock"
 	}
 	g := startGitServer(t, map[string]string{
-		"package.json": `{"name":"hello","version":"1.0.0","scripts":{"start":"node server.js"},"engines":{"node":"22"}}`,
-		"server.js":    `require("http").createServer((q, s) => s.end("railpack built me, port " + process.env.PORT)).listen(process.env.PORT);`,
+		"package.json": `{"name":"hello","version":"1.0.0","scripts":{"build":"node -e \"require('fs').writeFileSync('built.txt', String(process.env.MESSAGE))\"","start":"node server.js"},"engines":{"node":"22"}}`,
+		"server.js":    `require("http").createServer((q, s) => s.end("railpack built me, port " + process.env.PORT + ", " + require("fs").readFileSync("built.txt"))).listen(process.env.PORT);`,
 	})
 	p := startPanel(t)
 	h := startHostWith(t, p, sock, func(c *agent.Config) { c.GitCAFile, c.Railpack = g.CAFile, railpack })
@@ -305,11 +305,12 @@ func TestRailpackWithDocker(t *testing.T) {
 	dc := docker.New(sock)
 	r := p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{
 		"server_id": mustAtoi(h.id), "name": "auto", "source": "git", "port": 3000,
-		"git":     map[string]string{"url": g.URL, "builder": "railpack"},
+		"git":     map[string]any{"url": g.URL, "builder": "railpack", "build_env": []string{"MESSAGE"}},
 		"domains": []string{"auto.localhost"}, "tls": "internal",
 	})
 	aid := jsonID(r["app"].(map[string]any)["id"])
 	base := "/api/v1/apps/" + aid
+	p.call(200, "PUT", base+"/env", map[string]any{"env": map[string]string{"MESSAGE": "hello at build time"}})
 	t.Cleanup(func() {
 		ctx := context.Background()
 		list, _ := dc.ContainerList(ctx, appLabels(aid))
@@ -331,7 +332,7 @@ func TestRailpackWithDocker(t *testing.T) {
 	}
 	eventually(t, "the built app served", func() bool {
 		_, body := h.get("auto.localhost", "/")
-		return strings.Contains(body, "railpack built me, port 3000")
+		return strings.Contains(body, "railpack built me, port 3000, hello at build time")
 	})
 
 	// A link to this host's files: refused.
@@ -349,4 +350,55 @@ func TestRailpackWithDocker(t *testing.T) {
 		_, body := h.get("auto.localhost", "/")
 		return strings.Contains(body, "railpack built me")
 	})
+}
+
+// TestBuildEnvWithDocker: a Dockerfile reads a build variable as a secret
+// (RUN --mount=type=secret); the value reaches the build, not the image's
+// history.
+func TestBuildEnvWithDocker(t *testing.T) {
+	if os.Getenv("BASALT_DOCKER_TESTS") != "1" {
+		t.Skip("set BASALT_DOCKER_TESTS=1 to run against the local Docker daemon")
+	}
+	sock := os.Getenv("DOCKER_SOCKET")
+	if sock == "" {
+		sock = "/var/run/docker.sock"
+	}
+	g := startGitServer(t, map[string]string{"Dockerfile": "FROM busybox:1.37\n" +
+		"RUN --mount=type=secret,id=GREETING,env=GREETING mkdir /www && echo \"$GREETING\" > /www/index.html\n" +
+		"CMD [\"httpd\", \"-f\", \"-p\", \"80\", \"-h\", \"/www\"]\n"})
+	p := startPanel(t)
+	h := startHostWith(t, p, sock, func(c *agent.Config) { c.GitCAFile = g.CAFile })
+	dc := docker.New(sock)
+	r := p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{
+		"server_id": mustAtoi(h.id), "name": "greet", "source": "git", "port": 80,
+		"git":     map[string]any{"url": g.URL, "build_env": []string{"GREETING"}},
+		"domains": []string{"greet.localhost"}, "tls": "internal",
+	})
+	aid := jsonID(r["app"].(map[string]any)["id"])
+	base := "/api/v1/apps/" + aid
+	t.Cleanup(func() {
+		ctx := context.Background()
+		list, _ := dc.ContainerList(ctx, appLabels(aid))
+		for _, c := range list {
+			dc.ContainerRemove(ctx, c.ID, true)
+		}
+		dc.NetworkRemove(ctx, appNet(aid))
+		for _, d := range p.call(200, "GET", base+"/deployments", nil)["deployments"].([]any) {
+			dc.ImageRemove(ctx, d.(map[string]any)["image"].(string))
+		}
+	})
+	p.call(200, "PUT", base+"/env", map[string]any{"env": map[string]string{"GREETING": "hi from a secret 7f3a"}})
+	dep := p.call(http.StatusAccepted, "POST", base+"/deploy", map[string]any{})["deployment"].(map[string]any)
+	d, log := followDeployment(t, p, base, jsonID(dep["id"]))
+	if d["status"] != "succeeded" || strings.Contains(log, "7f3a") {
+		t.Fatalf("deployment: %v\n%s", d, log)
+	}
+	eventually(t, "the value built in", func() bool {
+		_, body := h.get("greet.localhost", "/")
+		return strings.Contains(body, "hi from a secret 7f3a")
+	})
+	out, err := exec.Command("docker", "--host", "unix://"+sock, "history", "--no-trunc", d["image"].(string)).CombinedOutput()
+	if err != nil || strings.Contains(string(out), "7f3a") {
+		t.Fatalf("history: %v %s", err, out)
+	}
 }

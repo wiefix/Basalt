@@ -229,6 +229,7 @@ export interface GitSettings {
   source_id?: number; // a git source (GitHub App) the repository is reached through
   repo?: string; // owner/name, with source_id
   builder?: "" | "railpack"; // "": its Dockerfile; railpack: works out how to build it
+  build_env?: string[]; // names of Environment variables the build gets (as secrets)
 }
 
 // Where the user's repositories are: a GitHub App the panel created, or a

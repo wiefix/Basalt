@@ -869,14 +869,16 @@ function SourceTab({ app }: { app: App }) {
   const [branch, setBranch] = useState(g.branch);
   const [dockerfile, setDockerfile] = useState(g.dockerfile);
   const [builder, setBuilder] = useState<"" | "railpack">(g.builder ?? "");
+  const [buildEnv, setBuildEnv] = useState((g.build_env ?? []).join(" "));
+  const buildEnvList = buildEnv.split(/[\s,]+/).filter(Boolean);
   const [context, setContext] = useState(g.context);
   const save = useMutation({
     mutationFn: () =>
       api.updateApp(app.id, {
         image: "",
         git: g.source_id
-          ? { url: g.url, source_id: g.source_id, repo: g.repo, branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim(), builder }
-          : { url: url.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim(), builder },
+          ? { url: g.url, source_id: g.source_id, repo: g.repo, branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim(), builder, build_env: buildEnvList }
+          : { url: url.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim(), builder, build_env: buildEnvList },
         port: app.port,
         volumes: app.volumes,
         memory_mb: app.memory_mb,
@@ -927,6 +929,21 @@ function SourceTab({ app }: { app: App }) {
         </div>
         <Field label="Build context" help="Directory sent to the build; . is the repository root.">
           <input className="input mono" value={context} onChange={(e) => setContext(e.target.value)} required />
+        </Field>
+        <Field
+          label="Variables at build time"
+          help={
+            builder ? (
+              <>Names of variables under Environment the build needs, e.g. NEXT_PUBLIC_API_URL. Its steps get them; they are not kept in the image.</>
+            ) : (
+              <>
+                Names of variables under Environment the build needs. The Dockerfile reads each as a secret, e.g.{" "}
+                <code>RUN --mount=type=secret,id=NPM_TOKEN,env=NPM_TOKEN npm ci</code>: they are not kept in the image.
+              </>
+            )
+          }
+        >
+          <input className="input mono" value={buildEnv} onChange={(e) => setBuildEnv(e.target.value)} placeholder="NEXT_PUBLIC_API_URL NPM_TOKEN" />
         </Field>
         <div>
           <button className="btn primary" disabled={save.isPending}>

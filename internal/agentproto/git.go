@@ -23,6 +23,10 @@ type GitSource struct {
 	// Builder: "" builds Dockerfile; BuilderRailpack works out how to build
 	// the context (Node, Python, Go, PHP…) without one.
 	Builder string `json:"builder,omitempty"`
+	// BuildEnv are variables the build gets as secrets (Railpack passes them
+	// to its steps; a Dockerfile reads them with
+	// RUN --mount=type=secret,id=NAME,env=NAME): never in the image.
+	BuildEnv map[string]string `json:"build_env,omitempty"`
 	// DeployKey is an OpenSSH private key for ssh:// and scp-style URLs.
 	DeployKey string `json:"deploy_key,omitempty"`
 	// Token is a short-lived token for an https URL (a GitHub App's
@@ -106,6 +110,16 @@ func (g *GitSource) Validate() error {
 	if g.Commit != "" && !commitRE.MatchString(g.Commit) {
 		return errors.New("invalid commit")
 	}
+	total := 0
+	for k, v := range g.BuildEnv {
+		if err := ValidBuildEnvName(k); err != nil {
+			return err
+		}
+		total += len(k) + len(v)
+	}
+	if len(g.BuildEnv) > MaxBuildEnv || total > 256<<10 {
+		return errors.New("too many build variables")
+	}
 	if g.Builder != BuilderDockerfile && g.Builder != BuilderRailpack {
 		return errors.New(`builder must be "" (Dockerfile) or "railpack"`)
 	}
@@ -138,6 +152,29 @@ const (
 	RailpackFrontend = "ghcr.io/railwayapp/railpack-frontend:v0.43.0@sha256:355ef61fae6f2551103cd8b10c710cb07167dd353d561f15c69b8d7ac1c676cc"
 	BuildKitImage    = "moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c"
 )
+
+// MaxBuildEnv is how many variables a build may get.
+const MaxBuildEnv = 50
+
+var buildEnvRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
+
+// ValidBuildEnvName checks the name of a variable a build gets: a plain
+// name, not one the build tools themselves read.
+func ValidBuildEnvName(k string) error {
+	if !buildEnvRE.MatchString(k) {
+		return fmt.Errorf("invalid build variable name %q", k)
+	}
+	u := strings.ToUpper(k)
+	if u == "PATH" || u == "HOME" {
+		return fmt.Errorf("%s cannot be a build variable", k)
+	}
+	for _, p := range []string{"DOCKER_", "BUILDX_", "BUILDKIT_", "GIT_", "SSH_"} {
+		if strings.HasPrefix(u, p) {
+			return fmt.Errorf("%s cannot be a build variable (names starting with %s are the build tools')", k, p)
+		}
+	}
+	return nil
+}
 
 // ValidCommit reports whether s is a full commit hash.
 func ValidCommit(s string) bool { return commitRE.MatchString(s) }

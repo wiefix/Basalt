@@ -272,6 +272,18 @@ func (s *Server) gitSource(ctx context.Context, app *store.App) (*agentproto.Git
 		}
 		g.Token = tok
 	}
+	if len(app.Git.BuildEnv) > 0 {
+		env, err := s.appEnv(app)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt app env: %w", err)
+		}
+		g.BuildEnv = map[string]string{}
+		for _, k := range app.Git.BuildEnv {
+			if v, ok := env[k]; ok {
+				g.BuildEnv[k] = v
+			}
+		}
+	}
 	if agentproto.IsSSHGitURL(g.URL) && app.DeployKey != nil {
 		key, err := s.box.Open(app.DeployKey, deployKeyAD(app.ID))
 		if err != nil {

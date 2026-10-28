@@ -679,6 +679,7 @@ export interface GitSourceView {
 
 export interface GitView {
   branch?: string;
+  build_env?: string[];
   builder?: string;
   context?: string;
   dockerfile?: string;
@@ -689,6 +690,7 @@ export interface GitView {
 
 export interface GitViewOut {
   branch: string;
+  build_env?: string[];
   builder?: string;
   context: string;
   dockerfile: string;

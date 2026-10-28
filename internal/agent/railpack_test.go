@@ -29,3 +29,21 @@ func TestLinksInside(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildSecrets: build variables are named in the arguments, with their
+// values in the environment only; the hash follows the values.
+func TestBuildSecrets(t *testing.T) {
+	args, env, h1 := buildSecrets(map[string]string{"B": "two", "A": "s3cret"})
+	if strings.Join(args, " ") != "--secret id=A,env=A --secret id=B,env=B" || strings.Join(env, " ") != "A=s3cret B=two" {
+		t.Fatalf("args %v env %v", args, env)
+	}
+	if strings.Contains(strings.Join(args, " "), "s3cret") {
+		t.Fatal("a value in the arguments")
+	}
+	if _, _, h2 := buildSecrets(map[string]string{"B": "two", "A": "other"}); h2 == h1 {
+		t.Fatal("the hash does not follow the values")
+	}
+	if a, e, _ := buildSecrets(nil); len(a)+len(e) != 0 {
+		t.Fatal("secrets without variables")
+	}
+}

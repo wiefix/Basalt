@@ -78,7 +78,7 @@ func viewApp(a *store.App) appView {
 	switch a.Source {
 	case store.SourceGit:
 		v.Git = &gitView{URL: a.Git.URL, Branch: a.Git.Branch, Dockerfile: a.Git.Dockerfile, Context: a.Git.Context,
-			SourceID: a.Git.SourceID, Repo: a.Git.Repo, Builder: a.Git.Builder}
+			SourceID: a.Git.SourceID, Repo: a.Git.Repo, Builder: a.Git.Builder, BuildEnv: a.Git.BuildEnv}
 		v.DeployKey, v.AutoDeploy = a.DeployKeyPublic, a.AutoDeploy
 	case store.SourceCompose:
 		sum := a.Summary
@@ -109,6 +109,10 @@ type gitView struct {
 	// Builder: "" builds Dockerfile; "railpack" works out how to build the
 	// context without one (Node, Python, Go, PHP, Ruby, Java, static sites…).
 	Builder string `json:"builder,omitempty"`
+	// BuildEnv names variables of the app's environment its build gets, as
+	// secrets: Railpack passes them to its steps, a Dockerfile reads them
+	// with RUN --mount=type=secret,id=NAME,env=NAME.
+	BuildEnv []string `json:"build_env,omitempty"`
 }
 
 type deploymentView struct {
@@ -222,6 +226,20 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 			return st, err
 		}
 		st.Git = store.GitSettings{URL: g.URL, Branch: g.Branch, Dockerfile: g.Dockerfile, Context: g.Context, Builder: g.Builder}
+		seen := map[string]bool{}
+		for _, k := range req.Git.BuildEnv {
+			k = strings.TrimSpace(k)
+			if err := agentproto.ValidBuildEnvName(k); err != nil {
+				return st, err
+			}
+			if !seen[k] {
+				seen[k] = true
+				st.Git.BuildEnv = append(st.Git.BuildEnv, k)
+			}
+		}
+		if len(st.Git.BuildEnv) > agentproto.MaxBuildEnv {
+			return st, fmt.Errorf("at most %d build variables", agentproto.MaxBuildEnv)
+		}
 		if req.Git.SourceID != 0 {
 			st.Git.SourceID, st.Git.Repo = req.Git.SourceID, req.Git.Repo
 		}

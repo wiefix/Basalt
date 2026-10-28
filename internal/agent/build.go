@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -148,12 +151,13 @@ func (m *appsManager) buildImage(ctx context.Context, dc *docker.Client, spec ag
 	}
 
 	lg.printf("Building %s from %s", spec.Image, g.Dockerfile)
-	cmd := exec.CommandContext(ctx, dockerBin, "--host", "unix://"+m.socket, "build",
+	secretArgs, secretEnv, _ := buildSecrets(g.BuildEnv)
+	args := append([]string{"--host", "unix://" + m.socket, "build",
 		"--progress=plain", "--file", "-", "--tag", spec.Image,
-		"--label", labelApp+"="+strconv.FormatInt(spec.AppID, 10), "--label", "basalt.commit="+commit,
-		filepath.Join(src, g.Context))
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DOCKER_CONFIG=" + cfg,
-		"DOCKER_BUILDKIT=1", "BUILDX_NO_DEFAULT_ATTESTATIONS=1"}
+		"--label", labelApp + "=" + strconv.FormatInt(spec.AppID, 10), "--label", "basalt.commit=" + commit}, secretArgs...)
+	cmd := exec.CommandContext(ctx, dockerBin, append(args, filepath.Join(src, g.Context))...)
+	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DOCKER_CONFIG=" + cfg,
+		"DOCKER_BUILDKIT=1", "BUILDX_NO_DEFAULT_ATTESTATIONS=1"}, secretEnv...)
 	cmd.Dir, cmd.WaitDelay = work, 10*time.Second
 	cmd.Stdin = strings.NewReader(dockerfile)
 	out := &buildOutput{lg: lg}
@@ -347,4 +351,24 @@ func truncateRunes(s string, n int) string {
 		return string(r[:n])
 	}
 	return s
+}
+
+// buildSecrets turns the variables a build gets into BuildKit secrets: the
+// arguments name them (--secret id=NAME,env=NAME), the values go in the
+// environment of the docker command only (never its command line, which
+// every user of the host may read), and hash identifies the values, so a
+// change rebuilds what used them.
+func buildSecrets(vars map[string]string) (args, env []string, hash string) {
+	names := make([]string, 0, len(vars))
+	for k := range vars {
+		names = append(names, k)
+	}
+	slices.Sort(names)
+	h := sha256.New()
+	for _, k := range names {
+		args = append(args, "--secret", "id="+k+",env="+k)
+		env = append(env, k+"="+vars[k])
+		fmt.Fprintf(h, "%s=%d:%s\n", k, len(vars[k]), vars[k])
+	}
+	return args, env, hex.EncodeToString(h.Sum(nil))
 }
