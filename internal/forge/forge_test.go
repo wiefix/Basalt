@@ -52,7 +52,7 @@ func TestClient(t *testing.T) {
 				t.Fatalf("key: %d %v %+v", kid, err, f.Keys())
 			}
 			hid, err := c.AddHook(ctx, full, "https://panel.example.com/api/v1/webhooks/apps/1", "s3cret")
-			if h := f.Hooks(); err != nil || len(h) != 1 || h[0].Secret != "s3cret" || !h[0].PushEvents || h[0].URL != "https://panel.example.com/api/v1/webhooks/apps/1" {
+			if h := f.Hooks(); err != nil || len(h) != 1 || h[0].Secret != "s3cret" || !h[0].PushEvents || !h[0].PREvents || h[0].URL != "https://panel.example.com/api/v1/webhooks/apps/1" {
 				t.Fatalf("hook: %d %v %+v", hid, err, h)
 			}
 			sha := strings.Repeat("0f", 20)

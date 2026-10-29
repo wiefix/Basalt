@@ -472,6 +472,9 @@ func (s *Server) commitStatus(appID int64, sha, state, desc string) {
 		if panelURL, _ := s.db.Setting(ctx, settingPanelURL); panelURL != "" {
 			target = panelURL + appPage(a)
 		}
+		if a.PreviewOf != 0 && state == "success" && len(a.Domains) > 0 {
+			target = "https://" + a.Domains[0] // the preview itself
+		}
 		c, err := s.forgeClient(g)
 		if err == nil {
 			err = c.SetStatus(ctx, a.Git.Repo, sha, state, target, desc, truncate("Basalt / "+a.Name, 100))
@@ -569,9 +572,12 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		// Removing a preview waits for its deployment to stop: GitHub does not wait.
 		go func() {
-			if _, err := s.pullRequestEvent(source, pr); err != nil {
+			apps, err := s.db.AppsOfRepo(context.Background(), source.ID, pr.Repository.FullName)
+			if err != nil {
 				s.log.Warn("pull request", "repo", pr.Repository.FullName, "pr", pr.Number, "err", err)
+				return
 			}
+			s.pullRequestEvent(apps, pr.event())
 		}()
 		writeJSON(w, http.StatusAccepted, map[string]string{"result": "pull request " + pr.Action})
 		return

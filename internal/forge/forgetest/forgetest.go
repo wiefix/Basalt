@@ -35,6 +35,8 @@ type Hook struct {
 	Repo, URL  string
 	Secret     string
 	PushEvents bool
+	// PREvents: merge requests (GitLab) or pull requests (Gitea).
+	PREvents bool
 }
 
 type Status struct {
@@ -193,10 +195,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 		h := Hook{ID: s.next, Repo: rp.FullName}
 		if s.Kind == "gitlab" {
 			h.URL, h.Secret, h.PushEvents = str(body["url"]), str(body["token"]), body["push_events"] == true
+			h.PREvents = body["merge_requests_events"] == true
 		} else {
 			cfg, _ := body["config"].(map[string]any)
 			evs, _ := body["events"].([]any)
 			h.URL, h.Secret, h.PushEvents = str(cfg["url"]), str(cfg["secret"]), slices.Contains(evs, any("push"))
+			h.PREvents = slices.Contains(evs, any("pull_request"))
 		}
 		s.hooks = append(s.hooks, h)
 		s.json(w, 201, map[string]any{"id": h.ID})

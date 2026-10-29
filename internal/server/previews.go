@@ -14,13 +14,14 @@ import (
 	"github.com/wiefix/basalt/internal/store"
 )
 
-// Preview deployments (20.5): an app built through a GitHub App, with a
-// preview domain, gets a copy of itself for each pull request into its
-// branch, at pr-<number>.<domain>. GitHub reports the pull request
-// (webhook of the GitHub App, event pull_request): opened, reopened or
-// pushed to — the preview is created if needed and deploys the pull
-// request's head commit; closed — it is deleted with its data. Pull
-// requests from forks are never built: their code is anyone's, and it
+// Preview deployments (20.5, 20.11): an app built through a git source
+// (GitHub App, GitLab, Gitea), with a preview domain, gets a copy of
+// itself for each pull (merge) request into its branch, at
+// pr-<number>.<domain>. The forge reports the request (webhook of the
+// GitHub App, or the app's own webhook on GitLab and Gitea): opened,
+// reopened or pushed to — the preview is created if needed and deploys the
+// request's head commit; closed or merged — it is deleted with its data.
+// Requests from forks are never built: their code is anyone's, and it
 // would run on the server.
 
 const maxPreviews = 10
@@ -34,7 +35,7 @@ type previewsRequest struct {
 // previewParent tells why pull requests of app cannot be previewed (nil: they can).
 func previewParent(app *store.App) error {
 	if app.Source != store.SourceGit || app.Git.SourceID == 0 || app.Git.Repo == "" {
-		return errors.New("previews need an app built from a GitHub repository through a git source")
+		return errors.New("previews need an app built from a repository of a git source (GitHub, GitLab, Gitea)")
 	}
 	if app.ComposeFromGit() {
 		return errors.New("compose apps have no previews yet")
@@ -64,16 +65,19 @@ func (s *Server) writePreviews(w http.ResponseWriter, r *http.Request, app *stor
 		out[i] = s.viewAppFull(pv)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"domain": app.PreviewDomain, "previews": out, "max": maxPreviews,
-		"supported": previewParent(app) == nil && s.onGitHub(r.Context(), app)})
+		"supported": previewParent(app) == nil && s.sourceKind(r.Context(), app) != ""})
 }
 
-// onGitHub reports whether an app is built through a GitHub App.
-func (s *Server) onGitHub(ctx context.Context, app *store.App) bool {
+// sourceKind is the kind of an app's git source ("": none, or gone).
+func (s *Server) sourceKind(ctx context.Context, app *store.App) string {
 	if app.Git.SourceID == 0 {
-		return false
+		return ""
 	}
 	g, err := s.db.GitSourceByID(ctx, app.Git.SourceID)
-	return err == nil && g.Kind == "github"
+	if err != nil {
+		return ""
+	}
+	return g.Kind
 }
 
 func (s *Server) handleSetPreviews(w http.ResponseWriter, r *http.Request, p *principal) {
@@ -89,8 +93,9 @@ func (s *Server) handleSetPreviews(w http.ResponseWriter, r *http.Request, p *pr
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	if !s.onGitHub(r.Context(), app) {
-		writeError(w, http.StatusUnprocessableEntity, "previews need a repository on GitHub (pull requests reach the panel through the GitHub App)")
+	kind := s.sourceKind(r.Context(), app)
+	if kind == "" {
+		writeError(w, http.StatusUnprocessableEntity, "the app's git source is gone")
 		return
 	}
 	domain := strings.TrimSpace(req.Domain)
@@ -110,6 +115,13 @@ func (s *Server) handleSetPreviews(w http.ResponseWriter, r *http.Request, p *pr
 			return
 		}
 	}
+	if domain != "" && app.PreviewDomain == "" && isForge(kind) {
+		// The webhook of an app made before 20.11 reports pushes only.
+		if err := s.connectForge(r.Context(), app); err != nil {
+			writeError(w, http.StatusBadGateway, "update the repository's webhook: "+err.Error())
+			return
+		}
+	}
 	if err := s.db.SetPreviewDomain(r.Context(), app.ID, domain); err != nil {
 		s.internalError(w, r, "set preview domain", err)
 		return
@@ -119,7 +131,21 @@ func (s *Server) handleSetPreviews(w http.ResponseWriter, r *http.Request, p *pr
 	s.writePreviews(w, r, app)
 }
 
-// pullRequest is what the panel reads of a pull_request event.
+// prEvent is a pull (merge) request event, as any forge reports it.
+type prEvent struct {
+	// Action: "open" (opened, reopened or pushed to), "close" (closed or
+	// merged), "" (anything else).
+	Action  string
+	Number  int
+	HeadRef string
+	HeadSHA string
+	BaseRef string
+	// Fork: the head branch is in another repository.
+	Fork bool
+}
+
+// pullRequest is what the panel reads of a pull_request event of GitHub,
+// Gitea or Forgejo.
 type pullRequest struct {
 	Action      string `json:"action"`
 	Number      int    `json:"number"`
@@ -140,34 +166,75 @@ type pullRequest struct {
 	} `json:"repository"`
 }
 
-// pullRequestEvent deploys or removes the previews of a pull request; it
-// returns the apps concerned.
-func (s *Server) pullRequestEvent(source *store.GitSource, pr pullRequest) ([]string, error) {
-	ctx := context.Background()
-	apps, err := s.db.AppsOfRepo(ctx, source.ID, pr.Repository.FullName)
-	if err != nil {
-		return nil, err
-	}
+func (pr pullRequest) event() prEvent {
 	head := pr.PullRequest.Head
-	fork := head.Repo == nil || !strings.EqualFold(head.Repo.FullName, pr.Repository.FullName)
+	ev := prEvent{Number: pr.Number, HeadRef: head.Ref, HeadSHA: head.SHA, BaseRef: pr.PullRequest.Base.Ref,
+		Fork: head.Repo == nil || !strings.EqualFold(head.Repo.FullName, pr.Repository.FullName)}
+	switch pr.Action {
+	case "opened", "reopened", "synchronize", "synchronized": // synchronized: Gitea
+		ev.Action = "open"
+	case "closed":
+		ev.Action = "close"
+	}
+	return ev
+}
+
+// mergeRequest is what the panel reads of a GitLab merge request event.
+type mergeRequest struct {
+	ObjectKind string `json:"object_kind"`
+	Attrs      struct {
+		IID             int    `json:"iid"`
+		Action          string `json:"action"`
+		SourceBranch    string `json:"source_branch"`
+		TargetBranch    string `json:"target_branch"`
+		SourceProjectID int64  `json:"source_project_id"`
+		TargetProjectID int64  `json:"target_project_id"`
+		// OldRev is set on an update that brought new commits.
+		OldRev     string `json:"oldrev"`
+		LastCommit struct {
+			ID string `json:"id"`
+		} `json:"last_commit"`
+	} `json:"object_attributes"`
+	Project struct {
+		PathWithNamespace string `json:"path_with_namespace"`
+	} `json:"project"`
+}
+
+func (mr mergeRequest) event() prEvent {
+	a := mr.Attrs
+	ev := prEvent{Number: a.IID, HeadRef: a.SourceBranch, HeadSHA: a.LastCommit.ID, BaseRef: a.TargetBranch,
+		Fork: a.SourceProjectID != a.TargetProjectID}
+	switch {
+	case a.Action == "open" || a.Action == "reopen" || a.Action == "update" && a.OldRev != "":
+		ev.Action = "open"
+	case a.Action == "close" || a.Action == "merge":
+		ev.Action = "close"
+	}
+	return ev
+}
+
+// pullRequestEvent deploys or removes the previews a pull request has
+// among apps (those of its repository); it returns the apps concerned.
+func (s *Server) pullRequestEvent(apps []*store.App, pr prEvent) []string {
+	ctx := context.Background()
 	var out []string
 	for _, a := range apps {
-		if a.PreviewOf != 0 || a.PreviewDomain == "" || a.Git.Branch != pr.PullRequest.Base.Ref {
+		if a.PreviewOf != 0 || a.PreviewDomain == "" || a.Git.Branch != pr.BaseRef {
 			continue
 		}
 		switch pr.Action {
-		case "opened", "reopened", "synchronize":
-			if fork {
+		case "open":
+			if pr.Fork {
 				out = append(out, a.Name+" (not built: the pull request comes from a fork)")
 				continue
 			}
-			pv, err := s.ensurePreview(ctx, a, pr.Number, head.Ref)
+			pv, err := s.ensurePreview(ctx, a, pr.Number, pr.HeadRef)
 			if err != nil {
 				s.log.Warn("create preview", "app_id", a.ID, "pr", pr.Number, "err", err)
 				out = append(out, a.Name+" (no preview: "+err.Error()+")")
 				continue
 			}
-			commit := head.SHA
+			commit := pr.HeadSHA
 			if !agentproto.ValidCommit(commit) {
 				commit = ""
 			}
@@ -181,13 +248,13 @@ func (s *Server) pullRequestEvent(source *store.GitSource, pr pullRequest) ([]st
 			default:
 				out = append(out, pv.Name)
 			}
-		case "closed":
+		case "close":
 			if name, ok := s.removePreview(ctx, a, pr.Number); ok {
 				out = append(out, name+" (removed)")
 			}
 		}
 	}
-	return out, nil
+	return out
 }
 
 // ensurePreview returns the preview of pull request number of parent,
@@ -246,6 +313,17 @@ func (s *Server) ensurePreview(ctx context.Context, parent *store.App, number in
 	}
 	if err := s.db.SetAppEnv(ctx, pv.ID, sealed); err != nil {
 		return nil, err
+	}
+	// GitLab and Gitea repositories are cloned over SSH: with the parent's
+	// deploy key, the one the repository knows.
+	if parent.DeployKey != nil {
+		key, err := s.box.Open(parent.DeployKey, deployKeyAD(parent.ID))
+		if err != nil {
+			return nil, fmt.Errorf("decrypt deploy key: %w", err)
+		}
+		if err := s.db.SetAppDeployKey(ctx, pv.ID, s.box.Seal(key, deployKeyAD(pv.ID)), parent.DeployKeyPublic); err != nil {
+			return nil, err
+		}
 	}
 	s.PushProxy(ctx, pv.ServerID)
 	return pv, nil

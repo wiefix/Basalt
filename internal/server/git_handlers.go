@@ -239,6 +239,10 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"result": "pong"})
 		return
 	}
+	if event == "merge request hook" || event == "pull_request" {
+		s.pullRequestHook(w, r, app, event, body)
+		return
+	}
 	if event != "push" && event != "push hook" {
 		writeJSON(w, http.StatusAccepted, map[string]string{"result": "ignored: not a push"})
 		return
@@ -281,4 +285,45 @@ func (s *Server) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		result = "queued after the running deployment"
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"result": result, "commit": commit})
+}
+
+// pullRequestHook takes a merge request (GitLab) or pull request (Gitea,
+// Forgejo) event of an app from a GitLab or Gitea source: its previews
+// follow the request.
+func (s *Server) pullRequestHook(w http.ResponseWriter, r *http.Request, app *store.App, event string, body []byte) {
+	if !isForge(s.sourceKind(r.Context(), app)) {
+		writeJSON(w, http.StatusAccepted, map[string]string{"result": "ignored: previews need a git source"})
+		return
+	}
+	var ev prEvent
+	var repo string
+	if event == "merge request hook" {
+		var mr mergeRequest
+		if err := json.Unmarshal(body, &mr); err != nil || mr.ObjectKind != "merge_request" {
+			writeError(w, http.StatusBadRequest, "invalid payload")
+			return
+		}
+		ev, repo = mr.event(), mr.Project.PathWithNamespace
+	} else {
+		var pr pullRequest
+		if err := json.Unmarshal(body, &pr); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid payload")
+			return
+		}
+		ev, repo = pr.event(), pr.Repository.FullName
+	}
+	switch {
+	case ev.Number <= 0:
+		writeError(w, http.StatusBadRequest, "invalid payload")
+		return
+	case !strings.EqualFold(repo, app.Git.Repo):
+		writeJSON(w, http.StatusAccepted, map[string]string{"result": "ignored: another repository"})
+		return
+	case ev.Action == "":
+		writeJSON(w, http.StatusAccepted, map[string]string{"result": "ignored: no new commits"})
+		return
+	}
+	// Removing a preview waits for its deployment to stop: the forge does not wait.
+	go s.pullRequestEvent([]*store.App{app}, ev)
+	writeJSON(w, http.StatusAccepted, map[string]string{"result": "pull request " + ev.Action})
 }

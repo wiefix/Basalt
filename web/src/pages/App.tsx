@@ -1711,7 +1711,7 @@ function PreviewsCard({ app, user }: { app: App; user: User }) {
   if (data.isPending) return null;
   if (data.error) return <ErrorBox error={data.error} />;
   const d = data.data;
-  if (!d.supported && d.previews.length === 0) return null; // GitHub only
+  if (!d.supported && d.previews.length === 0) return null; // apps of a git source only
   const admin = can(user, "admin");
   return (
     <div className="card">
@@ -1743,7 +1743,7 @@ function PreviewsCard({ app, user }: { app: App; user: User }) {
               label="Domain for previews"
               help={
                 <>
-                  Each pull request into <span className="mono">{app.git?.branch}</span> runs at{" "}
+                  Each pull request (merge request on GitLab) into <span className="mono">{app.git?.branch}</span> runs at{" "}
                   <span className="mono">pr-&lt;number&gt;.{domain.trim() || "preview.example.com"}</span>. Point{" "}
                   <span className="mono">*.{domain.trim() || "preview.example.com"}</span> at this app's server (automatic if
                   the zone is under DNS). Empty: no previews.

@@ -312,7 +312,8 @@ function ForgeCard({ source }: { source: GitSource }) {
       ) : (
         <p className="muted small" style={{ margin: 0 }}>
           Create an app from one of its repositories under <Link to="/apps">Apps</Link>: Basalt adds the app's read-only deploy
-          key and a push webhook to the repository, and shows each deployment on its commit.
+          key and a webhook to the repository, and shows each deployment on its commit; {kind === "gitlab" ? "merge" : "pull"} requests
+          can get previews (an app's Overview).
         </p>
       )}
     </div>

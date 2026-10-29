@@ -356,7 +356,7 @@ func (c *Client) DeleteDeployKey(ctx context.Context, repo string, id int64) err
 	return gone(c.do(ctx, http.MethodDelete, c.path(repo)+p+strconv.FormatInt(id, 10), nil, nil))
 }
 
-// AddHook adds a webhook of push events to hookURL, signed with secret
+// AddHook adds a webhook of push and merge (pull) request events to hookURL, signed with secret
 // (GitLab sends it as X-Gitlab-Token, Gitea signs the body with it).
 func (c *Client) AddHook(ctx context.Context, repo, hookURL, secret string) (int64, error) {
 	if err := c.check(repo); err != nil {
@@ -368,9 +368,9 @@ func (c *Client) AddHook(ctx context.Context, repo, hookURL, secret string) (int
 	var err error
 	if c.Kind == GitLab {
 		_, err = c.do(ctx, http.MethodPost, c.path(repo)+"/hooks", map[string]any{"url": hookURL, "token": secret,
-			"push_events": true, "enable_ssl_verification": strings.HasPrefix(hookURL, "https://")}, &out)
+			"push_events": true, "merge_requests_events": true, "enable_ssl_verification": strings.HasPrefix(hookURL, "https://")}, &out)
 	} else {
-		_, err = c.do(ctx, http.MethodPost, c.path(repo)+"/hooks", map[string]any{"type": "gitea", "active": true, "events": []string{"push"},
+		_, err = c.do(ctx, http.MethodPost, c.path(repo)+"/hooks", map[string]any{"type": "gitea", "active": true, "events": []string{"push", "pull_request"},
 			"config": map[string]string{"url": hookURL, "content_type": "json", "secret": secret}}, &out)
 	}
 	if err == nil && out.ID <= 0 {
