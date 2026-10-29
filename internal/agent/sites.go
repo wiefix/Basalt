@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -352,6 +354,64 @@ func publicError(err error) error {
 		return fmt.Errorf("%s: %w", e.Op, e.Err)
 	}
 	return err
+}
+
+// hostPaths rewrites the agent's own directories in every error that
+// leaves the agent, so a path missed by publicError (one wrapped with
+// context, say) still does not reach the panel: a site's directory
+// becomes "<site>", the others a name for the directory.
+type hostPaths []hostPath
+
+type hostPath struct {
+	re   *regexp.Regexp
+	repl func(match string) string
+}
+
+func newHostPaths(cfg Config) hostPaths {
+	type dir struct {
+		path  string
+		sites bool
+		name  string
+	}
+	dirs := []dir{{cfg.SitesRoot, true, "<sites>"}, {cfg.DataDir, false, "<agent-data>"}, {cfg.ProxyDir, false, "<proxy-data>"}}
+	// Nested directories first, so the longest prefix names the path.
+	slices.SortFunc(dirs, func(a, b dir) int { return len(b.path) - len(a.path) })
+	var h hostPaths
+	for _, d := range dirs {
+		if !filepath.IsAbs(d.path) {
+			continue
+		}
+		root := regexp.QuoteMeta(filepath.Clean(d.path))
+		if d.sites {
+			re := regexp.MustCompile(root + `(/[0-9]+)?\b`)
+			h = append(h, hostPath{re, func(m string) string {
+				if re.FindStringSubmatch(m)[1] != "" {
+					return "<site>"
+				}
+				return "<sites>"
+			}})
+			continue
+		}
+		name := d.name
+		h = append(h, hostPath{regexp.MustCompile(root + `\b`), func(string) string { return name }})
+	}
+	return h
+}
+
+// scrub returns err unchanged unless its message names a host directory.
+func (h hostPaths) scrub(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	out := msg
+	for _, p := range h {
+		out = p.re.ReplaceAllStringFunc(out, p.repl)
+	}
+	if out == msg {
+		return err
+	}
+	return errors.New(out)
 }
 
 func (m *sitesManager) addUpload(siteID int64, s *files.Site, u *files.Upload) string {

@@ -21,13 +21,14 @@ const volumeHelperImage = "busybox:1.37"
 // Commands run inside database containers. The root password comes from
 // the container's own environment, so it never passes through the agent;
 // the database name is an argument ($0), not part of the script.
-var (
-	mysqlDump    = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysqldump -uroot --single-transaction --quick --routines --events --triggers --hex-blob --default-character-set=utf8mb4 "$0"`
-	mysqlLoad    = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot --default-character-set=utf8mb4 --binary-mode "$0"`
-	mariadbDump  = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb-dump -uroot --single-transaction --quick --routines --events --triggers --hex-blob --default-character-set=utf8mb4 "$0"`
-	mariadbLoad  = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot --default-character-set=utf8mb4 --binary-mode "$0"`
-	errNoRunning = errors.New("the database is not running; deploy it first")
+const (
+	mysqlDump   = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysqldump -uroot --single-transaction --quick --routines --events --triggers --hex-blob --default-character-set=utf8mb4 "$0"`
+	mysqlLoad   = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot --default-character-set=utf8mb4 --binary-mode "$0"`
+	mariadbDump = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb-dump -uroot --single-transaction --quick --routines --events --triggers --hex-blob --default-character-set=utf8mb4 "$0"`
+	mariadbLoad = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot --default-character-set=utf8mb4 --binary-mode "$0"`
 )
+
+var errNoRunning = errors.New("the database is not running; deploy it first")
 
 func volumeFile(name string) string { return "volume-" + name + ".tar" }
 func dumpFileOf(db string) string   { return "dump-" + db + ".sql" }
@@ -255,11 +256,10 @@ func (b *backupManager) setDBPassword(ctx context.Context, req agentproto.Contai
 		inner = []string{"psql", "--username", req.User, "--dbname", req.Database, "--no-password", "--quiet", "--set", "ON_ERROR_STOP=1"}
 		sql = fmt.Sprintf(`ALTER ROLE "%s" WITH PASSWORD '%s';`, req.User, req.Password)
 	case "mysql", "mariadb":
-		script := mysqlRoot
+		inner = []string{"sh", "-c", mysqlRoot}
 		if req.Engine == "mariadb" {
-			script = mariadbRoot
+			inner = []string{"sh", "-c", mariadbRoot}
 		}
-		inner = []string{"sh", "-c", script}
 		sql = fmt.Sprintf("ALTER USER '%s'@'%%' IDENTIFIED BY '%s';\nFLUSH PRIVILEGES;\n", req.User, req.Password)
 	}
 	cmd := command(ctx, b.dockerArgs(bin, append([]string{"exec", "-i", c.ID}, inner...)...))

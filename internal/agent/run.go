@@ -118,6 +118,7 @@ type Config struct {
 type Agent struct {
 	dir    string
 	log    *slog.Logger
+	paths  hostPaths
 	proxy  *proxyManager
 	sites  *sitesManager
 	sftp   *sftpManager
@@ -182,6 +183,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	}
 	a := &Agent{
 		dir: cfg.DataDir, log: log, id: id,
+		paths:           newHostPaths(cfg),
 		sites:           sites,
 		sftp:            sftp,
 		dns:             newDNSManager(cfg, log.With("subsystem", "dns")),
@@ -352,7 +354,7 @@ func (a *Agent) session(ctx context.Context, url string) (connected bool, err er
 	a.link.set(true)
 	defer a.link.set(false)
 
-	peer := agentproto.NewPeer(resp.Body, pw, nil, a.handle)
+	peer := agentproto.NewPeer(resp.Body, pw, nil, a.handlePublic)
 	runErr := make(chan error, 1)
 	go func() { runErr <- peer.Run(ctx) }()
 	a.log.Info("connected to panel", "panel", url, "server_id", a.identity().ServerID)
@@ -382,6 +384,12 @@ func (a *Agent) session(ctx context.Context, url string) (connected bool, err er
 	go a.watch.report(ctx, peer)
 
 	return true, <-runErr
+}
+
+// handlePublic answers the panel: host directories never leave in an error.
+func (a *Agent) handlePublic(ctx context.Context, typ string, payload json.RawMessage) (any, error) {
+	resp, err := a.handle(ctx, typ, payload)
+	return resp, a.paths.scrub(err)
 }
 
 func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage) (any, error) {
