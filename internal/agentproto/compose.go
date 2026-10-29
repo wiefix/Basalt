@@ -63,6 +63,61 @@ type ServiceSpec struct {
 	// HostPorts are published on all of the host's addresses. Only the
 	// mail server gets them (AppSpec.Mail), and only for mail ports.
 	HostPorts []HostPort `json:"host_ports,omitempty"`
+	// Build, for a compose app from git (AppSpec.Git), builds Image from
+	// the repository instead of pulling it.
+	Build *ServiceBuild `json:"build,omitempty"`
+}
+
+// ServiceBuild builds a service's image from the app's repository.
+type ServiceBuild struct {
+	Context    string `json:"context"`    // directory in the repository
+	Dockerfile string `json:"dockerfile"` // path in the repository
+	Target     string `json:"target,omitempty"`
+	// Args are build arguments. Unlike AppSpec.Git.BuildEnv they are
+	// visible in the image's history, as with docker compose.
+	Args    map[string]string `json:"args,omitempty"`
+	NoCache bool              `json:"no_cache,omitempty"`
+	Pull    bool              `json:"pull,omitempty"`
+	// ReuseImage is the image an earlier deployment built for the
+	// service from the same commit; when it is still on the host it is
+	// used instead of building (rollbacks).
+	ReuseImage string `json:"reuse_image,omitempty"`
+}
+
+// MaxBuildArgs is how many build arguments a service may have.
+const MaxBuildArgs = 50
+
+var buildTargetRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+
+// Validate checks a service build.
+func (b *ServiceBuild) Validate() error {
+	if err := ValidateRepoPath(b.Context, true); err != nil {
+		return fmt.Errorf("build context: %w", err)
+	}
+	if err := ValidateRepoPath(b.Dockerfile, false); err != nil {
+		return fmt.Errorf("dockerfile: %w", err)
+	}
+	if b.Target != "" && !buildTargetRE.MatchString(b.Target) {
+		return fmt.Errorf("invalid build target %q", b.Target)
+	}
+	if len(b.Args) > MaxBuildArgs {
+		return fmt.Errorf("at most %d build arguments", MaxBuildArgs)
+	}
+	for k, v := range b.Args {
+		// The docker command reads them from its environment: names it
+		// reads itself are refused (BUILDKIT_SYNTAX would change the
+		// frontend that builds the image).
+		if err := ValidBuildEnvName(k); err != nil {
+			return fmt.Errorf("build argument: %w", err)
+		}
+		if len(v) > MaxEnvValueSize || strings.ContainsRune(v, 0) {
+			return fmt.Errorf("invalid value of build argument %s", k)
+		}
+	}
+	if b.ReuseImage != "" && !docker.ValidRef(b.ReuseImage) {
+		return errors.New("invalid image to reuse")
+	}
+	return nil
 }
 
 // HostPort publishes container TCP port Container on the host's port Host.
@@ -241,6 +296,11 @@ func (s *ServiceSpec) Validate(volumes map[string]bool) error {
 			return fail("invalid extra_hosts entry %q", h)
 		}
 	}
+	if s.Build != nil {
+		if err := s.Build.Validate(); err != nil {
+			return fail("%v", err)
+		}
+	}
 	return nil
 }
 
@@ -268,6 +328,9 @@ func (s *AppSpec) ValidateCompose() error {
 		if err := svc.Validate(vols); err != nil {
 			return err
 		}
+		if svc.Build != nil && (s.Git == nil || s.Git.Builder != BuilderCompose) {
+			return fmt.Errorf("service %s: only a compose app from git builds images", svc.Name)
+		}
 		if len(svc.HostPorts) > 0 && (!s.Mail || len(s.Services) != 1) {
 			return fmt.Errorf("service %s: only the mail server publishes host ports", svc.Name)
 		}
@@ -294,6 +357,17 @@ func (s *AppSpec) ValidateCompose() error {
 	}
 	if a := s.RegistryAuths; len(a) > 50 {
 		return errors.New("too many registry credentials")
+	}
+	if s.Git != nil {
+		if s.Git.Builder != BuilderCompose {
+			return errors.New("a compose app from git uses the compose builder")
+		}
+		if err := s.Git.Validate(); err != nil {
+			return err
+		}
+	}
+	if err := ValidateImageRefs(s.PruneImages); err != nil {
+		return err
 	}
 	return ValidateAttach(s.AppID, s.Attach)
 }

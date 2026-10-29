@@ -63,3 +63,46 @@ func TestServiceOrder(t *testing.T) {
 		t.Fatalf("order = %s", got)
 	}
 }
+
+func TestValidateComposeBuild(t *testing.T) {
+	git := &GitSource{URL: "https://github.com/o/r", Branch: "main", Dockerfile: "Dockerfile", Context: ".",
+		Builder: BuilderCompose, ComposeFile: "compose.yaml"}
+	ok := func() AppSpec {
+		return AppSpec{AppID: 1, DeploymentID: 2, Git: git, Services: []ServiceSpec{
+			{Name: "web", Image: "basalt/app-1:web-abc", Restart: "unless-stopped", Port: 80,
+				Build: &ServiceBuild{Context: "web", Dockerfile: "web/Dockerfile", Target: "prod", Args: map[string]string{"NODE_ENV": "production"}}},
+		}}
+	}
+	s := ok()
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*AppSpec){
+		"no git":           func(s *AppSpec) { s.Git = nil },
+		"dockerfile git":   func(s *AppSpec) { g := *git; g.Builder, g.ComposeFile = "", ""; s.Git = &g },
+		"no compose file":  func(s *AppSpec) { g := *git; g.ComposeFile = ""; s.Git = &g },
+		"context escape":   func(s *AppSpec) { s.Services[0].Build.Context = "../x" },
+		"absolute file":    func(s *AppSpec) { s.Services[0].Build.Dockerfile = "/etc/passwd" },
+		"buildkit arg":     func(s *AppSpec) { s.Services[0].Build.Args = map[string]string{"BUILDKIT_SYNTAX": "x"} },
+		"bad target":       func(s *AppSpec) { s.Services[0].Build.Target = "a b" },
+		"bad reuse":        func(s *AppSpec) { s.Services[0].Build.ReuseImage = "-x" },
+		"bad prune":        func(s *AppSpec) { s.PruneImages = []ImageRef{{Ref: "-rf"}} },
+		"build image name": func(s *AppSpec) { s.Services[0].Image = "" },
+	} {
+		s := ok()
+		s.Services[0].Build = &ServiceBuild{Context: "web", Dockerfile: "web/Dockerfile"}
+		mutate(&s)
+		if err := s.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	req := ComposeFileRequest{AppID: 1, Git: git}
+	if err := req.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	g := *git
+	g.Builder = BuilderRailpack
+	if (&ComposeFileRequest{AppID: 1, Git: &g}).Validate() == nil {
+		t.Error("compose file request of a railpack app accepted")
+	}
+}

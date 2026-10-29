@@ -478,16 +478,16 @@ func (s *Server) items(ctx context.Context, t *backupTarget) ([]agentproto.Backu
 	volume := func(name string) {
 		items = append(items, agentproto.BackupItem{Kind: agentproto.ItemVolume, AppID: app.ID, Volume: name})
 	}
-	switch app.Source {
-	case store.SourceCompose:
+	switch {
+	case app.IsCompose():
 		for _, v := range app.Summary.Volumes {
 			volume(v)
 		}
-	case store.SourceMail:
+	case app.Source == store.SourceMail:
 		for _, v := range mailserver.Volumes {
 			volume(v)
 		}
-	case store.SourceDatabase:
+	case app.Source == store.SourceDatabase:
 		e, ok := dbengine.Get(app.Engine)
 		if !ok {
 			return nil, errors.New("unknown database engine")

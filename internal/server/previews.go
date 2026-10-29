@@ -36,6 +36,9 @@ func previewParent(app *store.App) error {
 	if app.Source != store.SourceGit || app.Git.SourceID == 0 || app.Git.Repo == "" {
 		return errors.New("previews need an app built from a GitHub repository through a git source")
 	}
+	if app.ComposeFromGit() {
+		return errors.New("compose apps have no previews yet")
+	}
 	if app.PreviewOf != 0 {
 		return errors.New("this app is a preview")
 	}

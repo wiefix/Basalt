@@ -501,6 +501,7 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("DELETE /api/v1/apps/{id}/links/{app}", s.requireProject(store.RoleAdmin, s.handleUnlinkApp))
 	rt.Handle("GET /api/v1/apps/{id}/compose", s.requireProject(store.RoleAdmin, s.handleGetCompose))
 	rt.Handle("PUT /api/v1/apps/{id}/compose", s.requireProject(store.RoleAdmin, s.handleSetCompose))
+	rt.Handle("POST /api/v1/apps/{id}/compose/load", s.requireProject(store.RoleAdmin, s.handleLoadCompose))
 	// Authenticated by the delivery's signature, not a session.
 	rt.HandleFunc("POST /api/v1/webhooks/apps/{id}", s.handleWebhook)
 	rt.Handle("GET /api/v1/apps/{id}/env", s.requireProject(store.RoleAdmin, s.handleGetAppEnv))

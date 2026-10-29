@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/docker"
@@ -95,6 +96,7 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 	}
 	var composeContent []byte // compose apps: the file this deployment runs
 	var warnings []string
+	fetchCompose := false // a git app's compose file is to be read first
 	switch app.Source {
 	case store.SourceCompose:
 		var pinned map[string]string
@@ -107,9 +109,11 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 			return nil, fmt.Errorf("decrypt compose file: %w", err)
 		}
 		spec = agentproto.AppSpec{AppID: app.ID}
-		if warnings, err = s.composeSpec(ctx, app, composeContent, pinned, &spec); err != nil {
+		cf, err := s.composeSpec(ctx, app, composeContent, pinned, &spec)
+		if err != nil {
 			return nil, err
 		}
+		warnings = cf.project.Warnings
 		if len(app.Replicas) > 0 && len(spec.ComposeVolumes) > 0 {
 			// An earlier file (a rollback) may have had volumes.
 			return nil, &deployError{status: http.StatusUnprocessableEntity,
@@ -136,6 +140,29 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 	case store.SourceGit:
 		if spec.Git, err = s.gitSource(ctx, app); err != nil {
 			return nil, err
+		}
+		if app.ComposeFromGit() {
+			spec = agentproto.AppSpec{AppID: app.ID, Git: spec.Git}
+			spec.Git.Commit = o.commit
+			if prev == nil {
+				// The file is read from the repository first (fetchCompose).
+				fetchCompose = true
+				break
+			}
+			if composeContent, err = s.box.Open(prev.ComposeSealed, deploymentComposeAD(prev.ID)); err != nil {
+				return nil, &deployError{status: http.StatusUnprocessableEntity, msg: "this deployment has no recorded compose file", cause: err}
+			}
+			spec.Git.Commit = prev.CommitSHA
+			cf, err := s.composeSpec(ctx, app, composeContent, prev.Digests, &spec)
+			if err != nil {
+				return nil, err
+			}
+			warnings = cf.project.Warnings
+			if len(app.Replicas) > 0 && len(spec.ComposeVolumes) > 0 {
+				return nil, &deployError{status: http.StatusUnprocessableEntity,
+					msg: "the app runs on several servers: this compose file keeps data in volumes (remove the replicas first)"}
+			}
+			break
 		}
 		// Each build gets its own tag, so older images stay usable for rollbacks.
 		var b [5]byte
@@ -165,8 +192,10 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		}
 	}
 
-	if err := s.checkProjectResources(ctx, app, &spec); err != nil {
-		return nil, err
+	if !fetchCompose {
+		if err := s.checkProjectResources(ctx, app, &spec); err != nil {
+			return nil, err
+		}
 	}
 	dep, err := s.db.CreateDeployment(ctx, app.ID, spec.Image, o.actorID)
 	if errors.Is(err, store.ErrDeployInProgress) {
@@ -205,7 +234,7 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 	live.append(notes)
 	stop := s.trackDeployment(dep.ID)
 	go s.runDeployment(targets, dep.ID, spec, live, stop, deploymentExtras{
-		commitMessage: keepMessage, compose: composeContent, notes: notes, projectID: project})
+		commitMessage: keepMessage, compose: composeContent, notes: notes, projectID: project, fetchCompose: fetchCompose})
 	return dep, nil
 }
 
@@ -255,6 +284,9 @@ type deploymentExtras struct {
 	compose       []byte // the compose file deployed, kept for rollbacks
 	notes         string // shown before the agent's log
 	projectID     int64  // of the app, for the audit log (0: none)
+	// fetchCompose: the compose file of a git app is read from its
+	// repository before the deployment starts (fetchCompose).
+	fetchCompose bool
 }
 
 // gitSource prepares what the agent needs to build a git app: the
@@ -262,7 +294,7 @@ type deploymentExtras struct {
 // private base images.
 func (s *Server) gitSource(ctx context.Context, app *store.App) (*agentproto.GitSource, error) {
 	g := &agentproto.GitSource{URL: app.Git.URL, Branch: app.Git.Branch, Dockerfile: app.Git.Dockerfile, Context: app.Git.Context,
-		Builder: app.Git.Builder}
+		Builder: app.Git.Builder, ComposeFile: app.Git.ComposeFile}
 	if app.Git.SourceID != 0 && !agentproto.IsSSHGitURL(g.URL) {
 		// A token for this build only: it reads this repository and
 		// expires within the hour.
@@ -306,6 +338,51 @@ func (s *Server) gitSource(ctx context.Context, app *store.App) (*agentproto.Git
 	return g, nil
 }
 
+// fetchCompose reads the compose file of a git app from its repository,
+// at the commit asked for or the head of its branch (on the app's server,
+// where the deployment starts), and completes spec with it: the services,
+// with the commit they are built from. The file becomes the app's (its
+// Compose tab shows what the repository has, even if the deployment fails)
+// and the deployment's.
+func (s *Server) fetchCompose(ctx context.Context, spec *agentproto.AppSpec, x *deploymentExtras, live *liveLog) error {
+	note := func(format string, a ...any) {
+		line := time.Now().UTC().Format("15:04:05") + " " + fmt.Sprintf(format, a...) + "\n"
+		live.append(line)
+		x.notes += line
+	}
+	app, err := s.db.AppByID(ctx, spec.AppID)
+	if err != nil {
+		return fmt.Errorf("load app: %w", err)
+	}
+	g := spec.Git
+	at := g.Branch
+	if g.Commit != "" {
+		at = g.Commit
+	}
+	note("Reading %s at %s", g.ComposeFile, at)
+	resp, err := s.readComposeFile(ctx, app, g)
+	if err != nil {
+		return err
+	}
+	g.Commit = resp.Commit
+	x.commitMessage = resp.CommitMessage
+	cf, err := s.composeSpec(ctx, app, []byte(resp.Compose), nil, spec)
+	if err != nil {
+		return err
+	}
+	for _, w := range cf.project.Warnings {
+		note("Warning: %s", w)
+	}
+	if err := s.checkComposeFile(ctx, app, cf); err != nil {
+		return err
+	}
+	if err := s.saveCompose(ctx, app, cf); err != nil {
+		return fmt.Errorf("store compose file: %w", err)
+	}
+	x.compose = []byte(resp.Compose)
+	return s.checkProjectResources(ctx, app, spec)
+}
+
 // deployTarget is a server a deployment runs on; name is set when the app
 // runs on several (it heads that server's part of the log).
 type deployTarget struct {
@@ -334,12 +411,23 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 	// Apps built through a git source show the deployment on the commit
 	// (commitStatus finds out whether the app's repository is on one).
 	statuses := &commitStatuses{s: s, appID: spec.AppID, on: spec.Git != nil}
+	var resp agentproto.AppDeployResponse
+	var prepErr error
+	if x.fetchCompose {
+		prepErr = s.fetchCompose(ctx, &spec, &x, live)
+	}
 	if spec.Git != nil {
 		statuses.set(spec.Git.Commit, "pending", fmt.Sprintf("Deploying (#%d)", depID))
 	}
+	if prepErr != nil {
+		resp.Error, resp.Commit = prepErr.Error(), spec.Git.Commit
+		line := time.Now().UTC().Format("15:04:05") + " Deployment failed: " + resp.Error + "\n"
+		live.append(line)
+		x.notes += line
+		targets = nil
+	}
 	// One server after the other: the first that fails stops the rest, so
 	// they keep the previous version rather than a half-tested new one.
-	var resp agentproto.AppDeployResponse
 	var log strings.Builder
 	for i, t := range targets {
 		if i > 0 && stop.stopped() {

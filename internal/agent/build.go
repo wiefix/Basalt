@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -9,9 +10,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -42,148 +46,351 @@ func (m *appsManager) buildImage(ctx context.Context, dc *docker.Client, spec ag
 		}
 		lg.printf("The image of commit %s was removed; building it again", short(g.Commit))
 	}
-	dockerBin, err := exec.LookPath("docker")
+	dockerBin, err := dockerCLI()
 	if err != nil {
-		return "", "", errors.New("building needs the docker command line tool on this server (apt install docker.io docker-buildx)")
+		return "", "", err
 	}
-	gitBin, err := exec.LookPath("git")
+	release, err := m.buildSlot(ctx, lg)
 	if err != nil {
-		return "", "", errors.New("building needs git on this server (apt install git)")
+		return "", "", err
 	}
-	select {
-	case m.builds <- struct{}{}:
-		defer func() { <-m.builds }()
-	default:
-		lg.printf("Waiting for another build on this server to finish")
-		select {
-		case m.builds <- struct{}{}:
-			defer func() { <-m.builds }()
-		case <-ctx.Done():
-			return "", "", ctx.Err()
+	defer release()
+	co, err := m.checkout(ctx, spec, fmt.Sprintf("d%d", spec.DeploymentID), lg)
+	if err != nil {
+		return "", "", err
+	}
+	defer co.close()
+	if err := co.contextDir(g.Context); err != nil {
+		return "", "", err
+	}
+	cfg, err := writeDockerConfig(filepath.Join(co.work, "docker"), g.RegistryAuths)
+	if err != nil {
+		return "", "", err
+	}
+	if g.Builder == agentproto.BuilderRailpack {
+		if err := m.railpackBuild(ctx, dc, spec, lg, dockerBin, filepath.Join(co.src, g.Context), co.work, co.home, cfg, co.commit); err != nil {
+			return "", "", err
+		}
+		lg.printf("Image built")
+		return co.commit, co.subject, nil
+	}
+	dockerfile, err := readLimited(co.root, g.Dockerfile, maxDockerfile)
+	if err != nil {
+		return "", "", fmt.Errorf("Dockerfile %s: %w", g.Dockerfile, err)
+	}
+	lg.printf("Building %s from %s", spec.Image, g.Dockerfile)
+	err = m.dockerBuild(ctx, co, dockerBin, cfg, dockerBuildOptions{
+		image: spec.Image, dockerfile: dockerfile, context: g.Context, secrets: g.BuildEnv,
+		labels: []string{labelApp + "=" + strconv.FormatInt(spec.AppID, 10), "basalt.commit=" + co.commit},
+	}, lg)
+	if err != nil {
+		return "", "", err
+	}
+	lg.printf("Image built")
+	return co.commit, co.subject, nil
+}
+
+// buildServices builds the images of the services of a compose app from
+// git that build theirs (all from one checkout of spec.Git.Commit), reusing
+// the image an earlier deployment built when it is still on the host. It
+// returns the commit built (empty when nothing was) and its subject line.
+func (m *appsManager) buildServices(ctx context.Context, dc *docker.Client, spec agentproto.AppSpec, lg *deployLog) (commit, subject string, err error) {
+	g := spec.Git
+	var todo []agentproto.ServiceSpec
+	for _, svc := range spec.Services {
+		b := svc.Build
+		if b == nil {
+			continue
+		}
+		if b.ReuseImage != "" {
+			if _, err := dc.ImageInspect(ctx, b.ReuseImage); err == nil {
+				lg.printf("Service %s: reusing the image built from commit %s", svc.Name, short(g.Commit))
+				if err := dc.Tag(ctx, b.ReuseImage, svc.Image); err != nil {
+					return "", "", err
+				}
+				continue
+			}
+		}
+		todo = append(todo, svc)
+	}
+	if len(todo) == 0 {
+		return g.Commit, "", nil
+	}
+	dockerBin, err := dockerCLI()
+	if err != nil {
+		return "", "", err
+	}
+	release, err := m.buildSlot(ctx, lg)
+	if err != nil {
+		return "", "", err
+	}
+	defer release()
+	co, err := m.checkout(ctx, spec, fmt.Sprintf("d%d", spec.DeploymentID), lg)
+	if err != nil {
+		return "", "", err
+	}
+	defer co.close()
+	cfg, err := writeDockerConfig(filepath.Join(co.work, "docker"), g.RegistryAuths)
+	if err != nil {
+		return "", "", err
+	}
+	for _, svc := range todo {
+		b := svc.Build
+		if err := co.contextDir(b.Context); err != nil {
+			return "", "", fmt.Errorf("service %s: %w", svc.Name, err)
+		}
+		dockerfile, err := readLimited(co.root, b.Dockerfile, maxDockerfile)
+		if err != nil {
+			return "", "", fmt.Errorf("service %s: Dockerfile %s: %w", svc.Name, b.Dockerfile, err)
+		}
+		for k := range b.Args {
+			if _, ok := g.BuildEnv[k]; ok {
+				return "", "", fmt.Errorf("service %s: %s is both a build argument and a variable at build time", svc.Name, k)
+			}
+		}
+		lg.printf("Building service %s from %s", svc.Name, b.Dockerfile)
+		// No commit label: a service whose build did not change keeps its
+		// image ID, and so its container.
+		err = m.dockerBuild(ctx, co, dockerBin, cfg, dockerBuildOptions{
+			image: svc.Image, dockerfile: dockerfile, context: b.Context, target: b.Target, args: b.Args,
+			noCache: b.NoCache, pull: b.Pull, secrets: g.BuildEnv,
+			labels: []string{labelApp + "=" + strconv.FormatInt(spec.AppID, 10)},
+		}, lg)
+		if err != nil {
+			return "", "", fmt.Errorf("service %s: %w", svc.Name, err)
 		}
 	}
+	lg.printf("Images built")
+	return co.commit, co.subject, nil
+}
 
-	work := filepath.Join(m.dataDir, "builds", fmt.Sprintf("app-%d-d%d", spec.AppID, spec.DeploymentID))
+// ComposeFile reads the compose file of a git app at the head of its
+// branch (or at the commit asked for).
+func (m *appsManager) ComposeFile(ctx context.Context, req agentproto.ComposeFileRequest) (agentproto.ComposeFileResponse, error) {
+	if err := req.Validate(); err != nil {
+		return agentproto.ComposeFileResponse{}, err
+	}
+	var name [6]byte
+	rand.Read(name[:])
+	var lg deployLog
+	co, err := m.checkout(ctx, agentproto.AppSpec{AppID: req.AppID, Git: req.Git}, "f"+hex.EncodeToString(name[:]), &lg)
+	if err != nil {
+		return agentproto.ComposeFileResponse{}, err
+	}
+	defer co.close()
+	content, err := readLimited(co.root, req.Git.ComposeFile, agentproto.MaxComposeFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		err = fmt.Errorf("%s is not in the repository", req.Git.ComposeFile)
+		for _, alt := range []string{"compose.yaml", "compose.yml", "docker-compose.yaml", "docker-compose.yml"} {
+			if fi, e := co.root.Lstat(path.Join(path.Dir(req.Git.ComposeFile), alt)); e == nil && fi.Mode().IsRegular() {
+				err = fmt.Errorf("%s is not in the repository (it has %s: set that as the compose file)", req.Git.ComposeFile,
+					path.Join(path.Dir(req.Git.ComposeFile), alt))
+				break
+			}
+		}
+	} else if err != nil {
+		err = fmt.Errorf("compose file %s: %w", req.Git.ComposeFile, err)
+	}
+	if err != nil {
+		return agentproto.ComposeFileResponse{}, err
+	}
+	return agentproto.ComposeFileResponse{Commit: co.commit, CommitMessage: co.subject, Compose: content}, nil
+}
+
+func dockerCLI() (string, error) {
+	bin, err := exec.LookPath("docker")
+	if err != nil {
+		return "", errors.New("building needs the docker command line tool on this server (apt install docker.io docker-buildx)")
+	}
+	return bin, nil
+}
+
+// buildSlot waits for a turn to build: builds are heavy, only a few run at
+// once on a host.
+func (m *appsManager) buildSlot(ctx context.Context, lg *deployLog) (release func(), err error) {
+	release = func() { <-m.builds }
+	select {
+	case m.builds <- struct{}{}:
+		return release, nil
+	default:
+	}
+	lg.printf("Waiting for another build on this server to finish")
+	select {
+	case m.builds <- struct{}{}:
+		return release, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// checkout is a commit of an app's repository fetched into a work
+// directory of its own, which close removes.
+type checkout struct {
+	work, src, home string
+	env             []string // git's
+	root            *os.Root // src
+	commit, subject string
+}
+
+func (c *checkout) close() {
+	if c.root != nil {
+		c.root.Close()
+	}
+	os.RemoveAll(c.work)
+}
+
+// contextDir checks a build context directory of the repository: paths
+// from the repository are resolved inside it only, so a symlink in it
+// cannot make the build read files of this host.
+func (c *checkout) contextDir(dir string) error {
+	if fi, err := c.root.Stat(dir); err != nil || !fi.IsDir() {
+		return fmt.Errorf("build context %s is not a directory in the repository", dir)
+	}
+	if fi, err := c.root.Lstat(dir); err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("build context %s must not be a symlink", dir)
+	}
+	return nil
+}
+
+// checkout fetches spec.Git (its Commit, or the head of its branch) with
+// its submodules into <agent-data>/builds/app-<id>-<name>.
+func (m *appsManager) checkout(ctx context.Context, spec agentproto.AppSpec, name string, lg *deployLog) (_ *checkout, err error) {
+	g := spec.Git
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		return nil, errors.New("building needs git on this server (apt install git)")
+	}
+	work := filepath.Join(m.dataDir, "builds", fmt.Sprintf("app-%d-%s", spec.AppID, name))
 	os.RemoveAll(work)
 	if err := os.MkdirAll(work, 0o700); err != nil {
-		return "", "", err
+		return nil, err
 	}
-	defer os.RemoveAll(work)
-	src := filepath.Join(work, "src")
-	home := filepath.Join(work, "home")
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		return "", "", err
+	co := &checkout{work: work, src: filepath.Join(work, "src"), home: filepath.Join(work, "home")}
+	defer func() {
+		if err != nil {
+			co.close()
+		}
+	}()
+	if err := os.MkdirAll(co.home, 0o700); err != nil {
+		return nil, err
 	}
-
-	env, err := m.gitEnv(spec, work, home)
-	if err != nil {
-		return "", "", err
+	if co.env, err = m.gitEnv(spec, work, co.home); err != nil {
+		return nil, err
 	}
-	run := func(name string, args ...string) (string, error) {
-		cmd := exec.CommandContext(ctx, name, args...)
-		cmd.Env, cmd.Dir, cmd.WaitDelay = env, work, 5*time.Second
+	run := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(ctx, gitBin, args...)
+		cmd.Env, cmd.Dir, cmd.WaitDelay = co.env, work, 5*time.Second
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("%s: %s", strings.TrimSpace(lastLines(string(out), 3)), err)
 		}
 		return strings.TrimSpace(string(out)), nil
 	}
+	src := co.src
 
 	target := g.Branch
 	if g.Commit != "" {
 		target = g.Commit
 	}
 	lg.printf("Fetching %s from %s", target, g.URL)
-	if _, err := run(gitBin, "init", "-q", src); err != nil {
-		return "", "", fmt.Errorf("git init: %w", err)
+	if _, err := run("init", "-q", src); err != nil {
+		return nil, fmt.Errorf("git init: %w", err)
 	}
-	if _, err := run(gitBin, "-C", src, "remote", "add", "--", "origin", g.URL); err != nil {
-		return "", "", fmt.Errorf("git remote: %w", err)
+	if _, err := run("-C", src, "remote", "add", "--", "origin", g.URL); err != nil {
+		return nil, fmt.Errorf("git remote: %w", err)
 	}
-	if _, err := run(gitBin, "-C", src, "fetch", "-q", "--depth", "1", "--no-tags", "origin", target); err != nil {
+	if _, err := run("-C", src, "fetch", "-q", "--depth", "1", "--no-tags", "origin", target); err != nil {
 		if g.Commit == "" {
-			return "", "", fmt.Errorf("fetch %s: %w%s", target, err, accessHint(g))
+			return nil, fmt.Errorf("fetch %s: %w%s", target, err, accessHint(g))
 		}
 		// Some servers refuse fetching a commit by hash: fetch the branch.
-		if _, err := run(gitBin, "-C", src, "fetch", "-q", "--no-tags", "origin", g.Branch); err != nil {
-			return "", "", fmt.Errorf("fetch %s: %w%s", g.Branch, err, accessHint(g))
+		if _, err := run("-C", src, "fetch", "-q", "--no-tags", "origin", g.Branch); err != nil {
+			return nil, fmt.Errorf("fetch %s: %w%s", g.Branch, err, accessHint(g))
 		}
 		target = g.Commit
 	} else {
 		target = "FETCH_HEAD"
 	}
-	if _, err := run(gitBin, "-C", src, "checkout", "-q", "--detach", target); err != nil {
-		return "", "", fmt.Errorf("checkout: %w", err)
+	if _, err := run("-C", src, "checkout", "-q", "--detach", target); err != nil {
+		return nil, fmt.Errorf("checkout: %w", err)
 	}
 	// Submodules, with the same transports (https, ssh) and credentials:
 	// the deploy key, or a token that reaches the repository itself only.
 	if fi, err := os.Lstat(filepath.Join(src, ".gitmodules")); err == nil && fi.Mode().IsRegular() {
 		lg.printf("Fetching submodules")
-		if _, err := run(gitBin, "-C", src, "-c", "protocol.file.allow=never", "submodule", "update", "--init", "--recursive", "--depth", "1"); err != nil {
-			return "", "", fmt.Errorf("submodules: %w", err)
+		if _, err := run("-C", src, "-c", "protocol.file.allow=never", "submodule", "update", "--init", "--recursive", "--depth", "1"); err != nil {
+			return nil, fmt.Errorf("submodules: %w", err)
 		}
 	}
-	if commit, err = run(gitBin, "-C", src, "rev-parse", "HEAD"); err != nil {
-		return "", "", err
+	if co.commit, err = run("-C", src, "rev-parse", "HEAD"); err != nil {
+		return nil, err
 	}
-	subject, _ = run(gitBin, "-C", src, "log", "-1", "--format=%s")
-	subject = truncateRunes(subject, 200)
-	lg.printf("Commit %s %s", short(commit), subject)
+	co.subject, _ = run("-C", src, "log", "-1", "--format=%s")
+	co.subject = truncateRunes(co.subject, 200)
+	lg.printf("Commit %s %s", short(co.commit), co.subject)
+	if co.root, err = os.OpenRoot(src); err != nil {
+		return nil, err
+	}
+	return co, nil
+}
 
-	// Paths from the repository are resolved inside it only: a symlink in
-	// the repository must not make the build read files of this host.
-	root, err := os.OpenRoot(src)
-	if err != nil {
-		return "", "", err
-	}
-	defer root.Close()
-	if fi, err := root.Stat(g.Context); err != nil || !fi.IsDir() {
-		return "", "", fmt.Errorf("build context %s is not a directory in the repository", g.Context)
-	}
-	if fi, err := root.Lstat(g.Context); err != nil || fi.Mode()&os.ModeSymlink != 0 {
-		return "", "", fmt.Errorf("build context %s must not be a symlink", g.Context)
-	}
-	cfg, err := writeDockerConfig(filepath.Join(work, "docker"), g.RegistryAuths)
-	if err != nil {
-		return "", "", err
-	}
-	if g.Builder == agentproto.BuilderRailpack {
-		if err := m.railpackBuild(ctx, dc, spec, lg, dockerBin, filepath.Join(src, g.Context), work, home, cfg, commit); err != nil {
-			return "", "", err
-		}
-		lg.printf("Image built")
-		return commit, subject, nil
-	}
-	dockerfile, err := readLimited(root, g.Dockerfile, maxDockerfile)
-	if err != nil {
-		return "", "", fmt.Errorf("Dockerfile %s: %w", g.Dockerfile, err)
-	}
+// dockerBuildOptions describe one docker build from a checkout.
+type dockerBuildOptions struct {
+	image      string
+	dockerfile string // its content
+	context    string // directory in the repository
+	target     string
+	args       map[string]string // build arguments
+	secrets    map[string]string // BuildKit secrets
+	labels     []string          // key=value
+	noCache    bool
+	pull       bool
+}
 
-	lg.printf("Building %s from %s", spec.Image, g.Dockerfile)
-	secretArgs, secretEnv, _ := buildSecrets(g.BuildEnv)
-	args := append([]string{"--host", "unix://" + m.socket, "build",
-		"--progress=plain", "--file", "-", "--tag", spec.Image,
-		"--label", labelApp + "=" + strconv.FormatInt(spec.AppID, 10), "--label", "basalt.commit=" + commit}, secretArgs...)
-	cmd := exec.CommandContext(ctx, dockerBin, append(args, filepath.Join(src, g.Context))...)
-	cmd.Env = append([]string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DOCKER_CONFIG=" + cfg,
-		"DOCKER_BUILDKIT=1", "BUILDX_NO_DEFAULT_ATTESTATIONS=1"}, secretEnv...)
-	cmd.Dir, cmd.WaitDelay = work, 10*time.Second
-	cmd.Stdin = strings.NewReader(dockerfile)
+// dockerBuild runs docker build with the output in the deployment log.
+// Build arguments and secrets are passed by name, their values through
+// the docker command's environment: never on its command line, which every
+// user of the host may read.
+func (m *appsManager) dockerBuild(ctx context.Context, co *checkout, dockerBin, cfg string, o dockerBuildOptions, lg *deployLog) error {
+	secretArgs, secretEnv, _ := buildSecrets(o.secrets)
+	args := []string{"--host", "unix://" + m.socket, "build", "--progress=plain", "--file", "-", "--tag", o.image}
+	for _, l := range o.labels {
+		args = append(args, "--label", l)
+	}
+	if o.target != "" {
+		args = append(args, "--target", o.target)
+	}
+	if o.noCache {
+		args = append(args, "--no-cache")
+	}
+	if o.pull {
+		args = append(args, "--pull")
+	}
+	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + co.home, "DOCKER_CONFIG=" + cfg,
+		"DOCKER_BUILDKIT=1", "BUILDX_NO_DEFAULT_ATTESTATIONS=1"}
+	for _, k := range slices.Sorted(maps.Keys(o.args)) {
+		args = append(args, "--build-arg", k)
+		env = append(env, k+"="+o.args[k])
+	}
+	args = append(append(args, secretArgs...), filepath.Join(co.src, o.context))
+	cmd := exec.CommandContext(ctx, dockerBin, args...)
+	cmd.Env = append(env, secretEnv...)
+	cmd.Dir, cmd.WaitDelay = co.work, 10*time.Second
+	cmd.Stdin = strings.NewReader(o.dockerfile)
 	out := &buildOutput{lg: lg}
 	cmd.Stdout, cmd.Stderr = out, out
-	err = cmd.Run()
+	err := cmd.Run()
 	out.flush()
 	if err != nil {
 		if ctx.Err() != nil {
-			return "", "", ctx.Err()
+			return ctx.Err()
 		}
 		if lg.full() {
 			lg.forceWrite("Last lines of the build:\n" + strings.Join(out.tail, "\n") + "\n")
 		}
-		return "", "", fmt.Errorf("the build failed (%v)", err)
+		return fmt.Errorf("the build failed (%v)", err)
 	}
-	lg.printf("Image built")
-	return commit, subject, nil
+	return nil
 }
 
 // gitEnv is the environment git runs with: only https and ssh transports,

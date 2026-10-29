@@ -21,8 +21,11 @@ type GitSource struct {
 	Dockerfile string `json:"dockerfile"` // path in the repository
 	Context    string `json:"context"`    // build context directory in the repository
 	// Builder: "" builds Dockerfile; BuilderRailpack works out how to build
-	// the context (Node, Python, Go, PHP…) without one.
-	Builder string `json:"builder,omitempty"`
+	// the context (Node, Python, Go, PHP…) without one; BuilderCompose runs
+	// ComposeFile, building the services it builds (ServiceSpec.Build).
+	Builder     string `json:"builder,omitempty"`
+	ComposeFile string `json:"compose_file,omitempty"` // path in the repository
+
 	// BuildEnv are variables the build gets as secrets (Railpack passes them
 	// to its steps; a Dockerfile reads them with
 	// RUN --mount=type=secret,id=NAME,env=NAME): never in the image.
@@ -120,8 +123,17 @@ func (g *GitSource) Validate() error {
 	if len(g.BuildEnv) > MaxBuildEnv || total > 256<<10 {
 		return errors.New("too many build variables")
 	}
-	if g.Builder != BuilderDockerfile && g.Builder != BuilderRailpack {
-		return errors.New(`builder must be "" (Dockerfile) or "railpack"`)
+	switch g.Builder {
+	case BuilderDockerfile, BuilderRailpack:
+		if g.ComposeFile != "" {
+			return errors.New("a compose file is only for the compose builder")
+		}
+	case BuilderCompose:
+		if err := ValidateRepoPath(g.ComposeFile, false); err != nil {
+			return err
+		}
+	default:
+		return errors.New(`builder must be "" (Dockerfile), "railpack" or "compose"`)
 	}
 	if err := ValidateRepoPath(g.Dockerfile, false); err != nil {
 		return err
@@ -142,7 +154,32 @@ func (g *GitSource) Validate() error {
 const (
 	BuilderDockerfile = "" // the repository's Dockerfile
 	BuilderRailpack   = "railpack"
+	BuilderCompose    = "compose"
 )
+
+// MaxComposeFile bounds a compose file.
+const MaxComposeFile = 256 << 10
+
+// ComposeFileRequest asks the agent for the compose file of a git app at
+// the head of its branch (or at Git.Commit).
+type ComposeFileRequest struct {
+	AppID int64      `json:"app_id"`
+	Git   *GitSource `json:"git"`
+}
+
+type ComposeFileResponse struct {
+	Commit        string `json:"commit"`
+	CommitMessage string `json:"commit_message,omitempty"`
+	Compose       string `json:"compose"`
+}
+
+// Validate checks a request for a compose file.
+func (r *ComposeFileRequest) Validate() error {
+	if r.AppID <= 0 || r.Git == nil || r.Git.Builder != BuilderCompose {
+		return errors.New("invalid compose file request")
+	}
+	return r.Git.Validate()
+}
 
 // Railpack: the BuildKit frontend that builds Railpack's plans, of the
 // version the agents' railpack command is (the installer installs it), and

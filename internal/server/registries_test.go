@@ -2,6 +2,7 @@ package server
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/wiefix/basalt/internal/agentproto"
@@ -57,4 +58,26 @@ func repeat(s string) string {
 		out += s
 	}
 	return out
+}
+
+func TestBuiltImagesToPrune(t *testing.T) {
+	succeeded := []map[string]string{ // newest first
+		{"web": "basalt/app-7:web-c", "db": "postgres@sha256:" + strings.Repeat("c", 64)},
+		{"web": "basalt/app-7:web-b", "worker": "basalt/app-7:worker-b"},
+		{"web": "basalt/app-7:web-a", "worker": "basalt/app-7:worker-a"},
+		{"web": "basalt/app-7:web-0", "other": "basalt/app-8:x-0"},
+	}
+	// A rollback to the oldest deployment reuses its image.
+	services := []agentproto.ServiceSpec{{Name: "web", Build: &agentproto.ServiceBuild{ReuseImage: "basalt/app-7:web-0"}}}
+	got := builtImagesToPrune(7, succeeded, services, 3)
+	var refs []string
+	for _, r := range got {
+		refs = append(refs, r.Ref)
+	}
+	if strings.Join(refs, ",") != "basalt/app-7:web-a,basalt/app-7:worker-a" {
+		t.Fatalf("pruned %v", refs)
+	}
+	if got := builtImagesToPrune(7, succeeded[:1], nil, 3); len(got) != 0 {
+		t.Fatalf("pruned %v", got)
+	}
 }

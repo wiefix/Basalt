@@ -115,7 +115,10 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
   const [repoURL, setRepoURL] = useState("");
   const [branch, setBranch] = useState("main");
   const [dockerfile, setDockerfile] = useState("Dockerfile");
-  const [builder, setBuilder] = useState<"" | "railpack">("");
+  const [builder, setBuilder] = useState<"" | "railpack" | "compose">("");
+  const [composeFile, setComposeFile] = useState("compose.yaml");
+  // Apps running a compose file: theirs, or their repository's.
+  const composeLike = source === "compose" || (source === "git" && builder === "compose");
   const [port, setPort] = useState("80");
   const [warnings, setWarnings] = useState<string[] | null>(null);
   const [createdId, setCreatedId] = useState<number | null>(null);
@@ -134,6 +137,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
     queryFn: () => api.gitSourceBranches(gh, repo),
     enabled: source === "git" && gh > 0 && repo !== "",
   });
+  const gitCompose = builder === "compose" ? { compose_file: composeFile.trim() } : {};
   const create = useMutation({
     mutationFn: async () => {
       const r = await api.createApp({
@@ -145,12 +149,12 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
           source !== "git"
             ? undefined
             : gh > 0
-              ? { url: "", source_id: gh, repo, branch: branch.trim(), dockerfile: dockerfile.trim(), builder }
-              : { url: repoURL.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), builder },
+              ? { url: "", source_id: gh, repo, branch: branch.trim(), dockerfile: dockerfile.trim(), builder, ...gitCompose }
+              : { url: repoURL.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), builder, ...gitCompose },
         compose: source === "compose" ? compose : undefined,
-        service: source === "compose" ? service.trim() : undefined,
+        service: composeLike ? service.trim() : undefined,
         // A compose app's port defaults to the one its file mentions for the service.
-        port: source === "compose" && !service.trim() ? 0 : Number(port) || 0,
+        port: composeLike && !service.trim() ? 0 : Number(port) || 0,
         domains: domains.split(/[\s,]+/).filter(Boolean),
         tls,
         volumes: [],
@@ -159,8 +163,9 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
         project_id: projectId,
       });
       const waitForKey = source === "git" && gh === 0 && isSSH(repoURL);
-      // Compose files usually need variables first: they are deployed from the app page.
-      const deployNow = !waitForKey && source !== "compose";
+      // Compose files usually need variables first: they are deployed from
+      // the app page (a repository's is read there first).
+      const deployNow = !waitForKey && !composeLike;
       if (deployNow) await api.deployApp(r.app.id).catch(() => {});
       return { ...r, waitForKey };
     },
@@ -172,7 +177,15 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
         setCreatedId(r.app.id);
         return;
       }
-      navigate(r.waitForKey ? `/apps/${r.app.id}/source` : source === "compose" ? `/apps/${r.app.id}/env` : `/apps/${r.app.id}`);
+      navigate(
+        r.waitForKey
+          ? `/apps/${r.app.id}/source`
+          : source === "compose"
+            ? `/apps/${r.app.id}/env`
+            : composeLike
+              ? `/apps/${r.app.id}/compose`
+              : `/apps/${r.app.id}`,
+      );
     },
   });
 
@@ -205,14 +218,14 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
     <Modal
       title="New app"
       onClose={onClose}
-      wide={source === "compose"}
+      wide={composeLike}
       footer={
         <>
           <button className="btn" onClick={onClose}>
             Cancel
           </button>
           <button className="btn primary" form="new-app" disabled={create.isPending || withDocker.length === 0}>
-            {(source === "git" && gh === 0 && isSSH(repoURL) && repoURL) || source === "compose" ? "Create" : "Create and deploy"}
+            {(source === "git" && gh === 0 && isSSH(repoURL) && repoURL) || composeLike ? "Create" : "Create and deploy"}
           </button>
         </>
       }
@@ -270,22 +283,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
                   placeholder={"services:\n  web:\n    image: ghost:5\n    ports: [\"2368\"]\n    volumes: [content:/var/lib/ghost/content]\nvolumes:\n  content:"}
                 />
               </Field>
-              <div className="grid-2">
-                <Field label="Published service" help="Its port gets the app's domains. Empty: the first service with a port.">
-                  <input className="input mono" value={service} onChange={(e) => setService(e.target.value)} placeholder="web" />
-                </Field>
-                <Field label="Port" help="Inside the container; empty uses the one in the file.">
-                  <input
-                    className="input mono"
-                    type="number"
-                    min={0}
-                    max={65535}
-                    value={service.trim() ? port : ""}
-                    disabled={!service.trim()}
-                    onChange={(e) => setPort(e.target.value)}
-                  />
-                </Field>
-              </div>
+              <PublishedService service={service} setService={setService} port={port} setPort={setPort} />
             </>
           ) : source === "image" ? (
             <Field
@@ -382,16 +380,44 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
                     <input className="input mono" value={branch} onChange={(e) => setBranch(e.target.value)} required />
                   )}
                 </Field>
-                <Field label="Build" help={builder ? "Works out the language, versions and commands (Railpack); the app listens on $PORT." : "Path of the Dockerfile in the repository."}>
+                <Field
+                  label="Build"
+                  help={
+                    builder === "railpack"
+                      ? "Works out the language, versions and commands (Railpack); the app listens on $PORT."
+                      : builder === "compose"
+                        ? "Path of the compose file in the repository."
+                        : "Path of the Dockerfile in the repository."
+                  }
+                >
                   <div className="row">
-                    <select className="input" style={{ width: "auto" }} value={builder} onChange={(e) => setBuilder(e.target.value as "" | "railpack")}>
+                    <select
+                      className="input"
+                      style={{ width: "auto" }}
+                      value={builder}
+                      onChange={(e) => setBuilder(e.target.value as "" | "railpack" | "compose")}
+                    >
                       <option value="">Dockerfile</option>
                       <option value="railpack">Automatic</option>
+                      <option value="compose">Docker Compose</option>
                     </select>
                     {!builder && <input className="input mono" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} required />}
+                    {builder === "compose" && (
+                      <input className="input mono" value={composeFile} onChange={(e) => setComposeFile(e.target.value)} required />
+                    )}
                   </div>
                 </Field>
               </div>
+              {builder === "compose" && (
+                <>
+                  <p className="faint small" style={{ margin: 0 }}>
+                    The compose file is read from the repository on every deployment: services with <code>build:</code> are built
+                    from it on the server, the others run their images. You see its services under Compose once the app is
+                    created.
+                  </p>
+                  <PublishedService service={service} setService={setService} port={port} setPort={setPort} fromRepo />
+                </>
+              )}
               {builder === "railpack" && (() => {
                 const srv = withDocker.find((s) => s.id === Number(serverId || withDocker[0]?.id));
                 return srv && !srv.railpack ? (
@@ -407,7 +433,7 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
               })()}
             </>
           )}
-          {source !== "compose" && (
+          {!composeLike && (
             <Field label="HTTP port" help="The port the app listens on inside the container. 0 for background workers.">
               <input className="input mono" type="number" min={0} max={65535} value={port} onChange={(e) => setPort(e.target.value)} />
             </Field>
@@ -433,5 +459,48 @@ function NewAppModal({ onClose }: { onClose: () => void }) {
         </form>
       )}
     </Modal>
+  );
+}
+
+// PublishedService picks the service of a compose file the app's domains
+// point to, and its port.
+function PublishedService({
+  service,
+  setService,
+  port,
+  setPort,
+  fromRepo,
+}: {
+  service: string;
+  setService: (s: string) => void;
+  port: string;
+  setPort: (p: string) => void;
+  fromRepo?: boolean;
+}) {
+  return (
+    <div className="grid-2">
+      <Field
+        label="Published service"
+        help={
+          fromRepo
+            ? "Its port gets the app's domains. Empty: choose it later, under Compose."
+            : "Its port gets the app's domains. Empty: the first service with a port."
+        }
+      >
+        <input className="input mono" value={service} onChange={(e) => setService(e.target.value)} placeholder="web" />
+      </Field>
+      <Field label="Port" help={fromRepo ? "Inside the container." : "Inside the container; empty uses the one in the file."}>
+        <input
+          className="input mono"
+          type="number"
+          min={0}
+          max={65535}
+          value={service.trim() ? port : ""}
+          disabled={!service.trim()}
+          required={fromRepo && !!service.trim()}
+          onChange={(e) => setPort(e.target.value)}
+        />
+      </Field>
+    </div>
   );
 }

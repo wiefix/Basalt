@@ -313,9 +313,11 @@ var apiDocs = map[string]apiDoc{
 		q("tail", "number of lines"), q("service", "compose service"), q("server", "server ID")}, resp: obj("log", "")},
 	"GET /api/v1/apps/{id}/logs/stream": {summary: "Follow an app's container output", content: "stream", query: []queryParam{
 		q("tail", "lines to start with"), q("service", "compose service"), q("server", "server ID")}},
-	"GET /api/v1/apps/{id}/compose": {summary: "A compose app's file, published service and warnings",
+	"GET /api/v1/apps/{id}/compose": {summary: "A compose app's file (a git app's: the one last read from its repository), published service and warnings",
 		resp: obj("compose", "", "service", "", "port", 0, "warnings", []string{}, "error?", "")},
-	"PUT /api/v1/apps/{id}/compose":           {summary: "Replace a compose app's file", body: composeRequest{}, resp: obj("app", appView{}, "warnings", []string{})},
+	"PUT /api/v1/apps/{id}/compose": {summary: "Replace a compose app's file and published service (a git app's: the service only)", body: composeRequest{}, resp: obj("app", appView{}, "warnings", []string{})},
+	"POST /api/v1/apps/{id}/compose/load": {summary: "Read a git app's compose file from its repository (head of its branch) and keep it",
+		resp: obj("app", appView{}, "warnings", []string{}, "commit", "")},
 	"POST /api/v1/apps/{id}/replicas":         {summary: "Run an app on another server too", body: replicaRequest{}, resp: obj("deploying", false, "app?", appView{}, "deploy_error?", "")},
 	"DELETE /api/v1/apps/{id}/replicas/{sid}": {summary: "Stop running an app on a server", resp: obj("app?", appView{}, "cleanup_error?", "")},
 	"POST /api/v1/apps/{id}/deploy-key":       {summary: "Replace a git app's deploy key", resp: appResp},

@@ -688,6 +688,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return struct{}{}, a.updater.activate(req)
+	case agentproto.TypeComposeFile:
+		var req agentproto.ComposeFileRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.apps.ComposeFile(ctx, req)
 	case agentproto.TypeAppAttach:
 		var req agentproto.AppAttach
 		if err := json.Unmarshal(payload, &req); err != nil {

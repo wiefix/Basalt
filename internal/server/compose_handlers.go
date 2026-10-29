@@ -2,11 +2,16 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"path"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/compose"
@@ -27,9 +32,17 @@ type composeFile struct {
 
 // parseCompose validates a compose file and picks the published service:
 // the one given (at port, or the first port the file mentions for it), or
-// by default the first service that mentions a port.
-func (s *Server) parseCompose(ctx context.Context, content []byte, env map[string]string, service string, port int) (*composeFile, error) {
-	p, err := compose.Parse(ctx, content, env)
+// by default the first service that mentions a port. repoDir: the file is
+// from the app's git repository, in that directory, and its services may
+// build ("": not from a repository).
+func (s *Server) parseCompose(ctx context.Context, content []byte, env map[string]string, service string, port int, repoDir string) (*composeFile, error) {
+	var p *compose.Project
+	var err error
+	if repoDir != "" {
+		p, err = compose.ParseRepo(ctx, content, env, repoDir)
+	} else {
+		p, err = compose.Parse(ctx, content, env)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -60,8 +73,12 @@ func (cf *composeFile) summary() store.ComposeSummary {
 		sum.Volumes = []string{}
 	}
 	for _, svc := range cf.project.Services {
-		sum.Services = append(sum.Services, store.ComposeService{Name: svc.Name, Image: svc.Image,
-			Ports: cf.project.Ports[svc.Name], Job: svc.Job, MemoryMB: svc.MemoryMB, CPUs: svc.CPUs})
+		cs := store.ComposeService{Name: svc.Name, Image: svc.Image,
+			Ports: cf.project.Ports[svc.Name], Job: svc.Job, MemoryMB: svc.MemoryMB, CPUs: svc.CPUs}
+		if svc.Build != nil {
+			cs.Image, cs.Build = "", svc.Build.Dockerfile
+		}
+		sum.Services = append(sum.Services, cs)
 	}
 	return sum
 }
@@ -84,9 +101,19 @@ func (s *Server) appCompose(app *store.App) ([]byte, error) {
 	return s.box.Open(app.ComposeSealed, composeAD(app.ID))
 }
 
+// composeDir is the directory of a git app's compose file in its
+// repository ("" for apps not running one).
+func composeDir(app *store.App) string {
+	if !app.ComposeFromGit() {
+		return ""
+	}
+	return path.Dir(app.Git.ComposeFile)
+}
+
+// composeApp resolves a compose app, or a git app running a compose file.
 func (s *Server) composeApp(w http.ResponseWriter, r *http.Request) (*store.App, bool) {
 	app, ok := s.pathApp(w, r)
-	if ok && app.Source != store.SourceCompose {
+	if ok && !app.IsCompose() {
 		writeError(w, http.StatusNotFound, "this app is not a compose app")
 		return nil, false
 	}
@@ -94,10 +121,15 @@ func (s *Server) composeApp(w http.ResponseWriter, r *http.Request) (*store.App,
 }
 
 // handleGetCompose returns the compose file (admins only: it often holds
-// passwords) and what is wrong with it under the current environment.
+// passwords) and what is wrong with it under the current environment. For
+// a git app, it is the file last read from the repository ("" before).
 func (s *Server) handleGetCompose(w http.ResponseWriter, r *http.Request, p *principal) {
 	app, ok := s.composeApp(w, r)
 	if !ok {
+		return
+	}
+	if app.ComposeSealed == nil && app.ComposeFromGit() {
+		writeJSON(w, http.StatusOK, map[string]any{"compose": "", "service": app.Service, "port": app.Port, "warnings": []string{}})
 		return
 	}
 	content, err := s.appCompose(app)
@@ -111,7 +143,7 @@ func (s *Server) handleGetCompose(w http.ResponseWriter, r *http.Request, p *pri
 		return
 	}
 	resp := map[string]any{"compose": string(content), "service": app.Service, "port": app.Port, "warnings": []string{}}
-	if cf, err := s.parseCompose(r.Context(), content, env, app.Service, app.Port); err != nil {
+	if cf, err := s.parseCompose(r.Context(), content, env, app.Service, app.Port, composeDir(app)); err != nil {
 		resp["error"] = err.Error()
 	} else {
 		resp["warnings"] = nonNil(cf.project.Warnings)
@@ -126,7 +158,8 @@ type composeRequest struct {
 }
 
 // handleSetCompose replaces the compose file and the published service;
-// the next deployment applies them.
+// the next deployment applies them. A git app's file comes from its
+// repository: only the published service changes (Compose is ignored).
 func (s *Server) handleSetCompose(w http.ResponseWriter, r *http.Request, p *principal) {
 	app, ok := s.composeApp(w, r)
 	if !ok {
@@ -136,58 +169,152 @@ func (s *Server) handleSetCompose(w http.ResponseWriter, r *http.Request, p *pri
 	if !decodeJSONLimit(w, r, &req, compose.MaxSize*2) {
 		return
 	}
+	content := []byte(req.Compose)
+	if app.ComposeFromGit() {
+		if app.ComposeSealed == nil {
+			writeError(w, http.StatusUnprocessableEntity, "load the compose file from the repository first")
+			return
+		}
+		var err error
+		if content, err = s.appCompose(app); err != nil {
+			s.internalError(w, r, "decrypt compose file", err)
+			return
+		}
+	}
+	s.storeCompose(w, r, p, app, content, strings.TrimSpace(req.Service), req.Port, "")
+}
+
+// storeCompose validates and stores an app's compose file with the service
+// it publishes. commit is the commit of a git app's file.
+func (s *Server) storeCompose(w http.ResponseWriter, r *http.Request, p *principal, app *store.App, content []byte, service string, port int, commit string) {
 	env, err := s.appEnv(app)
 	if err != nil {
 		s.internalError(w, r, "decrypt app env", err)
 		return
 	}
-	cf, err := s.parseCompose(r.Context(), []byte(req.Compose), env, strings.TrimSpace(req.Service), req.Port)
+	cf, err := s.parseCompose(r.Context(), content, env, service, port, composeDir(app))
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	linked, err := s.db.LinkedDatabaseNames(r.Context(), app.ID)
-	if err != nil {
-		s.internalError(w, r, "list linked databases", err)
-		return
-	}
-	for _, svc := range cf.project.Services {
-		if slices.Contains(linked, svc.Name) || slices.ContainsFunc(svc.Aliases, func(a string) bool { return slices.Contains(linked, a) }) {
-			writeError(w, http.StatusUnprocessableEntity, "service "+svc.Name+" has the name of a linked database; rename it or unlink the database")
-			return
-		}
-	}
-	if len(app.Replicas) > 0 && len(cf.project.Volumes) > 0 {
-		writeError(w, http.StatusUnprocessableEntity, "the app runs on several servers: its compose file cannot keep data in volumes (remove the replicas first)")
-		return
-	}
-	if cf.port == 0 && len(app.Domains) > 0 {
-		writeError(w, http.StatusUnprocessableEntity, "the app has domains: choose the service and port they point to")
+	if err := s.checkComposeFile(r.Context(), app, cf); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
 	if err := s.saveCompose(r.Context(), app, cf); err != nil {
 		s.internalError(w, r, "store compose file", err)
 		return
 	}
-	s.audit(r, &p.user.ID, "app.compose_changed", map[string]any{"app_id": app.ID, "service": cf.service, "port": cf.port})
-	writeJSON(w, http.StatusOK, map[string]any{"app": viewApp(app), "warnings": nonNil(cf.project.Warnings)})
+	details := map[string]any{"app_id": app.ID, "service": cf.service, "port": cf.port}
+	if commit != "" {
+		details["commit"] = commit
+	}
+	s.audit(r, &p.user.ID, "app.compose_changed", details)
+	resp := map[string]any{"app": viewApp(app), "warnings": nonNil(cf.project.Warnings)}
+	if commit != "" {
+		resp["commit"] = commit
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
+
+// checkComposeFile refuses a compose file the app cannot run as it is set up.
+func (s *Server) checkComposeFile(ctx context.Context, app *store.App, cf *composeFile) error {
+	linked, err := s.db.LinkedDatabaseNames(ctx, app.ID)
+	if err != nil {
+		return fmt.Errorf("list linked databases: %w", err)
+	}
+	for _, svc := range cf.project.Services {
+		if slices.Contains(linked, svc.Name) || slices.ContainsFunc(svc.Aliases, func(a string) bool { return slices.Contains(linked, a) }) {
+			return errors.New("service " + svc.Name + " has the name of a linked database; rename it or unlink the database")
+		}
+	}
+	if len(app.Replicas) > 0 && len(cf.project.Volumes) > 0 {
+		return errors.New("the app runs on several servers: its compose file cannot keep data in volumes (remove the replicas first)")
+	}
+	if cf.port == 0 && len(app.Domains) > 0 {
+		return errors.New("the app has domains: choose the service and port they point to")
+	}
+	return nil
+}
+
+// handleLoadCompose reads a git app's compose file from its repository
+// (the head of its branch) and stores it, so its services can be seen and
+// the one to publish chosen before it deploys.
+func (s *Server) handleLoadCompose(w http.ResponseWriter, r *http.Request, p *principal) {
+	app, ok := s.composeApp(w, r)
+	if !ok {
+		return
+	}
+	if !app.ComposeFromGit() {
+		writeError(w, http.StatusUnprocessableEntity, "this app's compose file is not in a repository")
+		return
+	}
+	if !s.agents.Connected(app.ServerID) {
+		writeError(w, http.StatusConflict, "the server is offline")
+		return
+	}
+	g, err := s.gitSource(r.Context(), app)
+	if err != nil {
+		var de *deployError
+		if errors.As(err, &de) {
+			writeError(w, de.status, de.msg)
+			return
+		}
+		s.internalError(w, r, "prepare git source", err)
+		return
+	}
+	resp, err := s.readComposeFile(r.Context(), app, g)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	s.storeCompose(w, r, p, app, []byte(resp.Compose), app.Service, app.Port, resp.Commit)
+}
+
+// readComposeFile asks the app's server for the compose file in its
+// repository, at g.Commit or the head of its branch.
+func (s *Server) readComposeFile(ctx context.Context, app *store.App, g *agentproto.GitSource) (*agentproto.ComposeFileResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, composeFileTimeout)
+	defer cancel()
+	var resp agentproto.ComposeFileResponse
+	if err := s.agents.Call(ctx, app.ServerID, agentproto.TypeComposeFile,
+		agentproto.ComposeFileRequest{AppID: app.ID, Git: g}, &resp); err != nil {
+		return nil, fmt.Errorf("read %s from the repository: %w", g.ComposeFile, err)
+	}
+	if !agentproto.ValidCommit(resp.Commit) || len(resp.Compose) > compose.MaxSize {
+		return nil, errors.New("the server sent an invalid compose file")
+	}
+	return &resp, nil
+}
+
+// composeFileTimeout bounds fetching a repository for its compose file.
+const composeFileTimeout = 5 * time.Minute
 
 // composeSpec prepares a compose deployment: content is the compose file
 // to run (the app's, or an earlier deployment's for a rollback, with the
-// images that deployment ran in pinned).
-func (s *Server) composeSpec(ctx context.Context, app *store.App, content []byte, pinned map[string]string, spec *agentproto.AppSpec) ([]string, error) {
+// images that deployment ran in pinned). Services of a git app that build
+// get a tag of their own, and in a rollback the image built then.
+func (s *Server) composeSpec(ctx context.Context, app *store.App, content []byte, pinned map[string]string, spec *agentproto.AppSpec) (*composeFile, error) {
 	env, err := s.appEnv(app)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt app env: %w", err)
 	}
-	cf, err := s.parseCompose(ctx, content, env, app.Service, app.Port)
+	cf, err := s.parseCompose(ctx, content, env, app.Service, app.Port, composeDir(app))
 	if err != nil {
 		return nil, &deployError{status: http.StatusUnprocessableEntity, msg: "compose file: " + err.Error(), cause: err}
 	}
+	var b [5]byte
+	rand.Read(b[:])
 	hosts := map[string]bool{}
 	for i := range cf.project.Services {
 		svc := &cf.project.Services[i]
+		if svc.Build != nil {
+			svc.Image = fmt.Sprintf("%s%s-%s", builtImagePrefix(app.ID), svc.Name, hex.EncodeToString(b[:]))
+			if d := pinned[svc.Name]; strings.HasPrefix(d, builtImagePrefix(app.ID)) && docker.ValidRef(d) {
+				svc.Build.ReuseImage = d
+			}
+			continue
+		}
 		if d := pinned[svc.Name]; strings.Contains(d, "@sha256:") && docker.ValidRef(d) {
 			svc.Image = d
 		}
@@ -203,7 +330,51 @@ func (s *Server) composeSpec(ctx context.Context, app *store.App, content []byte
 		}
 	}
 	spec.Services, spec.ComposeVolumes = cf.project.Services, cf.project.Volumes
-	return cf.project.Warnings, nil
+	if app.ComposeFromGit() {
+		previous, err := s.db.SucceededDigests(ctx, app.ID)
+		if err != nil {
+			return nil, err
+		}
+		spec.PruneImages = builtImagesToPrune(app.ID, previous, spec.Services, s.imagesKept)
+	}
+	return cf, nil
+}
+
+// builtImagePrefix starts the tags of the images built for an app.
+func builtImagePrefix(appID int64) string { return fmt.Sprintf("basalt/app-%d:", appID) }
+
+// builtImagesToPrune lists the images earlier deployments of a git compose
+// app built (succeeded, newest first) that are no longer kept: those of
+// all but its keep-1 latest, not used by services.
+func builtImagesToPrune(appID int64, succeeded []map[string]string, services []agentproto.ServiceSpec, keep int) []agentproto.ImageRef {
+	keep = max(keep-1, 0)
+	kept := map[string]bool{}
+	for _, svc := range services {
+		if svc.Build != nil && svc.Build.ReuseImage != "" {
+			kept[svc.Build.ReuseImage] = true
+		}
+	}
+	for i, d := range succeeded {
+		if i < keep {
+			for _, ref := range d {
+				kept[ref] = true
+			}
+		}
+	}
+	var out []agentproto.ImageRef
+	seen := map[string]bool{}
+	for _, d := range succeeded[min(keep, len(succeeded)):] {
+		for _, svc := range slices.Sorted(maps.Keys(d)) {
+			ref := d[svc]
+			if kept[ref] || seen[ref] || !strings.HasPrefix(ref, builtImagePrefix(appID)) || !docker.ValidRef(ref) ||
+				len(out) == agentproto.MaxPruneImages {
+				continue
+			}
+			seen[ref] = true
+			out = append(out, agentproto.ImageRef{Ref: ref})
+		}
+	}
+	return out
 }
 
 // cleanDigests keeps the per-service images an agent reported that look valid.

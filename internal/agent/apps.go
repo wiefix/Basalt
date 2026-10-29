@@ -226,12 +226,21 @@ func (m *appsManager) Deploy(ctx context.Context, spec agentproto.AppSpec, strea
 	defer m.lock(spec.AppID)()
 
 	if len(spec.Services) > 0 {
+		var commit, subject string
+		if spec.Git != nil {
+			if commit, subject, err = m.buildServices(ctx, dc, spec, &lg); err != nil {
+				return fail(err)
+			}
+		}
 		digests, err := m.deployCompose(ctx, dc, spec, &lg)
 		if err != nil {
 			return fail(err)
 		}
+		if n := m.pruneImages(context.WithoutCancel(ctx), dc, spec.PruneImages, ""); n > 0 {
+			lg.printf("Removed %d image(s) of older deployments", n)
+		}
 		lg.printf("Deployment succeeded")
-		return agentproto.AppDeployResponse{OK: true, Log: lg.String(), Digests: digests}
+		return agentproto.AppDeployResponse{OK: true, Log: lg.String(), Digests: digests, Commit: commit, CommitMessage: subject}
 	}
 
 	var digest, imageID, commit, subject string

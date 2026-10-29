@@ -193,6 +193,7 @@ export const checks = [
   fits<Returns<A["unlinkApp"]>>()<G.DeleteAppsIdLinksAppResponse>(),
   fits<Returns<A["appCompose"]>>()<G.GetAppsIdComposeResponse>(),
   fits<Returns<A["setAppCompose"]>>()<G.PutAppsIdComposeResponse>(),
+  fits<Returns<A["loadAppCompose"]>>()<G.PostAppsIdComposeLoadResponse>(),
   fits<Returns<A["updateApp"]>>()<G.PutAppsIdResponse>(),
   fits<Returns<A["deleteApp"]>>()<G.DeleteAppsIdResponse>(),
   fits<Returns<A["setAppDomains"]>>()<G.PutAppsIdDomainsResponse>(),

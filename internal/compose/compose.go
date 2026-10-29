@@ -3,7 +3,9 @@
 //
 // The file is parsed with compose-go, which never touches the file system
 // here: include, extends, env_file and label_file are refused, and
-// ${VARIABLES} come from the app's environment only. The parsed model is
+// ${VARIABLES} come from the app's environment only. Services build their
+// image (build:) only in a file from the app's git repository (ParseRepo),
+// from paths inside that repository. The parsed model is
 // then checked against an allowlist: anything that would reach the host
 // (bind mounts, host networking, privileges, devices, ...) or that Basalt
 // does not implement is rejected with an explanation, rather than ignored.
@@ -17,6 +19,7 @@ import (
 	"io"
 	"maps"
 	"math"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -31,7 +34,7 @@ import (
 )
 
 // MaxSize bounds a compose file.
-const MaxSize = 256 << 10
+const MaxSize = agentproto.MaxComposeFile
 
 // SilenceLibraryLogs stops compose-go from printing to stderr through
 // logrus' global logger: Parse reports what matters as warnings. Call once
@@ -49,7 +52,14 @@ type Project struct {
 	Ports map[string][]int
 	// Warnings describe parts of the file Basalt accepts but does not apply.
 	Warnings []string
+
+	repo bool   // the file is from the app's repository: services may build
+	dir  string // the file's directory in the repository
 }
+
+// BuildImage is the image a service that builds is given by Parse; the
+// panel replaces it with the tag the deployment builds.
+func BuildImage(service string) string { return "basalt/build:" + service }
 
 // Error is a problem with the compose file, safe to show to the user.
 type Error struct{ Msg string }
@@ -61,6 +71,22 @@ func errf(format string, a ...any) error { return &Error{Msg: fmt.Sprintf(format
 // Parse loads and validates a compose file; env provides the values of
 // ${VARIABLES}.
 func Parse(ctx context.Context, content []byte, env map[string]string) (*Project, error) {
+	return parse(ctx, content, env, "")
+}
+
+// ParseRepo is Parse for a compose file from the app's git repository, in
+// its directory dir ("." for the root): services may build their image
+// from it (ServiceSpec.Build, with its Image set to BuildImage), with paths
+// relative to dir as in compose, which must stay inside the repository.
+func ParseRepo(ctx context.Context, content []byte, env map[string]string, dir string) (*Project, error) {
+	if err := agentproto.ValidateRepoPath(dir, true); err != nil {
+		return nil, err
+	}
+	return parse(ctx, content, env, dir)
+}
+
+func parse(ctx context.Context, content []byte, env map[string]string, dir string) (*Project, error) {
+	repo := dir != ""
 	if len(content) > MaxSize {
 		return nil, errf("the compose file is larger than %d KB", MaxSize>>10)
 	}
@@ -96,7 +122,7 @@ func Parse(ctx context.Context, content []byte, env map[string]string) (*Project
 	if err != nil {
 		return nil, errf("%s", loadError(err))
 	}
-	p := &Project{Ports: map[string][]int{}}
+	p := &Project{Ports: map[string][]int{}, repo: repo, dir: dir}
 	if err := p.checkTopLevel(project, content); err != nil {
 		return nil, err
 	}
@@ -130,6 +156,10 @@ func Parse(ctx context.Context, content []byte, env map[string]string) (*Project
 		p.Warnings = append(p.Warnings, fmt.Sprintf("variable %s is not set: it was replaced by an empty value (add it under Environment)", k))
 	}
 	spec := agentproto.AppSpec{Services: p.Services, ComposeVolumes: p.Volumes}
+	if repo {
+		spec.Git = &agentproto.GitSource{URL: "https://example.com/r", Branch: "main", Dockerfile: "Dockerfile", Context: ".",
+			Builder: agentproto.BuilderCompose, ComposeFile: "compose.yaml"}
+	}
 	if err := spec.ValidateCompose(); err != nil {
 		return nil, errf("%v", err)
 	}
@@ -258,7 +288,6 @@ var refused = map[string]string{
 	"sysctls":             "kernel parameters cannot be changed",
 	"volumes_from":        "use named volumes",
 	"external_links":      "apps cannot reach containers outside them",
-	"build":               "compose apps run ready images; build images with a git app",
 	"env_file":            "put the variables under Environment and reference them as ${NAME}",
 	"label_file":          "files on the server cannot be read",
 	"extends":             "put everything in one file",
@@ -301,7 +330,12 @@ var accepted = map[string]bool{
 	"init": true, "stop_grace_period": true, "stop_signal": true, "cap_drop": true,
 	"extra_hosts": true, "tty": true, "stdin_open": true, "ports": true, "expose": true,
 	"container_name": true, "links": true, "deploy": true, "pull_policy": true, "scale": true,
-	"profiles": true, "develop": true, "attach": true,
+	"profiles": true, "develop": true, "attach": true, "build": true,
+}
+
+// Build attributes that are accepted.
+var acceptedBuild = map[string]bool{
+	"context": true, "dockerfile": true, "args": true, "target": true, "no_cache": true, "pull": true,
 }
 
 func (p *Project) convert(s types.ServiceConfig, volumes map[string]bool, job bool) (agentproto.ServiceSpec, error) {
@@ -336,12 +370,23 @@ func (p *Project) convert(s types.ServiceConfig, volumes map[string]bool, job bo
 		}
 	}
 
-	if s.Image == "" {
-		return svc, fail("an image is required")
-	}
-	svc.Image = s.Image
-	if !docker.ValidRef(svc.Image) {
-		return svc, fail("invalid image reference %q", svc.Image)
+	if s.Build != nil {
+		if !p.repo {
+			return svc, fail("build is not allowed: a compose file stored in Basalt runs ready images; to build them, create the app from a git repository with Docker Compose")
+		}
+		b, err := p.build(s.Build, attrs["build"])
+		if err != nil {
+			return svc, fail("%v", err)
+		}
+		svc.Build, svc.Image = b, BuildImage(name)
+	} else {
+		if s.Image == "" {
+			return svc, fail("an image is required")
+		}
+		svc.Image = s.Image
+		if !docker.ValidRef(svc.Image) {
+			return svc, fail("invalid image reference %q", svc.Image)
+		}
 	}
 	svc.Command, svc.Entrypoint = s.Command, s.Entrypoint
 	svc.User, svc.WorkingDir, svc.Hostname = s.User, s.WorkingDir, s.Hostname
@@ -547,4 +592,61 @@ func (p *Project) convert(s types.ServiceConfig, volumes map[string]bool, job bo
 		return svc, errf("%v", err)
 	}
 	return svc, nil
+}
+
+// build converts the build section of a service: the context is relative
+// to the compose file's directory and the Dockerfile to the context, as in
+// compose; both end up as paths inside the repository.
+func (p *Project) build(b *types.BuildConfig, raw json.RawMessage) (*agentproto.ServiceBuild, error) {
+	var attrs map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &attrs); err != nil {
+		return nil, err
+	}
+	for _, k := range slices.Sorted(maps.Keys(attrs)) {
+		if v := string(attrs[k]); v == "null" || v == "false" || v == `""` {
+			continue
+		}
+		if !acceptedBuild[k] {
+			return nil, fmt.Errorf("build %s is not supported (only context, dockerfile, args, target, no_cache and pull)", k)
+		}
+	}
+	ctx := b.Context
+	if ctx == "" {
+		ctx = "."
+	}
+	if strings.Contains(ctx, "://") || strings.Contains(ctx, "@") {
+		return nil, fmt.Errorf("build context %s: only directories of the repository can be built", ctx)
+	}
+	if path.IsAbs(ctx) {
+		return nil, fmt.Errorf("build context %s: use a path relative to the repository", ctx)
+	}
+	ctx = path.Join(p.dir, ctx)
+	if err := agentproto.ValidateRepoPath(ctx, true); err != nil {
+		return nil, fmt.Errorf("build context: %w (outside the repository)", err)
+	}
+	dockerfile := b.Dockerfile
+	if dockerfile == "" {
+		dockerfile = "Dockerfile"
+	}
+	if path.IsAbs(dockerfile) {
+		return nil, fmt.Errorf("dockerfile %s: use a path relative to the build context", dockerfile)
+	}
+	dockerfile = path.Join(ctx, dockerfile)
+	if err := agentproto.ValidateRepoPath(dockerfile, false); err != nil {
+		return nil, fmt.Errorf("dockerfile: %w", err)
+	}
+	out := &agentproto.ServiceBuild{Context: ctx, Dockerfile: dockerfile, Target: b.Target, NoCache: b.NoCache, Pull: b.Pull}
+	for _, k := range slices.Sorted(maps.Keys(b.Args)) {
+		// compose-go fills arguments given without a value from the
+		// app's environment, and drops those it does not have.
+		v := b.Args[k]
+		if v == nil {
+			continue
+		}
+		if out.Args == nil {
+			out.Args = map[string]string{}
+		}
+		out.Args[k] = *v
+	}
+	return out, out.Validate()
 }

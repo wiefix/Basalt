@@ -51,6 +51,9 @@ const (
 	// TypeAppAttach sets which other apps' networks an app's containers
 	// join (a database reachable from apps).
 	TypeAppAttach = "app_attach"
+	// TypeComposeFile reads the compose file of a git app from its
+	// repository (ComposeFileRequest).
+	TypeComposeFile = "compose_file"
 	// TypeMailAPI relays a management call to the mail server (MailAPI).
 	TypeMailAPI = "mail_api"
 	// TypeMailCert loads the proxy's certificate into the mail server.
@@ -302,7 +305,9 @@ type AppSpec struct {
 
 	// Services, when set, deploys a compose app: one container per
 	// service on the app's network. Image, Port, Env, Volumes, MemoryMB,
-	// CPUs, RegistryAuth, PruneImages and Git are not used then.
+	// CPUs and RegistryAuth are not used then; Git (compose builder) is the
+	// repository services with a Build come from, PruneImages the images
+	// earlier deployments built.
 	Services []ServiceSpec `json:"services,omitempty"`
 	// ComposeVolumes are the named volumes the services mount.
 	ComposeVolumes []string `json:"compose_volumes,omitempty"`

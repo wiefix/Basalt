@@ -171,7 +171,7 @@ func (s *Server) handleLinkApp(w http.ResponseWriter, r *http.Request, p *princi
 		writeError(w, http.StatusUnprocessableEntity, "too many linked apps")
 		return
 	}
-	if target.Source == store.SourceCompose && slices.ContainsFunc(target.Summary.Services, func(c store.ComposeService) bool {
+	if target.IsCompose() && slices.ContainsFunc(target.Summary.Services, func(c store.ComposeService) bool {
 		return c.Name == dbApp.Name
 	}) {
 		writeError(w, http.StatusConflict, "the app has a service named "+dbApp.Name+"; the database would not be reachable by that name")

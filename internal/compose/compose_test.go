@@ -190,3 +190,94 @@ func TestLimits(t *testing.T) {
 		t.Fatal("alias bomb accepted")
 	}
 }
+
+func TestParseRepoBuild(t *testing.T) {
+	const y = `
+services:
+  web:
+    build:
+      context: ./web
+      dockerfile: docker/Dockerfile.prod
+      target: runtime
+      args:
+        NODE_ENV: production
+        FROM_ENV:
+        MISSING:
+    image: myorg/web:latest
+    ports: ["3000"]
+    depends_on: [migrate]
+  migrate:
+    build: .
+    command: ["./migrate"]
+  cache:
+    image: redis:7.4
+`
+	env := map[string]string{"FROM_ENV": "x"}
+	if _, err := Parse(context.Background(), []byte(y), env); err == nil || !strings.Contains(err.Error(), "git repository") {
+		t.Fatalf("build outside a repository: %v", err)
+	}
+	p, err := ParseRepo(context.Background(), []byte(y), env, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]agentproto.ServiceSpec{}
+	for _, s := range p.Services {
+		byName[s.Name] = s
+	}
+	web := byName["web"]
+	if web.Image != BuildImage("web") || web.Build == nil {
+		t.Fatalf("web = %+v", web)
+	}
+	if b := *web.Build; b.Context != "web" || b.Dockerfile != "web/docker/Dockerfile.prod" || b.Target != "runtime" ||
+		len(b.Args) != 2 || b.Args["NODE_ENV"] != "production" || b.Args["FROM_ENV"] != "x" {
+		t.Fatalf("web build = %+v", b)
+	}
+	if b := byName["migrate"].Build; b == nil || b.Context != "." || b.Dockerfile != "Dockerfile" {
+		t.Fatalf("migrate build = %+v", b)
+	}
+	if byName["cache"].Build != nil || byName["cache"].Image != "redis:7.4" {
+		t.Fatalf("cache = %+v", byName["cache"])
+	}
+
+	for name, b := range map[string]string{
+		"parent context":    "build: ../other",
+		"absolute context":  "build: /etc",
+		"remote context":    "build: https://github.com/o/r.git",
+		"escape dockerfile": "build: {context: web, dockerfile: ../../../etc/Dockerfile}",
+		"abs dockerfile":    "build: {context: ., dockerfile: /etc/Dockerfile}",
+		"inline":            "build: {context: ., dockerfile_inline: \"FROM alpine\"}",
+		"ssh":               "build: {context: ., ssh: [default]}",
+		"secrets":           "build: {context: ., secrets: [s]}",
+		"extra contexts":    "build: {context: ., additional_contexts: {x: /etc}}",
+		"network":           "build: {context: ., network: host}",
+		"privileged":        "build: {context: ., privileged: true}",
+		"buildkit arg":      "build: {context: ., args: {BUILDKIT_SYNTAX: evil/frontend}}",
+		"docker arg":        "build: {context: ., args: {DOCKER_HOST: tcp://x}}",
+		"bad target":        "build: {context: ., target: \"-x\"}",
+	} {
+		y := "services:\n  a:\n    " + b + "\n"
+		if p, err := ParseRepo(context.Background(), []byte(y), nil, "."); err == nil {
+			t.Errorf("%s: accepted: %+v", name, p.Services[0].Build)
+		}
+	}
+}
+
+// TestParseRepoDir: paths are relative to the compose file's directory, and
+// may reach elsewhere in the repository, not outside it.
+func TestParseRepoDir(t *testing.T) {
+	y := "services:\n  a:\n    build: ./web\n  b:\n    build: {context: ../shared, dockerfile: docker/Dockerfile}\n"
+	p, err := ParseRepo(context.Background(), []byte(y), nil, "deploy/prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b := p.Services[0].Build, p.Services[1].Build; a.Context != "deploy/prod/web" || a.Dockerfile != "deploy/prod/web/Dockerfile" ||
+		b.Context != "deploy/shared" || b.Dockerfile != "deploy/shared/docker/Dockerfile" {
+		t.Fatalf("builds = %+v, %+v", a, b)
+	}
+	if _, err := ParseRepo(context.Background(), []byte("services:\n  a:\n    build: ../../..\n"), nil, "deploy/prod"); err == nil {
+		t.Fatal("context outside the repository accepted")
+	}
+	if _, err := ParseRepo(context.Background(), []byte(y), nil, "../x"); err == nil {
+		t.Fatal("directory outside the repository accepted")
+	}
+}

@@ -46,7 +46,7 @@ func (s *Server) replicaProblem(ctx context.Context, app *store.App, domains []s
 		return "only apps from an image, a git repository or a compose file can run on several servers", nil
 	case len(app.Volumes) > 0:
 		return "an app with volumes keeps its data on one server: remove them to run it on several", nil
-	case app.Source == store.SourceCompose && len(app.Summary.Volumes) > 0:
+	case app.IsCompose() && len(app.Summary.Volumes) > 0:
 		return "the compose file keeps data in volumes (" + strings.Join(app.Summary.Volumes, ", ") +
 			"), which stay on one server: remove them to run the app on several", nil
 	case len(domains) == 0:

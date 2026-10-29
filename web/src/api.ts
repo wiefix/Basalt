@@ -228,7 +228,8 @@ export interface GitSettings {
   context: string;
   source_id?: number; // a git source (GitHub App) the repository is reached through
   repo?: string; // owner/name, with source_id
-  builder?: "" | "railpack"; // "": its Dockerfile; railpack: works out how to build it
+  builder?: "" | "railpack" | "compose"; // "": its Dockerfile; railpack: works out how to build it; compose: runs compose_file
+  compose_file?: string; // compose builder: path of the compose file in the repository
   build_env?: string[]; // names of Environment variables the build gets (as secrets)
 }
 
@@ -255,9 +256,10 @@ export interface GitRepo {
 
 export interface ComposeService {
   name: string;
-  image: string;
+  image: string; // "" when built
   ports?: number[];
   job?: boolean;
+  build?: string; // git apps: the Dockerfile it is built from
 }
 
 export interface ComposeSummary {
@@ -275,7 +277,8 @@ export interface App {
   git?: GitSettings;
   deploy_key?: string;
   auto_deploy: boolean;
-  // Compose apps: the published service (port is its port) and the file's contents without secrets.
+  // Compose apps (and git apps running a compose file): the published
+  // service (port is its port) and the file's contents without secrets.
   service?: string;
   compose?: ComposeSummary;
   // Databases: engine id, major version and the apps that reach it.
@@ -1239,6 +1242,8 @@ export const api = {
   appCompose: (id: number) => get<ComposeFile>(`/api/v1/apps/${id}/compose`),
   setAppCompose: (id: number, b: { compose: string; service: string; port: number }) =>
     put<{ app: App; warnings: string[] }>(`/api/v1/apps/${id}/compose`, b),
+  loadAppCompose: (id: number) =>
+    post<{ app: App; warnings: string[]; commit: string }>(`/api/v1/apps/${id}/compose/load`, {}),
   updateApp: (id: number, b: AppSettings) => put<{ app: App }>(`/api/v1/apps/${id}`, b),
   deleteApp: (id: number, volumes: boolean) =>
     del<{ sync: Sync; cleanup_error?: string }>(`/api/v1/apps/${id}${volumes ? "?volumes=1" : ""}`),
@@ -1368,6 +1373,8 @@ export const sourceLabel = (a: App) =>
     ? `mail server · ${a.image}`
     : a.source === "database"
     ? `${engineNames[a.engine ?? ""] ?? a.engine} ${a.version}`
+    : a.source === "git" && a.git?.builder === "compose"
+    ? `${a.git?.url} · ${a.git?.branch} · compose${a.compose?.services.length ? ` · ${a.compose.services.map((s) => s.name).join(", ")}` : ""}`
     : a.source === "git"
     ? `${a.git?.url} · ${a.git?.branch}`
     : a.source === "compose" && a.template
@@ -1375,6 +1382,10 @@ export const sourceLabel = (a: App) =>
     : a.source === "compose"
       ? `compose · ${(a.compose?.services ?? []).map((s) => s.name).join(", ")}`
       : a.image;
+
+// isCompose: the app runs a compose file (its own, or its repository's).
+export const isCompose = (a: Pick<App, "source" | "git">) =>
+  a.source === "compose" || (a.source === "git" && a.git?.builder === "compose");
 
 export const roleRank: Record<Role, number> = { user: 0, viewer: 1, member: 2, admin: 3, owner: 4 };
 export const can = (user: User | undefined, min: Role) => !!user && roleRank[user.role] >= roleRank[min];

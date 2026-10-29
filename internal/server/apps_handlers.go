@@ -35,8 +35,9 @@ type appView struct {
 	// DeployKey is the public key to grant read access to the repository.
 	DeployKey  string `json:"deploy_key,omitempty"`
 	AutoDeploy bool   `json:"auto_deploy"`
-	// Compose apps: the published service (Port is its port) and what the
-	// compose file contains, without its secrets.
+	// Compose apps (and git apps running a compose file): the published
+	// service (Port is its port) and what the compose file contains, without
+	// its secrets; for a git app, the file last read from the repository.
 	Service string                `json:"service,omitempty"`
 	Compose *store.ComposeSummary `json:"compose,omitempty"`
 	// Databases: engine, major version and the apps that reach it.
@@ -78,9 +79,10 @@ func viewApp(a *store.App) appView {
 	switch a.Source {
 	case store.SourceGit:
 		v.Git = &gitView{URL: a.Git.URL, Branch: a.Git.Branch, Dockerfile: a.Git.Dockerfile, Context: a.Git.Context,
-			SourceID: a.Git.SourceID, Repo: a.Git.Repo, Builder: a.Git.Builder, BuildEnv: a.Git.BuildEnv}
+			SourceID: a.Git.SourceID, Repo: a.Git.Repo, Builder: a.Git.Builder, BuildEnv: a.Git.BuildEnv, ComposeFile: a.Git.ComposeFile}
 		v.DeployKey, v.AutoDeploy = a.DeployKeyPublic, a.AutoDeploy
-	case store.SourceCompose:
+	}
+	if a.IsCompose() {
 		sum := a.Summary
 		if sum.Services == nil {
 			sum.Services = []store.ComposeService{}
@@ -89,6 +91,8 @@ func viewApp(a *store.App) appView {
 			sum.Volumes = []string{}
 		}
 		v.Service, v.Compose = a.Service, &sum
+	}
+	switch a.Source {
 	case store.SourceDatabase:
 		v.Engine, v.Version, v.Links = a.Engine, a.EngineVersion, nonNil(a.Links)
 	case store.SourceMail:
@@ -107,8 +111,10 @@ type gitView struct {
 	SourceID int64  `json:"source_id,omitempty"`
 	Repo     string `json:"repo,omitempty"`
 	// Builder: "" builds Dockerfile; "railpack" works out how to build the
-	// context without one (Node, Python, Go, PHP, Ruby, Java, static sites…).
-	Builder string `json:"builder,omitempty"`
+	// context without one (Node, Python, Go, PHP, Ruby, Java, static sites…);
+	// "compose" runs ComposeFile, building the services it builds.
+	Builder     string `json:"builder,omitempty"`
+	ComposeFile string `json:"compose_file,omitempty"` // path in the repository
 	// BuildEnv names variables of the app's environment its build gets, as
 	// secrets: Railpack passes them to its steps, a Dockerfile reads them
 	// with RUN --mount=type=secret,id=NAME,env=NAME.
@@ -205,7 +211,8 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 			return st, errors.New("git repository settings are required")
 		}
 		g := agentproto.GitSource{URL: strings.TrimSpace(req.Git.URL), Branch: strings.TrimSpace(req.Git.Branch),
-			Dockerfile: strings.TrimSpace(req.Git.Dockerfile), Context: strings.TrimSpace(req.Git.Context), Builder: req.Git.Builder}
+			Dockerfile: strings.TrimSpace(req.Git.Dockerfile), Context: strings.TrimSpace(req.Git.Context), Builder: req.Git.Builder,
+			ComposeFile: strings.TrimSpace(req.Git.ComposeFile)}
 		if req.Git.SourceID != 0 {
 			// The URL comes from GitHub (resolveGitSource).
 			if req.Git.SourceID < 0 || !forge.ValidRepo(req.Git.Repo) {
@@ -222,10 +229,14 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 		if g.Context == "" {
 			g.Context = "."
 		}
+		if g.Builder == agentproto.BuilderCompose && g.ComposeFile == "" {
+			g.ComposeFile = "compose.yaml"
+		}
 		if err := g.Validate(); err != nil {
 			return st, err
 		}
-		st.Git = store.GitSettings{URL: g.URL, Branch: g.Branch, Dockerfile: g.Dockerfile, Context: g.Context, Builder: g.Builder}
+		st.Git = store.GitSettings{URL: g.URL, Branch: g.Branch, Dockerfile: g.Dockerfile, Context: g.Context, Builder: g.Builder,
+			ComposeFile: g.ComposeFile}
 		seen := map[string]bool{}
 		for _, k := range req.Git.BuildEnv {
 			k = strings.TrimSpace(k)
@@ -242,6 +253,11 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 		}
 		if req.Git.SourceID != 0 {
 			st.Git.SourceID, st.Git.Repo = req.Git.SourceID, req.Git.Repo
+		}
+		if g.Builder == agentproto.BuilderCompose {
+			// The compose file sets the rest; Port is its published
+			// service's (set with the service).
+			st.Volumes, st.MemoryMB, st.CPUs, st.ReadOnly = nil, 0, 0, false
 		}
 	case store.SourceCompose:
 		// Everything else comes from the compose file.
@@ -270,7 +286,8 @@ func (req appSettingsRequest) settings(source string) (store.AppSettings, error)
 type createAppRequest struct {
 	appSettingsRequest
 	// Compose apps: the compose file and the service to publish (by
-	// default the first one that mentions a port).
+	// default the first one that mentions a port). Git apps running a
+	// compose file (builder "compose") may name the service, with Port.
 	Compose string `json:"compose"`
 	Service string `json:"service"`
 	// Databases: the engine (postgres, mysql, mariadb, redis) and its
@@ -350,10 +367,25 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 			return
 		}
 	}
+	service := strings.TrimSpace(req.Service)
+	if st.Git.Builder == agentproto.BuilderCompose {
+		// The compose file is read from the repository when the app
+		// deploys; the service to publish may be named now.
+		switch {
+		case service == "":
+			st.Port = 0
+		case !agentproto.ServiceNameRE.MatchString(service):
+			writeError(w, http.StatusUnprocessableEntity, "invalid service name")
+			return
+		case st.Port == 0:
+			writeError(w, http.StatusUnprocessableEntity, "set the port service "+service+" listens on")
+			return
+		}
+	}
 	var cf *composeFile
 	if req.Source == store.SourceCompose {
 		// No environment yet: unset variables are only warnings.
-		if cf, err = s.parseCompose(r.Context(), []byte(req.Compose), nil, req.Service, req.Port); err != nil {
+		if cf, err = s.parseCompose(r.Context(), []byte(req.Compose), nil, req.Service, req.Port, ""); err != nil {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
@@ -426,6 +458,13 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 			return
 		}
 	}
+	if service != "" && cf == nil {
+		if err := s.db.SetAppCompose(r.Context(), app.ID, nil, store.ComposeSummary{}, service, app.Port); err != nil {
+			s.internalError(w, r, "set published service", err)
+			return
+		}
+		app.Service = service
+	}
 	var warnings []string
 	if cf != nil {
 		if err := s.saveCompose(r.Context(), app, cf); err != nil {
@@ -490,6 +529,10 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *prin
 		writeError(w, http.StatusUnprocessableEntity, "a compose app is configured by its compose file")
 		return
 	}
+	if req.Git != nil && app.Source == store.SourceGit && (req.Git.Builder == agentproto.BuilderCompose) != app.ComposeFromGit() {
+		writeError(w, http.StatusUnprocessableEntity, "an app cannot switch between a compose file and one image: create a new app")
+		return
+	}
 	st, err := req.settings(app.Source)
 	if err == nil {
 		err = s.resolveGitSource(r.Context(), &st)
@@ -497,6 +540,9 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *prin
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
+	}
+	if app.ComposeFromGit() {
+		st.Port = app.Port // its published service's, set under Compose
 	}
 	if st.Port == 0 && len(app.Domains) > 0 {
 		writeError(w, http.StatusUnprocessableEntity, "remove the app's domains before clearing its port")

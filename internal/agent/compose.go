@@ -30,7 +30,8 @@ func (m *appsManager) serviceContainer(appID, deploymentID int64, service string
 // volumes gets its new container before the old one stops (no downtime);
 // one with volumes is stopped first, so two containers never share its
 // data. If any service fails, everything is put back as it was. It returns
-// the image each service runs.
+// the image each service runs. Images of services that build (Build) are
+// already on the host.
 func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec agentproto.AppSpec, lg *deployLog) (map[string]string, error) {
 	order, err := agentproto.ServiceOrder(spec.Services)
 	if err != nil {
@@ -39,6 +40,16 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 	digests, imageIDs := map[string]string{}, map[string]string{}
 	pulled := map[string][2]string{}
 	for _, svc := range order {
+		if svc.Build != nil {
+			// Built for this deployment (buildServices): it is recorded by
+			// its tag, which a rollback reuses.
+			info, err := dc.ImageInspect(ctx, svc.Image)
+			if err != nil {
+				return nil, fmt.Errorf("service %s: the built image is missing: %w", svc.Name, err)
+			}
+			digests[svc.Name], imageIDs[svc.Name] = svc.Image, info.ID
+			continue
+		}
 		r, ok := pulled[svc.Image]
 		if !ok {
 			digest, id, err := m.pull(ctx, dc, svc.Image, authFor(spec.RegistryAuths, svc.Image), lg)
@@ -271,9 +282,11 @@ func authFor(auths []docker.AuthConfig, image string) *docker.AuthConfig {
 
 // serviceHash identifies everything a service's container is created from;
 // a container with the same hash needs no replacement. The image counts by
-// its ID: the same image named by tag or by digest is the same.
+// its ID: the same image named by tag or by digest, or built again from
+// the same files, is the same.
 func serviceHash(appID int64, svc agentproto.ServiceSpec, imageID string) string {
-	svc.Image = ""
+	// How the image was made counts only through what was made.
+	svc.Image, svc.Build = "", nil
 	b, _ := json.Marshal(struct {
 		App     int64
 		Service agentproto.ServiceSpec

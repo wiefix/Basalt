@@ -681,6 +681,7 @@ export interface GitView {
   branch?: string;
   build_env?: string[];
   builder?: string;
+  compose_file?: string;
   context?: string;
   dockerfile?: string;
   repo?: string;
@@ -692,6 +693,7 @@ export interface GitViewOut {
   branch: string;
   build_env?: string[];
   builder?: string;
+  compose_file?: string;
   context: string;
   dockerfile: string;
   repo?: string;
@@ -1287,6 +1289,7 @@ export interface StorageView {
 }
 
 export interface StoreComposeService {
+  build?: string;
   cpus?: number;
   image: string;
   job?: boolean;
@@ -1962,6 +1965,12 @@ export type PostAppsBody = CreateAppRequest;
 
 export type PostAppsIdBackupsResponse = {
   backup: BackupView;
+};
+
+export type PostAppsIdComposeLoadResponse = {
+  app: AppView;
+  commit: string;
+  warnings: string[];
 };
 
 export type PostAppsIdDeployResponse = {

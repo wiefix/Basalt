@@ -85,8 +85,9 @@ type GitSettings struct {
 	SourceID int64
 	Repo     string
 	// Builder: "" builds Dockerfile; "railpack" works out how to build
-	// Context without one.
-	Builder string
+	// Context without one; "compose" runs ComposeFile.
+	Builder     string
+	ComposeFile string
 	// BuildEnv names the variables of the app's environment its build gets.
 	BuildEnv []string
 }
@@ -102,7 +103,19 @@ const (
 // HasServices reports whether the app runs as named services (compose
 // apps, databases and the mail server) rather than one anonymous container.
 func (a *App) HasServices() bool {
-	return a.Source == SourceCompose || a.Source == SourceDatabase || a.Source == SourceMail
+	return a.IsCompose() || a.Source == SourceDatabase || a.Source == SourceMail
+}
+
+// IsCompose reports whether the app runs a compose file: its own, or one
+// from its git repository (a git app with the compose builder).
+func (a *App) IsCompose() bool {
+	return a.Source == SourceCompose || a.ComposeFromGit()
+}
+
+// ComposeFromGit reports whether the app is a git app that runs the
+// compose file of its repository.
+func (a *App) ComposeFromGit() bool {
+	return a.Source == SourceGit && a.Git.Builder == agentproto.BuilderCompose
 }
 
 // ComposeSummary describes a compose file without its secrets.
@@ -119,6 +132,9 @@ type ComposeService struct {
 	// MemoryMB and CPUs are its limits in the file (0: none).
 	MemoryMB int     `json:"memory_mb,omitempty"`
 	CPUs     float64 `json:"cpus,omitempty"`
+	// Build is the Dockerfile in the repository the service's image is
+	// built from (git apps; Image is then empty).
+	Build string `json:"build,omitempty"`
 }
 
 // AppSettings are the fields an app is deployed with, other than env.
@@ -185,12 +201,13 @@ func (db *DB) CreateApp(ctx context.Context, serverID int64, name string, st App
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO apps (project_id, server_id, name, source, image, git_url, git_branch, git_dockerfile, git_context,
 		 port, volumes, memory_mb, cpus, engine, engine_version, read_only, hostname, template, template_revision,
-		 git_source_id, git_repo, preview_of, pr_number, git_builder, build_env)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 git_source_id, git_repo, preview_of, pr_number, git_builder, build_env, git_compose_file)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id, created_at`,
 		st.ProjectID, serverID, name, st.Source, st.Image, st.Git.URL, st.Git.Branch, st.Git.Dockerfile, st.Git.Context,
 		st.Port, vols, st.MemoryMB, st.CPUs, st.Engine, st.EngineVersion, st.ReadOnly, st.Hostname, st.Template, st.TemplateRevision,
-		nullID(st.Git.SourceID), st.Git.Repo, nullID(st.PreviewOf), st.PRNumber, st.Git.Builder, buildEnvJSON(st.Git.BuildEnv)).Scan(&a.ID, &created)
+		nullID(st.Git.SourceID), st.Git.Repo, nullID(st.PreviewOf), st.PRNumber, builderColumn(st.Git), buildEnvJSON(st.Git.BuildEnv),
+		st.Git.ComposeFile).Scan(&a.ID, &created)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: apps.name") {
 			return nil, ErrNameTaken
@@ -228,7 +245,7 @@ func marshalVolumes(v []agentproto.AppVolume) (string, error) {
 }
 
 const appQuery = `SELECT a.id, a.server_id, a.project_id, a.name, a.source, a.image, a.git_url, a.git_branch, a.git_dockerfile,
-	a.git_context, COALESCE(a.git_source_id, 0), a.git_repo, a.git_builder, a.build_env, a.deploy_key, a.deploy_key_public, a.webhook_secret, a.auto_deploy,
+	a.git_context, COALESCE(a.git_source_id, 0), a.git_repo, a.git_builder, a.git_compose_file, a.build_env, a.deploy_key, a.deploy_key_public, a.webhook_secret, a.auto_deploy,
 	a.compose, a.compose_summary, a.service, a.engine, a.engine_version, a.hostname, a.template, a.template_revision,
 	a.preview_domain, COALESCE(a.preview_of, 0), a.pr_number, a.forge_key_id, a.forge_hook_id,
 	(SELECT COALESCE(json_group_array(l.app_id), '[]') FROM (SELECT app_id FROM app_links WHERE database_id = a.id ORDER BY app_id) l),
@@ -246,7 +263,7 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 		var created int64
 		var vols, domain, summary, links, replicas, buildEnv string
 		if err := rows.Scan(&a.ID, &a.ServerID, &a.ProjectID, &a.Name, &a.Source, &a.Image, &a.Git.URL, &a.Git.Branch,
-			&a.Git.Dockerfile, &a.Git.Context, &a.Git.SourceID, &a.Git.Repo, &a.Git.Builder, &buildEnv, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
+			&a.Git.Dockerfile, &a.Git.Context, &a.Git.SourceID, &a.Git.Repo, &a.Git.Builder, &a.Git.ComposeFile, &buildEnv, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
 			&a.ComposeSealed, &summary, &a.Service, &a.Engine, &a.EngineVersion, &a.Hostname, &a.Template, &a.TemplateRevision,
 			&a.PreviewDomain, &a.PreviewOf, &a.PRNumber, &a.ForgeKeyID, &a.ForgeHookID, &links, &replicas, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
 			return nil, err
@@ -269,6 +286,9 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 		}
 		if err := json.Unmarshal([]byte(buildEnv), &a.Git.BuildEnv); err != nil {
 			return nil, err
+		}
+		if a.Git.ComposeFile != "" {
+			a.Git.Builder = agentproto.BuilderCompose
 		}
 		a.CreatedAt = time.Unix(created, 0)
 		a.Domains = []string{}
@@ -350,9 +370,10 @@ func (db *DB) UpdateAppSettings(ctx context.Context, id int64, st AppSettings) e
 	}
 	return db.execOne(ctx,
 		`UPDATE apps SET image = ?, git_url = ?, git_branch = ?, git_dockerfile = ?, git_context = ?,
-		 port = ?, volumes = ?, memory_mb = ?, cpus = ?, read_only = ?, git_source_id = ?, git_repo = ?, git_builder = ?, build_env = ? WHERE id = ?`,
+		 port = ?, volumes = ?, memory_mb = ?, cpus = ?, read_only = ?, git_source_id = ?, git_repo = ?, git_builder = ?, build_env = ?,
+		 git_compose_file = ? WHERE id = ?`,
 		st.Image, st.Git.URL, st.Git.Branch, st.Git.Dockerfile, st.Git.Context, st.Port, vols, st.MemoryMB, st.CPUs, st.ReadOnly,
-		nullID(st.Git.SourceID), st.Git.Repo, st.Git.Builder, buildEnvJSON(st.Git.BuildEnv), id)
+		nullID(st.Git.SourceID), st.Git.Repo, builderColumn(st.Git), buildEnvJSON(st.Git.BuildEnv), st.Git.ComposeFile, id)
 }
 
 // SetAppCompose stores a compose app's file (encrypted), its summary and
@@ -617,9 +638,42 @@ func (db *DB) SucceededImages(ctx context.Context, appID int64) ([]agentproto.Im
 	return out, rows.Err()
 }
 
+// SucceededDigests returns the image of each service of the app's
+// successful deployments (compose apps), newest first.
+func (db *DB) SucceededDigests(ctx context.Context, appID int64) ([]map[string]string, error) {
+	rows, err := db.R.QueryContext(ctx,
+		`SELECT digests FROM deployments WHERE app_id = ? AND status = 'succeeded' ORDER BY id DESC`, appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]string
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		m := map[string]string{}
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // SetAppTemplateRevision records the template revision an app now runs.
 func (db *DB) SetAppTemplateRevision(ctx context.Context, id int64, revision int) error {
 	return db.execOne(ctx, `UPDATE apps SET template_revision = ? WHERE id = ?`, revision, id)
+}
+
+// builderColumn is what git_builder holds: compose apps are told by their
+// compose file.
+func builderColumn(g GitSettings) string {
+	if g.Builder == agentproto.BuilderCompose {
+		return ""
+	}
+	return g.Builder
 }
 
 func buildEnvJSON(names []string) string {

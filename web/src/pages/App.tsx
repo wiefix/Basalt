@@ -5,6 +5,7 @@ import {
   api,
   appPath,
   can,
+  isCompose,
   sourceLabel,
   type App,
   type AppPlacement,
@@ -94,7 +95,7 @@ export function AppPage({ user: me }: { user: User }) {
         {!isDB && !isMail && can(user, "admin") && tab(`${base}/env`, "Environment")}
         {!isDB && !isMail && tab(`${base}/domains`, "Domains")}
         {a.source === "git" && can(user, "admin") && tab(`${base}/source`, "Source")}
-        {a.source === "compose" && can(user, "admin") && tab(`${base}/compose`, "Compose")}
+        {isCompose(a) && can(user, "admin") && tab(`${base}/compose`, "Compose")}
         {tab(`${base}/backups`, "Backups")}
         {can(user, "admin") && tab(`${base}/settings`, "Settings")}
       </div>
@@ -204,6 +205,15 @@ function Overview({ app, user, me, placements }: { app: App; user: User; me: Use
               services keep running; a changed service without volumes gets its new container before the old one stops,
               one with volumes is restarted. If any service fails, the previous containers are restored.
             </>
+          ) : app.source === "git" && app.git?.builder === "compose" ? (
+            <>
+              A deployment reads <span className="mono">{app.git.compose_file}</span> at the head of branch{" "}
+              <span className="mono">{app.git.branch}</span>
+              {app.auto_deploy ? " (also on every push, through the webhook)" : ""}, builds the services that build from the
+              repository, pulls the others' images and starts the services in dependency order. Unchanged services keep
+              running; a changed service without volumes gets its new container before the old one stops, one with volumes
+              is restarted. If any service fails, the previous containers are restored.
+            </>
           ) : app.source === "git" ? (
             <>
               A deployment builds branch <span className="mono">{app.git?.branch}</span>{" "}
@@ -215,17 +225,19 @@ function Overview({ app, user, me, placements }: { app: App; user: User; me: Use
               A deployment pulls <span className="mono">{app.image}</span>,
             </>
           )}{" "}
-          {app.source !== "compose" && app.source !== "database" && app.source !== "mail" &&
+          {!isCompose(app) && app.source !== "database" && app.source !== "mail" &&
             " starts a new container and switches traffic once it is ready. If the new container fails, the current one keeps serving."}
         </p>
       </div>
 
       {app.template && <TemplateCard app={app} user={user} />}
-      {app.source === "git" && !!app.git?.source_id && !app.preview_of && <PreviewsCard app={app} user={user} />}
+      {app.source === "git" && !!app.git?.source_id && !app.preview_of && app.git.builder !== "compose" && (
+        <PreviewsCard app={app} user={user} />
+      )}
       {(app.source === "image" || app.source === "git" || app.source === "compose") && !app.preview_of && (
         <ServersCard app={app} user={user} me={me} placements={placements} />
       )}
-      {app.source === "compose" && <ServicesCard app={app} services={st?.services} />}
+      {isCompose(app) && <ServicesCard app={app} services={st?.services} />}
       <ResourcesCard app={app} running={st?.state === "running"} />
       {app.source === "database" ? <LinksCard app={app} user={user} /> : app.source !== "mail" && <LinkedDatabases app={app} />}
 
@@ -303,7 +315,7 @@ function Overview({ app, user, me, placements }: { app: App; user: User; me: Use
                                     The image of deployment #{d.id} runs again on the current data. Going back to an older
                                     minor version is usually fine; check the engine's notes if unsure.
                                   </p>
-                                ) : app.source === "compose" ? (
+                                ) : isCompose(app) ? (
                                   <p>The compose file and images of deployment #{d.id} are deployed again with the app's current environment.</p>
                                 ) : (
                                   <p>The image of deployment #{d.id} is deployed again with the app's current settings and environment.</p>
@@ -567,7 +579,7 @@ function EnvTab({ app }: { app: App }) {
       <Field
         label="One per line, KEY=value"
         help={
-          app.source === "compose" ? (
+          isCompose(app) ? (
             <>
               Stored encrypted. The compose file uses them as <code>${"{"}NAME{"}"}</code>; containers get only what the file
               passes them. Changes take effect on the next deployment.
@@ -621,7 +633,7 @@ function DomainsTab({ app, user }: { app: App; user: User }) {
         <Field
           label="One per line"
           help={
-            app.source === "compose"
+            isCompose(app)
               ? app.service
                 ? `Requests are proxied to port ${app.port} of service ${app.service}.`
                 : "Choose the published service under Compose first."
@@ -731,7 +743,7 @@ function SettingsTab({ app, panelAdmin }: { app: App; panelAdmin: boolean }) {
       </div>
     );
   }
-  if (app.source === "compose") {
+  if (isCompose(app)) {
     return (
       <div className="stack" style={{ maxWidth: 680 }}>
         {move}
@@ -802,7 +814,7 @@ function DeleteCard({ app }: { app: App }) {
     ? ["etc", "data"]
     : isDB
       ? ["data"]
-      : app.source === "compose"
+      : isCompose(app)
         ? (app.compose?.volumes ?? [])
         : app.volumes.map((v) => v.name);
   const del = useMutation({
@@ -868,7 +880,9 @@ function SourceTab({ app }: { app: App }) {
   const [url, setUrl] = useState(g.url);
   const [branch, setBranch] = useState(g.branch);
   const [dockerfile, setDockerfile] = useState(g.dockerfile);
-  const [builder, setBuilder] = useState<"" | "railpack">(g.builder ?? "");
+  const [builder, setBuilder] = useState<"" | "railpack" | "compose">(g.builder ?? "");
+  const [composeFile, setComposeFile] = useState(g.compose_file ?? "");
+  const gitCompose = builder === "compose" ? { compose_file: composeFile.trim() } : {};
   const [buildEnv, setBuildEnv] = useState((g.build_env ?? []).join(" "));
   const buildEnvList = buildEnv.split(/[\s,]+/).filter(Boolean);
   const [context, setContext] = useState(g.context);
@@ -877,8 +891,8 @@ function SourceTab({ app }: { app: App }) {
       api.updateApp(app.id, {
         image: "",
         git: g.source_id
-          ? { url: g.url, source_id: g.source_id, repo: g.repo, branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim(), builder, build_env: buildEnvList }
-          : { url: url.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim(), builder, build_env: buildEnvList },
+          ? { url: g.url, source_id: g.source_id, repo: g.repo, branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim(), builder, build_env: buildEnvList, ...gitCompose }
+          : { url: url.trim(), branch: branch.trim(), dockerfile: dockerfile.trim(), context: context.trim(), builder, build_env: buildEnvList, ...gitCompose },
         port: app.port,
         volumes: app.volumes,
         memory_mb: app.memory_mb,
@@ -917,27 +931,36 @@ function SourceTab({ app }: { app: App }) {
           <Field label="Branch">
             <input className="input mono" value={branch} onChange={(e) => setBranch(e.target.value)} required />
           </Field>
-          <Field label="Build" help={builder ? "Railpack works out how to build it; the app listens on $PORT." : undefined}>
-            <div className="row">
-              <select className="input" style={{ width: "auto" }} value={builder} onChange={(e) => setBuilder(e.target.value as "" | "railpack")}>
-                <option value="">Dockerfile</option>
-                <option value="railpack">Automatic</option>
-              </select>
-              {!builder && <input className="input mono" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} required />}
-            </div>
-          </Field>
+          {builder === "compose" ? (
+            <Field label="Compose file" help="Path in the repository; services with build: are built from the repository.">
+              <input className="input mono" value={composeFile} onChange={(e) => setComposeFile(e.target.value)} required />
+            </Field>
+          ) : (
+            <Field label="Build" help={builder ? "Railpack works out how to build it; the app listens on $PORT." : undefined}>
+              <div className="row">
+                <select className="input" style={{ width: "auto" }} value={builder} onChange={(e) => setBuilder(e.target.value as "" | "railpack")}>
+                  <option value="">Dockerfile</option>
+                  <option value="railpack">Automatic</option>
+                </select>
+                {!builder && <input className="input mono" value={dockerfile} onChange={(e) => setDockerfile(e.target.value)} required />}
+              </div>
+            </Field>
+          )}
         </div>
-        <Field label="Build context" help="Directory sent to the build; . is the repository root.">
-          <input className="input mono" value={context} onChange={(e) => setContext(e.target.value)} required />
-        </Field>
+        {builder !== "compose" && (
+          <Field label="Build context" help="Directory sent to the build; . is the repository root.">
+            <input className="input mono" value={context} onChange={(e) => setContext(e.target.value)} required />
+          </Field>
+        )}
         <Field
           label="Variables at build time"
           help={
-            builder ? (
+            builder === "railpack" ? (
               <>Names of variables under Environment the build needs, e.g. NEXT_PUBLIC_API_URL. Its steps get them; they are not kept in the image.</>
             ) : (
               <>
-                Names of variables under Environment the build needs. The Dockerfile reads each as a secret, e.g.{" "}
+                Names of variables under Environment the build{builder === "compose" ? "s need (every service built gets them)" : " needs"}. The
+                Dockerfile reads each as a secret, e.g.{" "}
                 <code>RUN --mount=type=secret,id=NPM_TOKEN,env=NPM_TOKEN npm ci</code>: they are not kept in the image.
               </>
             )
@@ -1100,7 +1123,7 @@ function ServicesCard({ app, services }: { app: App; services?: ServiceStatus[] 
                     {svc.name === app.service && <span className="faint small"> · port {app.port}, domains</span>}
                     {svc.job && <span className="faint small"> · runs once per deployment</span>}
                   </td>
-                  <td className="mono muted small">{st?.image ?? svc.image}</td>
+                  <td className="mono muted small">{st?.image ?? (svc.build ? `built from ${svc.build}` : svc.image)}</td>
                   <td>
                     {!st ? (
                       <span className="badge">not deployed</span>
@@ -1140,15 +1163,29 @@ function ComposeTab({ app }: { app: App }) {
       setWarnings(file.data.warnings);
     }
   }, [file.data, text]);
+  const fromRepo = app.source === "git";
+  const saved = (r: { app: App; warnings: string[] }) => {
+    qc.setQueryData(["app", app.id], (old: { app: App } | undefined) => (old ? { ...old, app: r.app } : old));
+    qc.invalidateQueries({ queryKey: ["apps"] });
+    setWarnings(r.warnings);
+    setPort(r.app.port ? String(r.app.port) : "");
+    setService(r.app.service ?? "");
+  };
   const save = useMutation({
     mutationFn: () => api.setAppCompose(app.id, { compose: text ?? "", service: service.trim(), port: Number(port) || 0 }),
     onSuccess: (r) => {
-      qc.setQueryData(["app", app.id], (old: { app: App } | undefined) => (old ? { ...old, app: r.app } : old));
-      qc.invalidateQueries({ queryKey: ["apps"] });
-      setWarnings(r.warnings);
-      setPort(r.app.port ? String(r.app.port) : "");
-      setService(r.app.service ?? "");
+      saved(r);
       toast("Saved. Deploy to apply.");
+    },
+  });
+  // A repository's file is read again on every deployment; this shows it now.
+  const load = useMutation({
+    mutationFn: () => api.loadAppCompose(app.id),
+    onSuccess: async (r) => {
+      saved(r);
+      const f = await file.refetch();
+      setText(f.data?.compose ?? "");
+      toast(`Read at commit ${r.commit.slice(0, 8)}`);
     },
   });
   if (file.isPending) return <Loading />;
@@ -1163,8 +1200,16 @@ function ComposeTab({ app }: { app: App }) {
       }}
     >
       <div className="card card-body form">
-        <h2>Compose file</h2>
-        {file.data.error && !save.isSuccess && <div className="alert err small">{file.data.error}</div>}
+        <div className="row" style={{ justifyContent: "space-between" }}>
+          <h2>Compose file</h2>
+          {fromRepo && (
+            <button type="button" className="btn sm" disabled={load.isPending} onClick={() => load.mutate()}>
+              <Icon name="refresh" size={14} /> {load.isPending ? "Reading…" : "Load from repository"}
+            </button>
+          )}
+        </div>
+        <ErrorBox error={load.error} />
+        {file.data.error && !save.isSuccess && !load.isSuccess && <div className="alert err small">{file.data.error}</div>}
         {warnings && warnings.length > 0 && (
           <div className="alert warn small">
             <ul className="steps">
@@ -1174,12 +1219,29 @@ function ComposeTab({ app }: { app: App }) {
             </ul>
           </div>
         )}
-        <Field
-          label="docker-compose.yml"
-          help="Stored encrypted. Bind mounts, host networking, privileges and builds are refused; ports are not published on the server."
-        >
-          <textarea className="input mono" rows={22} value={text ?? ""} onChange={(e) => setText(e.target.value)} spellCheck={false} />
-        </Field>
+        {fromRepo ? (
+          file.data.compose === "" ? (
+            <p className="muted" style={{ margin: 0 }}>
+              <span className="mono">{app.git?.compose_file}</span> is read from branch{" "}
+              <span className="mono">{app.git?.branch}</span> on every deployment. Load it to see its services and choose the
+              one the app's domains point to.
+            </p>
+          ) : (
+            <Field
+              label={app.git?.compose_file ?? "compose.yaml"}
+              help="As last read from the repository (change it there). Services with build: are built on the server; bind mounts, host networking and privileges are refused, ports are not published."
+            >
+              <textarea className="input mono" rows={22} value={text ?? ""} readOnly spellCheck={false} />
+            </Field>
+          )
+        ) : (
+          <Field
+            label="docker-compose.yml"
+            help="Stored encrypted. Bind mounts, host networking, privileges and builds are refused; ports are not published on the server."
+          >
+            <textarea className="input mono" rows={22} value={text ?? ""} onChange={(e) => setText(e.target.value)} spellCheck={false} />
+          </Field>
+        )}
       </div>
       <div className="card card-body form">
         <h2>Published service</h2>
@@ -1206,7 +1268,7 @@ function ComposeTab({ app }: { app: App }) {
         </div>
         <ErrorBox error={save.error} />
         <div>
-          <button className="btn primary" disabled={save.isPending}>
+          <button className="btn primary" disabled={save.isPending || (fromRepo && file.data.compose === "" && !load.isSuccess)}>
             Save
           </button>
         </div>
