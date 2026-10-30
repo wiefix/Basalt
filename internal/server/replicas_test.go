@@ -75,3 +75,63 @@ func TestComposeAppReplicas(t *testing.T) {
 	c.want(http.StatusAccepted, "POST", app+"/deploy", map[string]any{"rollback_to": first})
 	waitIdle()
 }
+
+// TestComposeRouteReplicas: domains of other services of a compose app go
+// to every server it runs on, must be in a zone of Basalt there, and their
+// services deploy with their ports.
+func TestComposeRouteReplicas(t *testing.T) {
+	hub := &fakeHub{}
+	srv := newTestServerWith(t, Options{SetupToken: testSetupToken, Agents: hub})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	c := (&env{t: t, srv: srv, ts: ts, clock: &testClock{}}).setupOwner()
+	var servers []int64
+	for i, name := range []string{"s1", "s2"} {
+		s := c.want(http.StatusCreated, "POST", "/api/v1/servers", map[string]string{"name": name}).body["server"].(map[string]any)
+		id := int64(s["id"].(float64))
+		srv.db.W.Exec(`UPDATE servers SET docker = '28.0.0', enrolled_at = 1 WHERE id = ?`, id)
+		c.want(http.StatusOK, "PUT", "/api/v1/servers/"+strconv.FormatInt(id, 10)+"/public-ips", map[string]any{"ips": []string{"192.0.2." + strconv.Itoa(10+i)}})
+		servers = append(servers, id)
+	}
+	c.want(http.StatusCreated, "POST", "/api/v1/dns/zones", map[string]string{"name": "example.test"})
+	file := "services:\n  web:\n    image: nginx:1.27\n    expose: [\"80\"]\n  api:\n    image: nginx:1.27\n"
+	a := c.want(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{"server_id": servers[0], "name": "stack", "source": "compose",
+		"compose": file, "service": "web", "port": 80, "domains": []string{"stack.example.test"}, "tls": "internal"}).body["app"].(map[string]any)
+	app := "/api/v1/apps/" + strconv.Itoa(int(a["id"].(float64)))
+	route := func(domain string) map[string]any {
+		return map[string]any{"routes": []map[string]any{{"service": "api", "port": 8080, "domains": []string{domain}}}}
+	}
+	// Outside Basalt's zones a replica cannot follow (DNS-01, DNS failover).
+	c.want(http.StatusOK, "PUT", app+"/routes", route("api.elsewhere.test"))
+	c.want(http.StatusUnprocessableEntity, "POST", app+"/replicas", map[string]any{"server_id": servers[1]})
+	c.want(http.StatusOK, "PUT", app+"/routes", route("api.example.test"))
+	c.want(http.StatusCreated, "POST", app+"/replicas", map[string]any{"server_id": servers[1]})
+	c.want(http.StatusUnprocessableEntity, "PUT", app+"/routes", route("api.elsewhere.test"))
+	c.want(http.StatusAccepted, "POST", app+"/deploy", map[string]any{})
+	for range 200 {
+		var n int
+		srv.db.R.QueryRow(`SELECT COUNT(*) FROM deployments WHERE status = 'running'`).Scan(&n)
+		if n == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, id := range servers {
+		d, err := srv.db.DesiredProxy(t.Context(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(d.Routes) != 1 || len(d.Routes[0].Services) != 1 || d.Routes[0].Services[0].Domains[0] != "api.example.test" || !d.Routes[0].DNSChallenge {
+			t.Fatalf("server %d proxy = %+v", id, d.Routes)
+		}
+	}
+	deployed := hub.deployed()
+	if len(deployed) == 0 {
+		t.Fatal("not deployed")
+	}
+	for _, svc := range deployed[len(deployed)-1].Services {
+		if want := map[string]int{"web": 0, "api": 8080}[svc.Name]; svc.RoutePort != want || svc.Name == "web" && svc.Port != 80 {
+			t.Fatalf("service %s: port %d, route port %d", svc.Name, svc.Port, svc.RoutePort)
+		}
+	}
+}

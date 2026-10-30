@@ -191,6 +191,25 @@ func (p *Project) Publish(service string, port int) error {
 	return errf("the compose file has no service %q", service)
 }
 
+// Route gives another service domains of its own, served at port.
+func (p *Project) Route(service string, port int) error {
+	for i := range p.Services {
+		svc := &p.Services[i]
+		if svc.Name != service {
+			continue
+		}
+		switch {
+		case svc.Job:
+			return errf("service %s runs to completion and cannot have domains", service)
+		case svc.Port > 0:
+			return errf("service %s is the published service: it cannot have domains of its own too (remove them first)", service)
+		}
+		svc.RoutePort = port
+		return nil
+	}
+	return errf("service %s has domains, but the compose file has no such service: remove its domains first", service)
+}
+
 // DefaultPublished suggests the service and port to publish: the first
 // service (by name) that mentions a port.
 func (p *Project) DefaultPublished() (string, int) {

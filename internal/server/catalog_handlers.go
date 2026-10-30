@@ -113,7 +113,7 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request, p *princi
 		}
 		in.Env[catalog.MailHostKey] = mailApp.Hostname
 	}
-	cf, err := s.parseCompose(r.Context(), []byte(t.Compose), in.Env, t.Expose.Service, t.Expose.Port, "")
+	cf, err := s.parseCompose(r.Context(), []byte(t.Compose), in.Env, t.Expose.Service, t.Expose.Port, nil, "")
 	if err != nil {
 		s.internalError(w, r, "parse template "+t.ID, err)
 		return
@@ -369,7 +369,12 @@ func (s *Server) handleTemplateUpdate(w http.ResponseWriter, r *http.Request, p 
 		}
 		newEnv[catalog.MailHostKey] = mailApp.Hostname
 	}
-	cf, err := s.parseCompose(r.Context(), []byte(t.Compose), newEnv, t.Expose.Service, t.Expose.Port, "")
+	cf, err := s.parseCompose(r.Context(), []byte(t.Compose), newEnv, t.Expose.Service, t.Expose.Port, app.Routes, "")
+	if err != nil && len(app.Routes) > 0 {
+		// A service given domains of its own is gone from the new version.
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	if err != nil {
 		s.internalError(w, r, "parse template "+t.ID, err)
 		return

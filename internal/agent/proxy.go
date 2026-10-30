@@ -136,7 +136,7 @@ func (m *proxyManager) withPanel(d proxy.Desired) proxy.Desired {
 	out := d
 	out.Routes = []proxy.Route{panel}
 	for _, r := range d.Routes {
-		if slices.ContainsFunc(r.Domains, func(x string) bool { return slices.Contains(panel.Domains, x) }) {
+		if slices.ContainsFunc(r.AllDomains(), func(x string) bool { return slices.Contains(panel.Domains, x) }) {
 			m.log.Warn("route uses the panel's domain; skipped", "route_id", r.ID)
 			continue
 		}

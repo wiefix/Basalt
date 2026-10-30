@@ -131,7 +131,7 @@ func (s *Server) handleAddReplica(w http.ResponseWriter, r *http.Request, p *pri
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if msg, err := s.replicaProblem(r.Context(), app, app.Domains); err != nil {
+	if msg, err := s.replicaProblem(r.Context(), app, app.AllDomains()); err != nil {
 		s.internalError(w, r, "check app", err)
 		return
 	} else if msg != "" {

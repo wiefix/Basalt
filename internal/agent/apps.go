@@ -19,6 +19,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/docker"
+	"github.com/wiefix/basalt/internal/proxy"
 )
 
 // Container labels. Docker is the source of truth for what runs on the
@@ -32,6 +33,9 @@ const (
 	// settings, which tells whether a deployment must replace it.
 	labelService = "basalt.service"
 	labelConfig  = "basalt.config"
+	// labelRoutePort is the HTTP port of a compose service with domains of
+	// its own (labelPort is the published service's).
+	labelRoutePort = "basalt.route-port"
 	// labelNamespace marks the resources of an agent started with a Docker
 	// namespace; resources without it belong to the agent without one.
 	labelNamespace = "basalt.namespace"
@@ -73,7 +77,7 @@ type appsManager struct {
 	locks map[int64]*sync.Mutex
 
 	umu       sync.Mutex
-	upstreams map[int64]string
+	upstreams map[string]string // proxy.AppUpstreamKey -> ip:port
 	lastErr   string
 
 	// namespace separates this agent's Docker resources from those of
@@ -91,7 +95,7 @@ type appsManager struct {
 func newAppsManager(cfg Config, log *slog.Logger) *appsManager {
 	m := &appsManager{
 		log: log, socket: cfg.DockerSocket, publish: runtime.GOOS != "linux", namespace: cfg.DockerNamespace,
-		locks: map[int64]*sync.Mutex{}, upstreams: map[int64]string{}, onChange: func() {},
+		locks: map[int64]*sync.Mutex{}, upstreams: map[string]string{}, onChange: func() {},
 		dataDir: cfg.DataDir, gitCAFile: cfg.GitCAFile, railpack: cfg.Railpack, builds: make(chan struct{}, maxConcurrentBuilds),
 	}
 	if cfg.DockerSocket != "" {
@@ -159,8 +163,9 @@ func (m *appsManager) lock(appID int64) func() {
 	return l.Unlock
 }
 
-// Upstreams returns the dial address of every app's current container.
-func (m *appsManager) Upstreams() map[int64]string {
+// Upstreams returns the dial address of every app's current container
+// (and of each other service with domains of its own).
+func (m *appsManager) Upstreams() map[string]string {
 	m.umu.Lock()
 	defer m.umu.Unlock()
 	return maps.Clone(m.upstreams)
@@ -624,11 +629,14 @@ func (m *appsManager) refresh(ctx context.Context) {
 		m.report(err)
 		return
 	}
-	next := map[int64]string{}
+	next := map[string]string{}
 	for _, c := range list { // newest deployment first
 		app := labelInt(c.Labels, labelApp)
-		port := int(labelInt(c.Labels, labelPort))
-		if _, done := next[app]; done || app <= 0 || port <= 0 || c.State != "running" {
+		key, port := proxy.AppUpstreamKey(app, ""), int(labelInt(c.Labels, labelPort))
+		if svc := c.Labels[labelService]; port <= 0 && agentproto.ServiceNameRE.MatchString(svc) {
+			key, port = proxy.AppUpstreamKey(app, svc), int(labelInt(c.Labels, labelRoutePort))
+		}
+		if _, done := next[key]; done || app <= 0 || port <= 0 || c.State != "running" {
 			continue
 		}
 		info, err := dc.ContainerInspect(ctx, c.ID)
@@ -636,7 +644,7 @@ func (m *appsManager) refresh(ctx context.Context) {
 			continue
 		}
 		if up := m.upstreamOf(info, app, port); up != "" {
-			next[app] = up
+			next[key] = up
 		}
 	}
 	m.umu.Lock()

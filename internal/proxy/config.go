@@ -107,7 +107,7 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 	}
 	for _, r := range d.Routes {
 		if name := AccessLogName(r); name != "" {
-			for _, dom := range r.Domains {
+			for _, dom := range r.AllDomains() {
 				loggerNames[dom] = name
 			}
 			logs[name] = obj{
@@ -117,13 +117,7 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 				"include": []any{"http.log.access." + name},
 			}
 		}
-		var exact, wild []string
-		for _, dom := range r.Domains {
-			if IsWildcard(dom) {
-				wild = append(wild, dom)
-			} else {
-				exact = append(exact, dom)
-			}
+		for _, dom := range r.AllDomains() {
 			switch {
 			case r.TLS == TLSInternal || !PublicCertEligible(dom):
 				internalNames = append(internalNames, dom)
@@ -131,16 +125,32 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 				dnsNames = append(dnsNames, dom)
 			}
 		}
-		handlers, fsEntry := routeHandlers(r)
-		if fsEntry != nil {
-			filesystems = append(filesystems, fsEntry)
-		}
-		handle := []any{obj{"handler": "subroute", "routes": []any{obj{"handle": handlers}}}}
-		if len(exact) > 0 {
-			routes = append(routes, obj{"match": []any{obj{"host": exact}}, "handle": handle, "terminal": true})
-		}
-		if len(wild) > 0 {
-			wildcardRoutes = append(wildcardRoutes, obj{"match": []any{obj{"host": wild}}, "handle": handle, "terminal": true})
+		// The published service (or the site), then each other service of
+		// the app on its own domains.
+		parts := append([]ServiceRoute{{Domains: r.Domains}}, r.Services...)
+		for _, part := range parts {
+			if len(part.Domains) == 0 {
+				continue
+			}
+			var exact, wild []string
+			for _, dom := range part.Domains {
+				if IsWildcard(dom) {
+					wild = append(wild, dom)
+				} else {
+					exact = append(exact, dom)
+				}
+			}
+			handlers, fsEntry := routeHandlers(r, part.Service)
+			if fsEntry != nil {
+				filesystems = append(filesystems, fsEntry)
+			}
+			handle := []any{obj{"handler": "subroute", "routes": []any{obj{"handle": handlers}}}}
+			if len(exact) > 0 {
+				routes = append(routes, obj{"match": []any{obj{"host": exact}}, "handle": handle, "terminal": true})
+			}
+			if len(wild) > 0 {
+				wildcardRoutes = append(wildcardRoutes, obj{"match": []any{obj{"host": wild}}, "handle": handle, "terminal": true})
+			}
 		}
 	}
 	// Exact names first: www.example.com is served by its own route even
@@ -191,7 +201,9 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 	return b, id, err
 }
 
-func routeHandlers(r Route) (handlers []any, fsEntry obj) {
+// routeHandlers serves route r; service names the app's service the
+// domains go to ("": the published one).
+func routeHandlers(r Route, service string) (handlers []any, fsEntry obj) {
 	set := obj{
 		"X-Content-Type-Options": []any{"nosniff"},
 		"Referrer-Policy":        []any{"strict-origin-when-cross-origin"},
@@ -247,7 +259,11 @@ func routeHandlers(r Route) (handlers []any, fsEntry obj) {
 			"load_balancing": obj{"try_duration": "2s", "try_interval": "250ms"},
 		}
 		if r.AppID > 0 {
-			rp["dynamic_upstreams"] = obj{"source": AppUpstreamSource, "app_id": r.AppID}
+			up := obj{"source": AppUpstreamSource, "app_id": r.AppID}
+			if service != "" {
+				up["service"] = service
+			}
+			rp["dynamic_upstreams"] = up
 		} else {
 			rp["upstreams"] = []any{obj{"dial": r.Upstream}}
 		}

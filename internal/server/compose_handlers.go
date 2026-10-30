@@ -16,6 +16,7 @@ import (
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/compose"
 	"github.com/wiefix/basalt/internal/docker"
+	"github.com/wiefix/basalt/internal/proxy"
 	"github.com/wiefix/basalt/internal/store"
 )
 
@@ -32,10 +33,11 @@ type composeFile struct {
 
 // parseCompose validates a compose file and picks the published service:
 // the one given (at port, or the first port the file mentions for it), or
-// by default the first service that mentions a port. repoDir: the file is
-// from the app's git repository, in that directory, and its services may
-// build ("": not from a repository).
-func (s *Server) parseCompose(ctx context.Context, content []byte, env map[string]string, service string, port int, repoDir string) (*composeFile, error) {
+// by default the first service that mentions a port. routes are the other
+// services with domains of their own (all must be in the file). repoDir:
+// the file is from the app's git repository, in that directory, and its
+// services may build ("": not from a repository).
+func (s *Server) parseCompose(ctx context.Context, content []byte, env map[string]string, service string, port int, routes []store.AppRoute, repoDir string) (*composeFile, error) {
 	var p *compose.Project
 	var err error
 	if repoDir != "" {
@@ -63,6 +65,11 @@ func (s *Server) parseCompose(ctx context.Context, content []byte, env map[strin
 	}
 	if err := p.Publish(service, port); err != nil {
 		return nil, err
+	}
+	for _, rt := range routes {
+		if err := p.Route(rt.Service, rt.Port); err != nil {
+			return nil, err
+		}
 	}
 	return &composeFile{content: content, project: p, service: service, port: port}, nil
 }
@@ -143,7 +150,7 @@ func (s *Server) handleGetCompose(w http.ResponseWriter, r *http.Request, p *pri
 		return
 	}
 	resp := map[string]any{"compose": string(content), "service": app.Service, "port": app.Port, "warnings": []string{}}
-	if cf, err := s.parseCompose(r.Context(), content, env, app.Service, app.Port, composeDir(app)); err != nil {
+	if cf, err := s.parseCompose(r.Context(), content, env, app.Service, app.Port, app.Routes, composeDir(app)); err != nil {
 		resp["error"] = err.Error()
 	} else {
 		resp["warnings"] = nonNil(cf.project.Warnings)
@@ -192,7 +199,7 @@ func (s *Server) storeCompose(w http.ResponseWriter, r *http.Request, p *princip
 		s.internalError(w, r, "decrypt app env", err)
 		return
 	}
-	cf, err := s.parseCompose(r.Context(), content, env, service, port, composeDir(app))
+	cf, err := s.parseCompose(r.Context(), content, env, service, port, app.Routes, composeDir(app))
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -235,6 +242,120 @@ func (s *Server) checkComposeFile(ctx context.Context, app *store.App, cf *compo
 		return errors.New("the app has domains: choose the service and port they point to")
 	}
 	return nil
+}
+
+type appRoutesRequest struct {
+	Routes []store.AppRoute `json:"routes"`
+}
+
+// handleSetAppRoutes replaces the other services of a compose app that have
+// domains of their own. Their containers are labelled with the port when
+// they deploy: a new service or port is served from the next deployment,
+// new domains of a service already served at once.
+func (s *Server) handleSetAppRoutes(w http.ResponseWriter, r *http.Request, p *principal) {
+	app, ok := s.composeApp(w, r)
+	if !ok {
+		return
+	}
+	var req appRoutesRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	routes, err := s.normalizeRoutes(r.Context(), app, req.Routes)
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	var domains []string
+	for _, rt := range routes {
+		domains = append(domains, rt.Domains...)
+	}
+	if s.domainError(w, r, s.checkDomainProjects(r.Context(), domains, app.ProjectID)) {
+		return
+	}
+	if len(app.Replicas) > 0 {
+		msg, err := s.domainsOutsideZones(r.Context(), domains)
+		if err != nil {
+			s.internalError(w, r, "check domains", err)
+			return
+		}
+		if msg != "" {
+			writeError(w, http.StatusUnprocessableEntity, msg)
+			return
+		}
+	}
+	err = s.db.SetAppRoutes(r.Context(), app.ID, routes)
+	var taken *store.ErrDomainTaken
+	if errors.As(err, &taken) {
+		writeError(w, http.StatusConflict, taken.Error())
+		return
+	}
+	if err != nil {
+		s.internalError(w, r, "set app routes", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "app.routes_changed", map[string]any{"app_id": app.ID, "routes": routes})
+	s.PushProxy(r.Context(), app.ServerID)
+	for _, id := range app.Replicas {
+		s.PushProxy(r.Context(), id)
+	}
+	app.Routes = routes
+	writeJSON(w, http.StatusOK, map[string]any{"app": viewApp(app), "sync": s.proxySync(r.Context(), app.ServerID)})
+}
+
+// normalizeRoutes checks the routes of an app's services against its
+// compose file (as last stored) and normalizes their domains. A route
+// without a port gets the first one the file mentions for the service.
+func (s *Server) normalizeRoutes(ctx context.Context, app *store.App, in []store.AppRoute) ([]store.AppRoute, error) {
+	if len(in) > proxy.MaxServiceRoutes {
+		return nil, fmt.Errorf("at most %d services can have domains of their own", proxy.MaxServiceRoutes)
+	}
+	out := []store.AppRoute{}
+	seen := map[string]bool{}
+	for _, d := range app.Domains {
+		seen["domain "+d] = true
+	}
+	for _, rt := range in {
+		rt.Service = strings.TrimSpace(rt.Service)
+		i := slices.IndexFunc(app.Summary.Services, func(c store.ComposeService) bool { return c.Name == rt.Service })
+		switch {
+		case i < 0:
+			return nil, fmt.Errorf("the compose file has no service %q", rt.Service)
+		case app.Summary.Services[i].Job:
+			return nil, fmt.Errorf("service %s runs to completion and cannot have domains", rt.Service)
+		case rt.Service == app.Service:
+			return nil, fmt.Errorf("service %s is the published service: its domains are the app's domains", rt.Service)
+		case seen["service "+rt.Service]:
+			return nil, fmt.Errorf("service %s is listed twice", rt.Service)
+		}
+		seen["service "+rt.Service] = true
+		if ports := app.Summary.Services[i].Ports; rt.Port == 0 && len(ports) > 0 {
+			rt.Port = ports[0]
+		}
+		if rt.Port < 1 || rt.Port > 65535 {
+			return nil, fmt.Errorf("set the port service %s listens on", rt.Service)
+		}
+		if len(rt.Domains) == 0 {
+			return nil, fmt.Errorf("service %s needs at least one domain", rt.Service)
+		}
+		domains, _, err := normalizeAppDomains(rt.Domains, app.TLS, rt.Port)
+		if err == nil {
+			err = s.checkWildcards(ctx, domains, app.TLS)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("service %s: %w", rt.Service, err)
+		}
+		for _, d := range domains {
+			if seen["domain "+d] {
+				return nil, fmt.Errorf("domain %s is used twice by the app", d)
+			}
+			seen["domain "+d] = true
+		}
+		rt.Domains = domains
+		out = append(out, rt)
+	}
+	slices.SortFunc(out, func(a, b store.AppRoute) int { return strings.Compare(a.Service, b.Service) })
+	return out, nil
 }
 
 // handleLoadCompose reads a git app's compose file from its repository
@@ -299,7 +420,7 @@ func (s *Server) composeSpec(ctx context.Context, app *store.App, content []byte
 	if err != nil {
 		return nil, fmt.Errorf("decrypt app env: %w", err)
 	}
-	cf, err := s.parseCompose(ctx, content, env, app.Service, app.Port, composeDir(app))
+	cf, err := s.parseCompose(ctx, content, env, app.Service, app.Port, app.Routes, composeDir(app))
 	if err != nil {
 		return nil, &deployError{status: http.StatusUnprocessableEntity, msg: "compose file: " + err.Error(), cause: err}
 	}

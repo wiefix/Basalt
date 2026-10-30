@@ -85,9 +85,15 @@ func (db *DB) CreateSite(ctx context.Context, projectID, serverID int64, name st
 }
 
 func insertDomains(ctx context.Context, tx *sql.Tx, serverID, routeID int64, domains []string) error {
+	return insertServiceDomains(ctx, tx, serverID, routeID, "", domains)
+}
+
+// insertServiceDomains adds domains of a route that go to one service of
+// its app ("": the published one).
+func insertServiceDomains(ctx context.Context, tx *sql.Tx, serverID, routeID int64, service string, domains []string) error {
 	for _, d := range domains {
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO proxy_route_domains (server_id, domain, route_id) VALUES (?, ?, ?)`, serverID, d, routeID)
+			`INSERT INTO proxy_route_domains (server_id, domain, route_id, service) VALUES (?, ?, ?, ?)`, serverID, d, routeID, service)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 				return &ErrDomainTaken{Domain: d}

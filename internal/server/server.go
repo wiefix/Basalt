@@ -484,6 +484,7 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("POST /api/v1/notifications/{id}/test", s.requireRole(store.RoleUser, s.handleTestChannel))
 	rt.Handle("PUT /api/v1/notifications/panel-url", s.requireRole(store.RoleAdmin, s.handleSetPanelURL))
 	rt.Handle("PUT /api/v1/apps/{id}/domains", s.requireProject(store.RoleAdmin, s.handleSetAppDomains))
+	rt.Handle("PUT /api/v1/apps/{id}/routes", s.requireProject(store.RoleAdmin, s.handleSetAppRoutes))
 	rt.Handle("POST /api/v1/apps/{id}/replicas", s.requireProject(store.RoleAdmin, s.handleAddReplica))
 	rt.Handle("DELETE /api/v1/apps/{id}/replicas/{sid}", s.requireProject(store.RoleAdmin, s.handleRemoveReplica))
 	rt.Handle("POST /api/v1/sites/{id}/replicas", s.requireProject(store.RoleAdmin, s.handleAddSiteReplica))

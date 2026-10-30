@@ -47,7 +47,8 @@ func TestAppUpstreamsSwitchWithoutReload(t *testing.T) {
 	waitFor(t, "admin socket", func() bool { _, err := admin.Running(ctx, "x"); return err == nil })
 
 	httpsPort := freePort(t)
-	d := proxy.Desired{Routes: []proxy.Route{{ID: 1, Kind: proxy.KindReverseProxy, AppID: 7, Domains: []string{"app.localhost"}, TLS: proxy.TLSInternal}}}
+	d := proxy.Desired{Routes: []proxy.Route{{ID: 1, Kind: proxy.KindReverseProxy, AppID: 7, Domains: []string{"app.localhost"}, TLS: proxy.TLSInternal,
+		Services: []proxy.ServiceRoute{{Service: "api", Domains: []string{"api.localhost"}}}}}}
 	if err := d.Validate(""); err != nil {
 		t.Fatal(err)
 	}
@@ -70,8 +71,8 @@ func TestAppUpstreamsSwitchWithoutReload(t *testing.T) {
 			return (&net.Dialer{}).DialContext(ctx, n, addr)
 		},
 	}}
-	get := func() (int, string) {
-		r, err := hc.Get("https://app.localhost/")
+	getHost := func(host string) (int, string) {
+		r, err := hc.Get("https://" + host + "/")
 		if err != nil {
 			return 0, err.Error()
 		}
@@ -79,14 +80,26 @@ func TestAppUpstreamsSwitchWithoutReload(t *testing.T) {
 		b, _ := io.ReadAll(r.Body)
 		return r.StatusCode, string(b)
 	}
+	get := func() (int, string) { return getHost("app.localhost") }
 
 	// No container yet: 503 after the short retry window.
 	waitFor(t, "503 without upstream", func() bool { code, _ := get(); return code == http.StatusServiceUnavailable })
-	if err := admin.SetAppUpstreams(ctx, map[int64]string{7: blue}); err != nil {
+	if err := admin.SetAppUpstreams(ctx, map[string]string{"7": blue}); err != nil {
 		t.Fatal(err)
 	}
 	waitFor(t, "blue", func() bool { _, b := get(); return b == "blue" })
-	if err := admin.SetAppUpstreams(ctx, map[int64]string{7: "not-an-ip:80"}); err == nil {
+	// Another service of the app, on its own domain.
+	if err := admin.SetAppUpstreams(ctx, map[string]string{"7": blue, "7/api": green}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "service api", func() bool { _, b := getHost("api.localhost"); return b == "green" })
+	if _, b := get(); b != "blue" {
+		t.Fatalf("published service answered %q", b)
+	}
+	if err := admin.SetAppUpstreams(ctx, map[string]string{"7/../x": blue}); err == nil {
+		t.Fatal("invalid key accepted")
+	}
+	if err := admin.SetAppUpstreams(ctx, map[string]string{"7": "not-an-ip:80"}); err == nil {
 		t.Fatal("invalid upstream accepted")
 	}
 
@@ -114,7 +127,7 @@ func TestAppUpstreamsSwitchWithoutReload(t *testing.T) {
 		if i%2 == 0 {
 			up = green
 		}
-		if err := admin.SetAppUpstreams(ctx, map[int64]string{7: up}); err != nil {
+		if err := admin.SetAppUpstreams(ctx, map[string]string{"7": up}); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(50 * time.Millisecond)

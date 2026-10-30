@@ -120,6 +120,66 @@ func TestAppRoute(t *testing.T) {
 	}
 }
 
+func TestServiceRoutes(t *testing.T) {
+	r := Route{ID: 1, Kind: KindReverseProxy, AppID: 3, Services: []ServiceRoute{{Service: "api", Domains: []string{"API.a.com"}}}}
+	if err := r.Validate(""); err != nil {
+		t.Fatalf("services without published domains: %v", err)
+	}
+	if r.Services[0].Domains[0] != "api.a.com" {
+		t.Fatalf("service domain not normalized: %v", r.Services)
+	}
+	for name, bad := range map[string]Route{
+		"site route":       {Kind: KindStatic, SiteID: 1, Domains: []string{"a.com"}, Services: []ServiceRoute{{Service: "api", Domains: []string{"b.com"}}}},
+		"duplicate domain": {Kind: KindReverseProxy, AppID: 3, Domains: []string{"a.com"}, Services: []ServiceRoute{{Service: "api", Domains: []string{"a.com"}}}},
+		"repeated service": {Kind: KindReverseProxy, AppID: 3, Services: []ServiceRoute{{Service: "api", Domains: []string{"a.com"}}, {Service: "api", Domains: []string{"b.com"}}}},
+		"bad service":      {Kind: KindReverseProxy, AppID: 3, Services: []ServiceRoute{{Service: "../x", Domains: []string{"a.com"}}}},
+		"no domains":       {Kind: KindReverseProxy, AppID: 3, Services: []ServiceRoute{{Service: "api"}}},
+	} {
+		if err := bad.Validate(""); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+	other := Desired{Routes: []Route{r, {ID: 2, Kind: KindReverseProxy, AppID: 4, Domains: []string{"api.a.com"}}}}
+	if err := other.Validate(""); err == nil {
+		t.Fatal("a service domain served by another route accepted")
+	}
+
+	d := Desired{Routes: []Route{{ID: 1, Kind: KindReverseProxy, AppID: 3, Domains: []string{"a.com"}, DNSChallenge: true,
+		Services: []ServiceRoute{{Service: "api", Domains: []string{"api.a.com", "*.api.a.com"}}}}}}
+	if err := d.Validate(""); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := Build(d, BuildOptions{Dir: "/x", HTTPPort: 80, HTTPSPort: 443})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"match":[{"host":["a.com"]}]`, `"dynamic_upstreams":{"app_id":3,"source":"basalt_app"}`,
+		`"match":[{"host":["api.a.com"]}]`, `"match":[{"host":["*.api.a.com"]}]`,
+		`"dynamic_upstreams":{"app_id":3,"service":"api","source":"basalt_app"}`,
+		`"subjects":["a.com","*.api.a.com","api.a.com"]`, `"api.a.com":"app-3"`,
+	} {
+		if !strings.Contains(string(cfg), want) {
+			t.Errorf("config lacks %s:\n%s", want, cfg)
+		}
+	}
+
+	for k, want := range map[string]struct {
+		id  int64
+		svc string
+	}{"7": {7, ""}, "7/api": {7, "api"}} {
+		id, svc, err := ParseAppUpstreamKey(k)
+		if err != nil || id != want.id || svc != want.svc || AppUpstreamKey(id, svc) != k {
+			t.Errorf("key %q: %d %q %v", k, id, svc, err)
+		}
+	}
+	for _, k := range []string{"", "0", "-1", "07", "7/", "7/../x", "x/api"} {
+		if _, _, err := ParseAppUpstreamKey(k); err == nil {
+			t.Errorf("key %q accepted", k)
+		}
+	}
+}
+
 func TestWildcardDomains(t *testing.T) {
 	for in, want := range map[string]string{"*.Example.com": "*.example.com", "*.a.b.example.com.": "*.a.b.example.com", "www.example.com": "www.example.com"} {
 		if got, err := NormalizeRouteDomain(in); err != nil || got != want {

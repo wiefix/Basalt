@@ -57,6 +57,9 @@ type ServiceSpec struct {
 	// Port is the HTTP port of the service the app's domains point to; at
 	// most one service has one.
 	Port int `json:"port,omitempty"`
+	// RoutePort is the HTTP port of another service with domains of its
+	// own (proxy.ServiceRoute).
+	RoutePort int `json:"route_port,omitempty"`
 	// Job marks a service that runs to completion (others depend on it
 	// with condition "completed"); it runs again on every deployment.
 	Job bool `json:"job,omitempty"`
@@ -274,8 +277,12 @@ func (s *ServiceSpec) Validate(volumes map[string]bool) error {
 		return fail("invalid stop_grace_period")
 	case s.StopSignal != "" && !signalRE.MatchString(s.StopSignal):
 		return fail("invalid stop_signal")
-	case s.Port < 0 || s.Port > 65535:
+	case s.Port < 0 || s.Port > 65535 || s.RoutePort < 0 || s.RoutePort > 65535:
 		return fail("invalid port")
+	case s.Port > 0 && s.RoutePort > 0:
+		return fail("published twice")
+	case s.Job && (s.Port > 0 || s.RoutePort > 0):
+		return fail("a service that runs to completion cannot be published")
 	case len(s.CapDrop) > 50 || len(s.ExtraHosts) > 50:
 		return fail("too many cap_drop or extra_hosts entries")
 	}

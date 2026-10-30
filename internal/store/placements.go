@@ -158,7 +158,7 @@ func (db *DB) addReplica(ctx context.Context, owner string, id, serverID int64, 
 		return err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO proxy_route_domains (server_id, domain, route_id) SELECT ?, domain, ? FROM proxy_route_domains WHERE route_id = ?`,
+		`INSERT INTO proxy_route_domains (server_id, domain, route_id, service) SELECT ?, domain, ?, service FROM proxy_route_domains WHERE route_id = ?`,
 		serverID, routeID, primaryRoute); err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
 			return errors.New("one of the " + owner + "'s domains is already served by something else on that server")

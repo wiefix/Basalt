@@ -92,7 +92,7 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 	}
 	var retired []docker.ContainerSummary // replaced containers, removed at the end
 	active := map[string]string{}         // container ID -> service, after this deployment
-	switched := false                     // the published service has a new container
+	switched := false                     // a service with domains has a new container
 	for _, svc := range order {
 		hash := serviceHash(spec.AppID, svc, imageIDs[svc.Name])
 		olds := byService[svc.Name]
@@ -107,7 +107,7 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 			}
 			continue
 		}
-		switched = switched || svc.Port > 0
+		switched = switched || svc.Port > 0 || svc.RoutePort > 0
 		if len(svc.Mounts) > 0 {
 			// Its data must not be used by two containers at once.
 			for _, o := range olds {
@@ -138,7 +138,7 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 		if svc.Job {
 			err = m.waitJob(ctx, dc, svc.Name, id, lg)
 		} else {
-			err = m.waitContainer(ctx, dc, spec.AppID, svc.Port, id, "Service "+svc.Name+": ", lg)
+			err = m.waitContainer(ctx, dc, spec.AppID, max(svc.Port, svc.RoutePort), id, "Service "+svc.Name+": ", lg)
 		}
 		if err != nil {
 			lg.printf("Last output of service %s:", svc.Name)
@@ -391,6 +391,9 @@ func (m *appsManager) serviceConfig(spec agentproto.AppSpec, svc agentproto.Serv
 	if svc.Port > 0 {
 		labels[labelPort] = strconv.Itoa(svc.Port)
 	}
+	if svc.RoutePort > 0 {
+		labels[labelRoutePort] = strconv.Itoa(svc.RoutePort)
+	}
 	cfg := docker.ContainerConfig{
 		Image: svc.Image, Cmd: svc.Command, Entrypoint: svc.Entrypoint, Env: env,
 		User: svc.User, WorkingDir: svc.WorkingDir, Hostname: svc.Hostname,
@@ -404,8 +407,8 @@ func (m *appsManager) serviceConfig(spec agentproto.AppSpec, svc agentproto.Serv
 		t := svc.StopGrace
 		cfg.StopTimeout = &t
 	}
-	if m.publish && svc.Port > 0 {
-		p := strconv.Itoa(svc.Port) + "/tcp"
+	if port := max(svc.Port, svc.RoutePort); m.publish && port > 0 {
+		p := strconv.Itoa(port) + "/tcp"
 		cfg.ExposedPorts = map[string]struct{}{p: {}}
 		hc.PortBindings = map[string][]docker.PortBinding{p: {{HostIP: "127.0.0.1"}}}
 	}

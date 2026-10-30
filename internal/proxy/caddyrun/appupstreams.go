@@ -9,7 +9,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 
 	"github.com/caddyserver/caddy/v2"
@@ -28,16 +27,19 @@ func init() {
 // listeners, and connections waiting in the old listener's accept queue
 // are reset. The agent updates this table through the admin API instead,
 // and the proxy persists it so it survives restarts without the agent.
+// Keys are proxy.AppUpstreamKey: an app's published service, or another
+// of its services with domains of its own.
 var appTable = struct {
 	sync.RWMutex
-	m    map[int64]string
+	m    map[string]string
 	file string
-}{m: map[int64]string{}}
+}{m: map[string]string{}}
 
 // AppUpstreams is a dynamic upstream source returning the current
-// container of one app.
+// container of one app (or of one of its services).
 type AppUpstreams struct {
-	AppID int64 `json:"app_id"`
+	AppID   int64  `json:"app_id"`
+	Service string `json:"service,omitempty"`
 }
 
 func (AppUpstreams) CaddyModule() caddy.ModuleInfo {
@@ -49,7 +51,7 @@ func (AppUpstreams) CaddyModule() caddy.ModuleInfo {
 
 func (u *AppUpstreams) GetUpstreams(*http.Request) ([]*reverseproxy.Upstream, error) {
 	appTable.RLock()
-	addr := appTable.m[u.AppID]
+	addr := appTable.m[proxy.AppUpstreamKey(u.AppID, u.Service)]
 	appTable.RUnlock()
 	if addr == "" {
 		return nil, nil
@@ -58,7 +60,7 @@ func (u *AppUpstreams) GetUpstreams(*http.Request) ([]*reverseproxy.Upstream, er
 }
 
 // adminAPI serves GET/POST <admin>/basalt/app-upstreams with the table as
-// {"<app id>": "ip:port"}. POST replaces the whole table.
+// {"<app id>[/<service>]": "ip:port"}. POST replaces the whole table.
 type adminAPI struct{}
 
 func (adminAPI) CaddyModule() caddy.ModuleInfo {
@@ -75,7 +77,7 @@ func handleAppUpstreams(w http.ResponseWriter, r *http.Request) error {
 		appTable.RLock()
 		defer appTable.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
-		return json.NewEncoder(w).Encode(encodeTable(appTable.m))
+		return json.NewEncoder(w).Encode(appTable.m)
 	case http.MethodPost:
 		var in map[string]string
 		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&in); err != nil {
@@ -99,32 +101,23 @@ func handleAppUpstreams(w http.ResponseWriter, r *http.Request) error {
 	}
 }
 
-func encodeTable(m map[int64]string) map[string]string {
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[strconv.FormatInt(k, 10)] = v
-	}
-	return out
-}
-
-// decodeTable validates the table: positive app IDs and IP:port addresses.
-func decodeTable(in map[string]string) (map[int64]string, error) {
-	m := make(map[int64]string, len(in))
+// decodeTable validates the table: app upstream keys and IP:port addresses.
+func decodeTable(in map[string]string) (map[string]string, error) {
+	m := make(map[string]string, len(in))
 	for k, v := range in {
-		id, err := strconv.ParseInt(k, 10, 64)
-		if err != nil || id <= 0 {
-			return nil, fmt.Errorf("invalid app id %q", k)
+		if _, _, err := proxy.ParseAppUpstreamKey(k); err != nil {
+			return nil, err
 		}
 		if _, err := netip.ParseAddrPort(v); err != nil {
-			return nil, fmt.Errorf("app %d: upstream must be ip:port", id)
+			return nil, fmt.Errorf("app %s: upstream must be ip:port", k)
 		}
-		m[id] = v
+		m[k] = v
 	}
 	return m, nil
 }
 
-func writeTable(path string, m map[int64]string) error {
-	b, err := json.Marshal(encodeTable(m))
+func writeTable(path string, m map[string]string) error {
+	b, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}

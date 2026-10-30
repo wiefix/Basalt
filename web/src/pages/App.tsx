@@ -652,6 +652,7 @@ function DomainsTab({ app, user }: { app: App; user: User }) {
           </div>
         )}
       </form>
+      {isCompose(app) && <ServiceRoutesCard app={app} user={user} />}
       <div className="card card-body stack">
         <h2>How traffic reaches the app</h2>
         <p className="muted" style={{ margin: 0 }}>
@@ -663,6 +664,104 @@ function DomainsTab({ app, user }: { app: App; user: User }) {
         </p>
       </div>
     </div>
+  );
+}
+
+// ServiceRoutesCard edits the other services of a compose app that have
+// domains of their own.
+function ServiceRoutesCard({ app, user }: { app: App; user: User }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  type Row = { service: string; port: string; domains: string };
+  const toRows = (a: App): Row[] =>
+    (a.routes ?? []).map((r) => ({ service: r.service, port: String(r.port), domains: r.domains.join(" ") }));
+  const [rows, setRows] = useState<Row[]>(() => toRows(app));
+  const admin = can(user, "admin");
+  const names = app.compose?.services.filter((s) => !s.job && s.name !== app.service).map((s) => s.name) ?? [];
+  const set = (i: number, patch: Partial<Row>) => setRows(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const save = useMutation({
+    mutationFn: () =>
+      api.setAppRoutes(
+        app.id,
+        rows.map((r) => ({ service: r.service.trim(), port: Number(r.port) || 0, domains: r.domains.split(/[\s,]+/).filter(Boolean) })),
+      ),
+    onSuccess: (r) => {
+      qc.setQueryData(["app", app.id], { app: r.app, sync: r.sync });
+      qc.invalidateQueries({ queryKey: ["apps"] });
+      setRows(toRows(r.app));
+      toast("Saved. A new service or port is served after the next deployment.");
+    },
+  });
+  if (!admin && rows.length === 0) return null;
+  return (
+    <form
+      className="card card-body form"
+      onSubmit={(e: FormEvent) => {
+        e.preventDefault();
+        save.mutate();
+      }}
+    >
+      <h2>Other services</h2>
+      <p className="muted small" style={{ margin: 0 }}>
+        More services of the compose file with domains of their own (for example an API or an admin panel).
+      </p>
+      <ErrorBox error={save.error} />
+      {rows.map((r, i) => (
+        <div key={i} className="grid-2" style={{ gridTemplateColumns: "1fr 6rem" }}>
+          <Field label="Service">
+            <select className="input mono" value={r.service} onChange={(e) => set(i, { service: e.target.value, port: "" })} disabled={!admin}>
+              <option value="" disabled>
+                Choose…
+              </option>
+              {[...new Set([...names, r.service].filter(Boolean))].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Port">
+            <input
+              className="input mono"
+              type="number"
+              min={0}
+              max={65535}
+              value={r.port}
+              placeholder={String(app.compose?.services.find((s) => s.name === r.service)?.ports?.[0] ?? "")}
+              onChange={(e) => set(i, { port: e.target.value })}
+              disabled={!admin}
+            />
+          </Field>
+          <div style={{ gridColumn: "1 / -1" }}>
+            <Field label="Domains" help="Separated by spaces.">
+              <div className="row" style={{ gap: 8 }}>
+                <input className="input mono" value={r.domains} onChange={(e) => set(i, { domains: e.target.value })} disabled={!admin} />
+                {admin && (
+                  <button type="button" className="btn sm" onClick={() => setRows(rows.filter((_, j) => j !== i))}>
+                    Remove
+                  </button>
+                )}
+              </div>
+            </Field>
+          </div>
+        </div>
+      ))}
+      {admin && (
+        <div className="row" style={{ gap: 8 }}>
+          <button
+            type="button"
+            className="btn"
+            disabled={names.length === 0}
+            onClick={() => setRows([...rows, { service: names.find((n) => !rows.some((r) => r.service === n)) ?? "", port: "", domains: "" }])}
+          >
+            Add service
+          </button>
+          <button className="btn primary" disabled={save.isPending}>
+            Save
+          </button>
+        </div>
+      )}
+    </form>
   );
 }
 
@@ -1121,6 +1220,14 @@ function ServicesCard({ app, services }: { app: App; services?: ServiceStatus[] 
                   <td>
                     <strong>{svc.name}</strong>
                     {svc.name === app.service && <span className="faint small"> · port {app.port}, domains</span>}
+                    {app.routes
+                      ?.filter((r) => r.service === svc.name)
+                      .map((r) => (
+                        <span key={r.service} className="faint small">
+                          {" "}
+                          · port {r.port}, {r.domains.join(", ")}
+                        </span>
+                      ))}
                     {svc.job && <span className="faint small"> · runs once per deployment</span>}
                   </td>
                   <td className="mono muted small">{st?.image ?? (svc.build ? `built from ${svc.build}` : svc.image)}</td>

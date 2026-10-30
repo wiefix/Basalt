@@ -40,6 +40,8 @@ type appView struct {
 	// its secrets; for a git app, the file last read from the repository.
 	Service string                `json:"service,omitempty"`
 	Compose *store.ComposeSummary `json:"compose,omitempty"`
+	// Routes are a compose app's other services with domains of their own.
+	Routes []store.AppRoute `json:"routes,omitzero"` // never nil for a compose app
 	// Databases: engine, major version and the apps that reach it.
 	Engine  string  `json:"engine,omitempty"`
 	Version string  `json:"version,omitempty"`
@@ -90,7 +92,7 @@ func viewApp(a *store.App) appView {
 		if sum.Volumes == nil {
 			sum.Volumes = []string{}
 		}
-		v.Service, v.Compose = a.Service, &sum
+		v.Service, v.Compose, v.Routes = a.Service, &sum, nonNil(a.Routes)
 	}
 	switch a.Source {
 	case store.SourceDatabase:
@@ -385,7 +387,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 	var cf *composeFile
 	if req.Source == store.SourceCompose {
 		// No environment yet: unset variables are only warnings.
-		if cf, err = s.parseCompose(r.Context(), []byte(req.Compose), nil, req.Service, req.Port, ""); err != nil {
+		if cf, err = s.parseCompose(r.Context(), []byte(req.Compose), nil, req.Service, req.Port, nil, ""); err != nil {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}

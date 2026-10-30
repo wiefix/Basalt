@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/netip"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -53,12 +54,58 @@ type Route struct {
 	// table the agent keeps up to date (no config reload on deploy), so
 	// Upstream stays empty. Without a running container the app gets 503.
 	AppID int64 `json:"app_id,omitempty"`
+	// Services are other services of a compose app with domains of their
+	// own (Domains go to the app's published service).
+	Services []ServiceRoute `json:"services,omitempty"`
 	// DNSChallenge obtains the route's public certificates through the
 	// DNS-01 challenge: an app on several servers, where an HTTP challenge
 	// may reach another one of them.
 	DNSChallenge bool    `json:"dns_challenge,omitempty"`
 	TLS          TLSMode `json:"tls"`
 	HSTS         bool    `json:"hsts,omitempty"`
+}
+
+// ServiceRoute sends Domains to one service of an app; the proxy finds its
+// container in the upstream table under AppUpstreamKey.
+type ServiceRoute struct {
+	Service string   `json:"service"`
+	Domains []string `json:"domains"`
+}
+
+// MaxServiceRoutes is how many services of an app can have domains of
+// their own.
+const MaxServiceRoutes = 20
+
+var serviceNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
+
+// AppUpstreamKey names an app's container in the upstream table: the app
+// ID for its published service, "<id>/<service>" for another service with
+// domains of its own.
+func AppUpstreamKey(appID int64, service string) string {
+	k := strconv.FormatInt(appID, 10)
+	if service != "" {
+		k += "/" + service
+	}
+	return k
+}
+
+// ParseAppUpstreamKey undoes AppUpstreamKey.
+func ParseAppUpstreamKey(k string) (appID int64, service string, err error) {
+	id, service, _ := strings.Cut(k, "/")
+	appID, err = strconv.ParseInt(id, 10, 64)
+	if err != nil || appID <= 0 || id != strconv.FormatInt(appID, 10) || strings.Contains(k, "/") && !serviceNameRE.MatchString(service) {
+		return 0, "", fmt.Errorf("invalid app upstream %q", k)
+	}
+	return appID, service, nil
+}
+
+// AllDomains lists every domain of the route, its services' included.
+func (r *Route) AllDomains() []string {
+	out := slices.Clone(r.Domains)
+	for _, s := range r.Services {
+		out = append(out, s.Domains...)
+	}
+	return out
 }
 
 // Desired is the complete proxy state the panel wants on one host.
@@ -167,21 +214,39 @@ func ValidateUpstream(u string) error {
 
 // Validate checks a route. sitesRoot, when non-empty, confines static roots.
 func (r *Route) Validate(sitesRoot string) error {
-	if len(r.Domains) == 0 {
+	if len(r.Services) > 0 && (r.Kind != KindReverseProxy || r.AppID <= 0) {
+		return errors.New("only an app route has services")
+	}
+	if len(r.Services) > MaxServiceRoutes {
+		return fmt.Errorf("at most %d services with domains", MaxServiceRoutes)
+	}
+	all := r.AllDomains()
+	if len(all) == 0 {
 		return errors.New("at least one domain is required")
 	}
-	if len(r.Domains) > maxDomainsPerRoute {
+	if len(all) > maxDomainsPerRoute {
 		return fmt.Errorf("at most %d domains per route", maxDomainsPerRoute)
 	}
-	for i, d := range r.Domains {
-		n, err := NormalizeRouteDomain(d)
-		if err != nil {
+	if err := normalizeDomains(r.Domains); err != nil {
+		return err
+	}
+	services := map[string]bool{}
+	for i := range r.Services {
+		s := &r.Services[i]
+		if !serviceNameRE.MatchString(s.Service) || services[s.Service] {
+			return fmt.Errorf("invalid or repeated service %q", s.Service)
+		}
+		services[s.Service] = true
+		if len(s.Domains) == 0 {
+			return fmt.Errorf("service %s has no domains", s.Service)
+		}
+		if err := normalizeDomains(s.Domains); err != nil {
 			return err
 		}
-		r.Domains[i] = n
 	}
-	slices.Sort(r.Domains)
-	if len(slices.Compact(slices.Clone(r.Domains))) != len(r.Domains) {
+	all = r.AllDomains()
+	slices.Sort(all)
+	if len(slices.Compact(all)) != len(r.AllDomains()) {
 		return errors.New("duplicate domain in route")
 	}
 	switch r.TLS {
@@ -231,6 +296,19 @@ func (r *Route) Validate(sitesRoot string) error {
 	}
 }
 
+// normalizeDomains normalizes and sorts route domains in place.
+func normalizeDomains(domains []string) error {
+	for i, d := range domains {
+		n, err := NormalizeRouteDomain(d)
+		if err != nil {
+			return err
+		}
+		domains[i] = n
+	}
+	slices.Sort(domains)
+	return nil
+}
+
 func validateRoot(root, sitesRoot string) error {
 	if root == "" || !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return fmt.Errorf("root must be a clean absolute path, got %q", root)
@@ -249,7 +327,7 @@ func (d *Desired) Validate(sitesRoot string) error {
 		if err := r.Validate(sitesRoot); err != nil {
 			return fmt.Errorf("route %d: %w", r.ID, err)
 		}
-		for _, dom := range r.Domains {
+		for _, dom := range r.AllDomains() {
 			if other, dup := seen[dom]; dup {
 				return fmt.Errorf("domain %s is used by routes %d and %d", dom, other, r.ID)
 			}

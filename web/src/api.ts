@@ -281,6 +281,8 @@ export interface App {
   // service (port is its port) and the file's contents without secrets.
   service?: string;
   compose?: ComposeSummary;
+  // Other services with domains of their own (compose apps).
+  routes?: AppRoute[];
   // Databases: engine id, major version and the apps that reach it.
   engine?: string;
   version?: string;
@@ -303,6 +305,13 @@ export interface App {
   // Other servers the app runs on (image and git apps).
   replicas: number[];
   created_at: string;
+}
+
+// AppRoute sends domains to another service of a compose app, at port.
+export interface AppRoute {
+  service: string;
+  port: number;
+  domains: string[];
 }
 
 // A server an app runs on, with the health check its copy follows.
@@ -1249,6 +1258,7 @@ export const api = {
     del<{ sync: Sync; cleanup_error?: string }>(`/api/v1/apps/${id}${volumes ? "?volumes=1" : ""}`),
   setAppDomains: (id: number, domains: string[]) =>
     put<{ app: App; sync: Sync }>(`/api/v1/apps/${id}/domains`, { domains }),
+  setAppRoutes: (id: number, routes: AppRoute[]) => put<{ app: App; sync: Sync }>(`/api/v1/apps/${id}/routes`, { routes }),
   regenerateDeployKey: (id: number) => post<{ app: App }>(`/api/v1/apps/${id}/deploy-key`),
   appWebhook: (id: number) => get<{ webhook: Webhook }>(`/api/v1/apps/${id}/webhook`),
   setAppWebhook: (id: number, b: { auto_deploy: boolean; regenerate?: boolean }) =>

@@ -32,6 +32,8 @@ type App struct {
 	ComposeSealed []byte
 	Summary       ComposeSummary
 	Service       string
+	// Routes are the app's other services with domains of their own.
+	Routes []AppRoute
 
 	// Databases: engine and major version, and the apps whose networks the
 	// database joins (so they reach it by its name).
@@ -72,6 +74,13 @@ type App struct {
 	Replicas  []int64
 	TLS       proxy.TLSMode
 	CreatedAt time.Time
+}
+
+// AppRoute sends Domains to service Service of a compose app, at Port.
+type AppRoute struct {
+	Service string   `json:"service"`
+	Port    int      `json:"port"`
+	Domains []string `json:"domains"`
 }
 
 // GitSettings locate the Dockerfile an app is built from.
@@ -246,14 +255,16 @@ func marshalVolumes(v []agentproto.AppVolume) (string, error) {
 
 const appQuery = `SELECT a.id, a.server_id, a.project_id, a.name, a.source, a.image, a.git_url, a.git_branch, a.git_dockerfile,
 	a.git_context, COALESCE(a.git_source_id, 0), a.git_repo, a.git_builder, a.git_compose_file, a.build_env, a.deploy_key, a.deploy_key_public, a.webhook_secret, a.auto_deploy,
-	a.compose, a.compose_summary, a.service, a.engine, a.engine_version, a.hostname, a.template, a.template_revision,
+	a.compose, a.compose_summary, a.service, a.routes,
+	(SELECT COALESCE(json_group_array(json_array(x.service, x.domain)), '[]') FROM (SELECT service, domain FROM proxy_route_domains
+	 WHERE route_id = r.id AND service != '' ORDER BY service, domain) x), a.engine, a.engine_version, a.hostname, a.template, a.template_revision,
 	a.preview_domain, COALESCE(a.preview_of, 0), a.pr_number, a.forge_key_id, a.forge_hook_id,
 	(SELECT COALESCE(json_group_array(l.app_id), '[]') FROM (SELECT app_id FROM app_links WHERE database_id = a.id ORDER BY app_id) l),
 	(SELECT COALESCE(json_group_array(p.server_id), '[]') FROM (SELECT server_id FROM proxy_routes
 	 WHERE app_id = a.id AND server_id != a.server_id ORDER BY server_id) p),
 	a.port, a.env, a.volumes, a.memory_mb, a.cpus, a.read_only, a.created_at, r.id, r.tls, COALESCE(d.domain, '')
 	FROM apps a JOIN proxy_routes r ON r.app_id = a.id AND r.server_id = a.server_id
-	LEFT JOIN proxy_route_domains d ON d.route_id = r.id`
+	LEFT JOIN proxy_route_domains d ON d.route_id = r.id AND d.service = ''`
 
 func scanApps(rows *sql.Rows) ([]*App, error) {
 	defer rows.Close()
@@ -261,10 +272,10 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 	for rows.Next() {
 		var a App
 		var created int64
-		var vols, domain, summary, links, replicas, buildEnv string
+		var vols, domain, summary, links, replicas, buildEnv, routes, routeDomains string
 		if err := rows.Scan(&a.ID, &a.ServerID, &a.ProjectID, &a.Name, &a.Source, &a.Image, &a.Git.URL, &a.Git.Branch,
 			&a.Git.Dockerfile, &a.Git.Context, &a.Git.SourceID, &a.Git.Repo, &a.Git.Builder, &a.Git.ComposeFile, &buildEnv, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
-			&a.ComposeSealed, &summary, &a.Service, &a.Engine, &a.EngineVersion, &a.Hostname, &a.Template, &a.TemplateRevision,
+			&a.ComposeSealed, &summary, &a.Service, &routes, &routeDomains, &a.Engine, &a.EngineVersion, &a.Hostname, &a.Template, &a.TemplateRevision,
 			&a.PreviewDomain, &a.PreviewOf, &a.PRNumber, &a.ForgeKeyID, &a.ForgeHookID, &links, &replicas, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
 			return nil, err
 		}
@@ -287,6 +298,11 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 		if err := json.Unmarshal([]byte(buildEnv), &a.Git.BuildEnv); err != nil {
 			return nil, err
 		}
+		r, err := scanRoutes(routes, routeDomains)
+		if err != nil {
+			return nil, err
+		}
+		a.Routes = r
 		if a.Git.ComposeFile != "" {
 			a.Git.Builder = agentproto.BuilderCompose
 		}
@@ -298,6 +314,46 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 		out = append(out, &a)
 	}
 	return out, rows.Err()
+}
+
+// scanRoutes joins an app's routes (JSON [{service, port}]) with their
+// domains (JSON [[service, domain]]).
+func scanRoutes(routes, domains string) ([]AppRoute, error) {
+	var out []AppRoute
+	if err := json.Unmarshal([]byte(routes), &out); err != nil {
+		return nil, err
+	}
+	var pairs [][2]string
+	if err := json.Unmarshal([]byte(domains), &pairs); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Domains = []string{}
+		for _, p := range pairs {
+			if p[0] == out[i].Service {
+				out[i].Domains = append(out[i].Domains, p[1])
+			}
+		}
+	}
+	return out, nil
+}
+
+// ServiceRoutes are the routes of an app's services in proxy form.
+func (a *App) ServiceRoutes() []proxy.ServiceRoute {
+	var out []proxy.ServiceRoute
+	for _, r := range a.Routes {
+		out = append(out, proxy.ServiceRoute{Service: r.Service, Domains: r.Domains})
+	}
+	return out
+}
+
+// AllDomains lists the domains of the app and of its services.
+func (a *App) AllDomains() []string {
+	out := append([]string{}, a.Domains...)
+	for _, r := range a.Routes {
+		out = append(out, r.Domains...)
+	}
+	return out
 }
 
 func (db *DB) Apps(ctx context.Context) ([]*App, error) {
@@ -449,7 +505,7 @@ func (db *DB) SetAppDomains(ctx context.Context, appID int64, domains []string) 
 		return ErrNotFound
 	}
 	for _, r := range routes {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_route_domains WHERE route_id = ?`, r.RouteID); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_route_domains WHERE route_id = ? AND service = ''`, r.RouteID); err != nil {
 			return err
 		}
 		if err := insertDomains(ctx, tx, r.ServerID, r.RouteID, domains); err != nil {
@@ -460,6 +516,54 @@ func (db *DB) SetAppDomains(ctx context.Context, appID int64, domains []string) 
 		}
 	}
 	return tx.Commit()
+}
+
+// SetAppRoutes replaces the app's other services with domains of their
+// own, on every server it runs on.
+func (db *DB) SetAppRoutes(ctx context.Context, appID int64, routes []AppRoute) error {
+	b, err := json.Marshal(routeColumn(routes))
+	if err != nil {
+		return err
+	}
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	placed, err := appRoutes(ctx, tx, appID)
+	if err != nil {
+		return err
+	}
+	if len(placed) == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE apps SET routes = ? WHERE id = ?`, string(b), appID); err != nil {
+		return err
+	}
+	for _, p := range placed {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_route_domains WHERE route_id = ? AND service != ''`, p.RouteID); err != nil {
+			return err
+		}
+		for _, r := range routes {
+			if err := insertServiceDomains(ctx, tx, p.ServerID, p.RouteID, r.Service, r.Domains); err != nil {
+				return err
+			}
+		}
+		if err := bumpProxyRevision(ctx, tx, p.ServerID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// routeColumn is what the apps.routes column keeps of routes: the domains
+// are in proxy_route_domains.
+func routeColumn(routes []AppRoute) []AppRoute {
+	out := []AppRoute{}
+	for _, r := range routes {
+		out = append(out, AppRoute{Service: r.Service, Port: r.Port})
+	}
+	return out
 }
 
 // DeleteApp removes the app, its routes and deployments (by cascade) and

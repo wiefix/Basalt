@@ -34,7 +34,7 @@ func (s *Server) publicNames(ctx context.Context, serverID int64) ([]string, err
 		if r.TLS != proxy.TLSAuto {
 			continue
 		}
-		for _, d := range r.Domains {
+		for _, d := range r.AllDomains() {
 			if proxy.PublicCertEligible(d) {
 				names = append(names, d)
 			}

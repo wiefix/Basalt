@@ -8,7 +8,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -65,14 +64,11 @@ func (a *Admin) Running(ctx context.Context, id string) (bool, error) {
 	return resp.StatusCode == http.StatusOK, nil
 }
 
-// SetAppUpstreams replaces the proxy's table of app containers (app ID to
-// ip:port). It takes effect without reloading the configuration.
-func (a *Admin) SetAppUpstreams(ctx context.Context, m map[int64]string) error {
-	in := make(map[string]string, len(m))
-	for k, v := range m {
-		in[strconv.FormatInt(k, 10)] = v
-	}
-	b, err := json.Marshal(in)
+// SetAppUpstreams replaces the proxy's table of app containers
+// (AppUpstreamKey to ip:port). It takes effect without reloading the
+// configuration.
+func (a *Admin) SetAppUpstreams(ctx context.Context, m map[string]string) error {
+	b, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}

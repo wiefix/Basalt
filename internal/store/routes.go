@@ -84,10 +84,10 @@ func (db *DB) Routes(ctx context.Context, serverID int64) ([]*ProxyRoute, error)
 		`SELECT r.id, r.kind, r.root, r.upstream, r.tls, r.hsts, r.created_at, COALESCE(r.site_id, 0), COALESCE(r.app_id, 0),
 		        COALESCE(s.php_version, '') != '',
 		        (r.app_id IS NOT NULL AND (SELECT count(*) FROM proxy_routes o WHERE o.app_id = r.app_id) > 1) OR
-		        (r.site_id IS NOT NULL AND (SELECT count(*) FROM proxy_routes o WHERE o.site_id = r.site_id) > 1), d.domain
+		        (r.site_id IS NOT NULL AND (SELECT count(*) FROM proxy_routes o WHERE o.site_id = r.site_id) > 1), d.service, d.domain
 		 FROM proxy_routes r JOIN proxy_route_domains d ON d.route_id = r.id
 		 LEFT JOIN sites s ON s.id = r.site_id
-		 WHERE r.server_id = ? ORDER BY r.id, d.domain`, serverID)
+		 WHERE r.server_id = ? ORDER BY r.id, d.service, d.domain`, serverID)
 	if err != nil {
 		return nil, err
 	}
@@ -96,16 +96,25 @@ func (db *DB) Routes(ctx context.Context, serverID int64) ([]*ProxyRoute, error)
 	for rows.Next() {
 		var r ProxyRoute
 		var created int64
-		var domain string
-		if err := rows.Scan(&r.ID, &r.Kind, &r.Root, &r.Upstream, &r.TLS, &r.HSTS, &created, &r.SiteID, &r.AppID, &r.PHP, &r.DNSChallenge, &domain); err != nil {
+		var service, domain string
+		if err := rows.Scan(&r.ID, &r.Kind, &r.Root, &r.Upstream, &r.TLS, &r.HSTS, &created, &r.SiteID, &r.AppID, &r.PHP, &r.DNSChallenge, &service, &domain); err != nil {
 			return nil, err
 		}
-		if n := len(out); n > 0 && out[n-1].ID == r.ID {
-			out[n-1].Domains = append(out[n-1].Domains, domain)
+		if n := len(out); n == 0 || out[n-1].ID != r.ID {
+			r.ServerID, r.CreatedAt, r.Domains = serverID, time.Unix(created, 0), []string{}
+			out = append(out, &r)
+		}
+		cur := out[len(out)-1]
+		if service == "" {
+			cur.Domains = append(cur.Domains, domain)
 			continue
 		}
-		r.ServerID, r.CreatedAt, r.Domains = serverID, time.Unix(created, 0), []string{domain}
-		out = append(out, &r)
+		// Other services of an app, each with its domains.
+		if n := len(cur.Services); n == 0 || cur.Services[n-1].Service != service {
+			cur.Services = append(cur.Services, proxy.ServiceRoute{Service: service})
+		}
+		svc := &cur.Services[len(cur.Services)-1]
+		svc.Domains = append(svc.Domains, domain)
 	}
 	return out, rows.Err()
 }

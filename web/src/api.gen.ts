@@ -128,6 +128,10 @@ export interface AppMetricsView {
   net_tx: number;
 }
 
+export interface AppRoutesRequest {
+  routes?: StoreAppRoute[];
+}
+
 export interface AppSettingsRequest {
   cpus?: number;
   git?: GitView;
@@ -159,6 +163,7 @@ export interface AppView {
   project_id: number;
   read_only: boolean;
   replicas: number[];
+  routes?: StoreAppRouteOut[];
   server_id: number;
   service?: string;
   source: string;
@@ -1288,6 +1293,18 @@ export interface StorageView {
   user?: string;
 }
 
+export interface StoreAppRoute {
+  domains?: string[];
+  port?: number;
+  service?: string;
+}
+
+export interface StoreAppRouteOut {
+  domains: string[];
+  port: number;
+  service: string;
+}
+
 export interface StoreComposeService {
   build?: string;
   cpus?: number;
@@ -2412,6 +2429,13 @@ export type PutAppsIdPreviewsBody = PreviewsRequest;
 export type PutAppsIdProjectResponse = void;
 
 export type PutAppsIdProjectBody = MoveRequest;
+
+export type PutAppsIdRoutesResponse = {
+  app: AppView;
+  sync: ProxySyncView;
+};
+
+export type PutAppsIdRoutesBody = AppRoutesRequest;
 
 export type PutAppsIdWebhookResponse = {
   webhook: WebhookView;

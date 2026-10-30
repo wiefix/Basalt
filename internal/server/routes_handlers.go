@@ -29,7 +29,7 @@ type routeView struct {
 
 func viewRoute(r *store.ProxyRoute) routeView {
 	return routeView{
-		ID: r.ID, Kind: r.Kind, Domains: r.Domains, Root: r.Root, Upstream: r.Upstream, SiteID: r.SiteID, AppID: r.AppID, DNSChallenge: r.DNSChallenge,
+		ID: r.ID, Kind: r.Kind, Domains: r.AllDomains(), Root: r.Root, Upstream: r.Upstream, SiteID: r.SiteID, AppID: r.AppID, DNSChallenge: r.DNSChallenge,
 		TLS: r.TLS, HSTS: r.HSTS, CreatedAt: r.CreatedAt,
 	}
 }

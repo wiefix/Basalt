@@ -197,6 +197,7 @@ export const checks = [
   fits<Returns<A["updateApp"]>>()<G.PutAppsIdResponse>(),
   fits<Returns<A["deleteApp"]>>()<G.DeleteAppsIdResponse>(),
   fits<Returns<A["setAppDomains"]>>()<G.PutAppsIdDomainsResponse>(),
+  fits<Returns<A["setAppRoutes"]>>()<G.PutAppsIdRoutesResponse>(),
   fits<Returns<A["regenerateDeployKey"]>>()<G.PostAppsIdDeployKeyResponse>(),
   fits<Returns<A["appWebhook"]>>()<G.GetAppsIdWebhookResponse>(),
   fits<Returns<A["setAppWebhook"]>>()<G.PutAppsIdWebhookResponse>(),
