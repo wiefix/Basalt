@@ -204,6 +204,25 @@ func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string, 
 	})
 }
 
+// Laravel makes the site's Laravel processes (scheduler, queue workers)
+// those of l; a static site has none (Ensure removed them).
+func (m *sitesManager) Laravel(ctx context.Context, id int64, phpVersion string, settings php.Settings, dbSocket string, l php.Laravel) error {
+	if phpVersion == "" {
+		if !l.IsZero() {
+			return errors.New("Laravel processes need a PHP site")
+		}
+		return nil
+	}
+	d, err := m.dir(id)
+	if err != nil {
+		return err
+	}
+	return m.php.ApplyLaravel(ctx, php.Pool{
+		SiteID: id, Version: phpVersion, User: sysuser.SiteUser(id),
+		SocketGroup: m.wwwGroup, SiteDir: d, Settings: settings, DBSocket: dbSocket,
+	}, l)
+}
+
 // Delete removes the site's PHP pool and system user and moves its files to
 // the trash directory rather than erasing them, so an accidental deletion
 // can be recovered by an operator.

@@ -5,6 +5,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"strings"
 	"time"
 )
@@ -92,6 +93,28 @@ func (s *Site) Readlink(p string) (string, error) {
 		return "", err
 	}
 	return s.root.Readlink(c)
+}
+
+// Symlink creates the link p to target, a relative path that stays in the
+// site from p's folder (os.Root would not follow it outside anyway).
+func (s *Site) Symlink(target, p string) error {
+	c, err := Clean(p)
+	if err != nil {
+		return err
+	}
+	if c == "." {
+		return ErrRootTouched
+	}
+	if target == "" || path.IsAbs(target) || strings.ContainsRune(target, 0) {
+		return errors.New("a link's target must be a relative path")
+	}
+	if to := path.Join(path.Dir(c), target); to == ".." || strings.HasPrefix(to, "../") {
+		return errors.New("a link's target must stay in the site")
+	}
+	if err := s.root.Symlink(target, c); err != nil {
+		return err
+	}
+	return s.chownPath(c)
 }
 
 // Remove deletes a file or an empty directory (not recursive).

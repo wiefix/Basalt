@@ -434,7 +434,10 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			if err != nil {
 				return nil, fmt.Errorf("the site's database socket: %w", publicError(err))
 			}
-			return struct{}{}, publicError(a.sites.Ensure(ctx, req.SiteID, req.PHPVersion, req.PHP, sock))
+			if err := a.sites.Ensure(ctx, req.SiteID, req.PHPVersion, req.PHP, sock); err != nil {
+				return nil, publicError(err)
+			}
+			return struct{}{}, publicError(a.sites.Laravel(ctx, req.SiteID, req.PHPVersion, req.PHP, sock, req.Laravel))
 		}
 		a.siteDB.set(req.SiteID, nil)
 		return struct{}{}, publicError(a.sites.Delete(ctx, req.SiteID))

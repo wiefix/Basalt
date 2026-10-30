@@ -40,6 +40,8 @@ type Host struct {
 	PIDFile func(version string) string
 	// Binary returns the php-fpm binary for a version (default /usr/sbin/php-fpm<v>).
 	Binary func(version string) string
+	// CLI returns the PHP CLI binary for a version (default /usr/bin/php<v>).
+	CLI func(version string) string
 
 	// Units: each site's PHP runs as its own systemd service (its own FPM
 	// master in its own cgroup, so CPU and memory can be limited per site);
@@ -369,9 +371,9 @@ func (h *Host) removeSharedPools(siteID int64) error {
 	return errors.Join(errs...)
 }
 
-// Remove deletes the site's pools under all versions (and its service).
+// Remove deletes the site's pools under all versions (and its services).
 func (h *Host) Remove(siteID int64) error {
-	var errs []error
+	errs := []error{h.removeLaravel(siteID)}
 	if _, err := os.Stat(h.unitFile(siteID)); err == nil && h.Systemctl != nil {
 		name := UnitName(siteID)
 		errs = append(errs, h.Systemctl("disable", "--now", name))

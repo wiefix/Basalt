@@ -62,11 +62,12 @@ func fakeComposer(t *testing.T, calls *[]string, fail string) sitePHPRunner {
 		}
 		app := args[len(args)-1]
 		for name, body := range map[string]string{
-			"artisan":                 "<?php // artisan",
-			".env.example":            "APP_NAME=Laravel\nAPP_ENV=local\nAPP_KEY=\nAPP_DEBUG=true\nAPP_URL=http://localhost\n\nDB_CONNECTION=sqlite\n# DB_HOST=127.0.0.1\n# DB_PORT=3306\n# DB_DATABASE=laravel\n# DB_USERNAME=root\n# DB_PASSWORD=\n",
-			"public/index.php":        "<?php // front controller",
-			"public/robots.txt":       "User-agent: *",
-			"storage/logs/.gitignore": "*",
+			"artisan":                       "<?php // artisan",
+			".env.example":                  "APP_NAME=Laravel\nAPP_ENV=local\nAPP_KEY=\nAPP_DEBUG=true\nAPP_URL=http://localhost\n\nDB_CONNECTION=sqlite\n# DB_HOST=127.0.0.1\n# DB_PORT=3306\n# DB_DATABASE=laravel\n# DB_USERNAME=root\n# DB_PASSWORD=\n",
+			"public/index.php":              "<?php // front controller",
+			"public/robots.txt":             "User-agent: *",
+			"storage/logs/.gitignore":       "*",
+			"storage/app/public/.gitignore": "*",
 			"vendor/laravel/framework/src/Illuminate/Foundation/Application.php": "<?php\nclass Application {\n    const VERSION = '13.17.0';\n}\n",
 		} {
 			p := filepath.Join(app, name)
@@ -127,13 +128,20 @@ func TestSiteInstallLaravel(t *testing.T) {
 	os.Remove(filepath.Join(site, "vendor"))
 
 	resp, err := a.siteInstall(ctx, req)
-	if err != nil || resp.Version != "13.17.0" || resp.Files != 7 {
+	if err != nil || resp.Version != "13.17.0" || resp.Files != 8 {
 		t.Fatalf("install = %+v, %v", resp, err)
 	}
 	for _, p := range []string{"artisan", "public/index.php", "public/robots.txt", "storage/logs/.gitignore", ".env"} {
 		if _, err := os.Stat(filepath.Join(site, p)); err != nil {
 			t.Errorf("%s: %v", p, err)
 		}
+	}
+	// The public disk is served from public/storage.
+	if target, err := os.Readlink(filepath.Join(site, "storage/app/public")); err != nil || target != "../../public/storage" {
+		t.Errorf("storage link: %q %v", target, err)
+	}
+	if _, err := os.Stat(filepath.Join(site, "storage/app/public/.gitignore")); err != nil {
+		t.Errorf("public disk through the link: %v", err)
 	}
 	for _, p := range []string{"public/index.html", "public/public", laravelStage} {
 		if _, err := os.Stat(filepath.Join(site, p)); !os.IsNotExist(err) {

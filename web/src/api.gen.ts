@@ -948,6 +948,16 @@ export interface PasswordRequest {
   password?: string;
 }
 
+export interface PhpLaravel {
+  scheduler?: boolean;
+  workers?: number;
+}
+
+export interface PhpLaravelOut {
+  scheduler: boolean;
+  workers: number;
+}
+
 export interface PhpSettings {
   cpu_percent?: number;
   display_errors?: boolean;
@@ -1237,6 +1247,7 @@ export interface SiteView {
   domains: string[];
   id: number;
   kind: string;
+  laravel: PhpLaravelOut;
   name: string;
   over_quota: boolean;
   php_settings: PhpSettingsOut;
@@ -2603,6 +2614,12 @@ export type PutSitesIdFilesContentResponse = {
   path: string;
   size: number;
 };
+
+export type PutSitesIdLaravelResponse = {
+  site: SiteView;
+};
+
+export type PutSitesIdLaravelBody = PhpLaravel;
 
 export type PutSitesIdPhpResponse = {
   site: SiteView;

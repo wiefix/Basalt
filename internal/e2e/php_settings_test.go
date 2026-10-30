@@ -35,6 +35,17 @@ func TestPHPSettingsAPI(t *testing.T) {
 		t.Fatalf("settings = %v", st)
 	}
 
+	// Laravel processes: a PHP site on a server with systemd only (the
+	// services themselves are in the php package and the install test).
+	p.call(http.StatusUnprocessableEntity, "PUT", base+"/laravel", map[string]any{"workers": 9})
+	p.call(http.StatusBadRequest, "PUT", base+"/laravel", map[string]any{"command": "id"})
+	if e := p.call(http.StatusUnprocessableEntity, "PUT", base+"/laravel", map[string]any{"scheduler": true}); !strings.Contains(e["error"].(string), "PHP site") {
+		t.Fatalf("scheduler of a static site: %v", e)
+	}
+	if l := p.call(http.StatusOK, "PUT", base+"/laravel", map[string]any{"scheduler": false, "workers": 0})["site"].(map[string]any)["laravel"].(map[string]any); l["scheduler"] != false || l["workers"] != float64(0) {
+		t.Fatalf("laravel = %v", l)
+	}
+
 	// WordPress needs a PHP site (the install itself is in the Linux test).
 	p.call(http.StatusUnprocessableEntity, "POST", base+"/install", map[string]any{"app": "drupal"})
 	if e := p.call(http.StatusUnprocessableEntity, "POST", base+"/install", map[string]any{"app": "wordpress"}); !strings.Contains(e["error"].(string), "PHP") {
@@ -64,4 +75,5 @@ func TestPHPSettingsAPI(t *testing.T) {
 	v.call(http.StatusOK, "POST", "/api/v1/auth/login", map[string]string{"email": "v@example.com", "password": "a long password 1"})
 	v.call(http.StatusOK, "GET", base+"/php-log", nil)
 	v.call(http.StatusForbidden, "PUT", base+"/php-settings", map[string]any{"memory_mb": 128})
+	v.call(http.StatusForbidden, "PUT", base+"/laravel", map[string]any{})
 }

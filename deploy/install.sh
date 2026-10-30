@@ -249,11 +249,13 @@ if [ "$MODE" = uninstall ]; then
 		[ -z "$ids" ] || docker volume rm -f $ids >/dev/null 2>&1 || true
 	fi
 	say "Removing PHP pools"
+	# The sites' PHP and their Laravel processes (with their slices).
 	for unit in "$UNITS"/basalt-php-site-*.service; do
 		[ -e "$unit" ] || continue
 		systemctl disable --now "$(basename "$unit")" >/dev/null 2>&1 || true
 		rm -f "$unit"
 	done
+	rm -f "$UNITS"/basalt-sites-laravel*.slice
 	systemctl daemon-reload
 	rm -rf /etc/basalt
 	reload_php=0

@@ -221,3 +221,25 @@ func TestMkdirRenameChmod(t *testing.T) {
 		t.Fatalf("mode after overwrite = %s", e.Mode)
 	}
 }
+
+func TestSymlinkStaysInSite(t *testing.T) {
+	s, _ := setup(t)
+	s.Mkdir("/storage")
+	if err := s.Symlink("../public/img", "/storage/public"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.Readlink("/storage/public"); got != "../public/img" {
+		t.Fatalf("target %q", got)
+	}
+	for target, link := range map[string]string{
+		"../../2":     "/storage/out",
+		"/etc/passwd": "/storage/abs",
+		"../..":       "/storage/up",
+		"":            "/storage/empty",
+		"x":           "/",
+	} {
+		if err := s.Symlink(target, link); err == nil {
+			t.Errorf("link %s -> %q created", link, target)
+		}
+	}
+}

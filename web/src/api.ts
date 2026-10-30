@@ -140,6 +140,7 @@ export interface Site {
   tls: "auto" | "internal";
   php_version: string;
   php_settings: PHPSettings;
+  laravel: LaravelProcesses;
   usage: { disk_bytes: number; disk_files: number; db_bytes: number; at: string | null };
   quota_mb: number;
   over_quota: boolean;
@@ -171,6 +172,13 @@ export interface PHPSettings {
   timezone?: string;
   cpu_percent?: number;
   ram_mb?: number;
+}
+
+// LaravelProcesses are a Laravel site's background processes, run on its
+// primary server as systemd services of the site's user.
+export interface LaravelProcesses {
+  scheduler: boolean;
+  workers: number; // queue workers, 0–8
 }
 
 export interface FileEntry {
@@ -1117,6 +1125,7 @@ export const api = {
     put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/domains`, { domains }),
   setSitePHP: (id: number, version: string) => put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/php`, { version }),
   setSitePHPSettings: (id: number, s: PHPSettings) => put<{ site: Site }>(`/api/v1/sites/${id}/php-settings`, s),
+  setSiteLaravel: (id: number, l: LaravelProcesses) => put<{ site: Site }>(`/api/v1/sites/${id}/laravel`, l),
   installSite: (id: number, app: "wordpress" | "laravel") =>
     post<{ app: string; version: string; files: number; url?: string; database: Database }>(`/api/v1/sites/${id}/install`, { app }),
   siteAdminer: (id: number) => get<{ adminer: Adminer }>(`/api/v1/sites/${id}/adminer`),

@@ -160,6 +160,47 @@ for i in $(seq 30); do
 done
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "site down after the PHP update"; exit 1; }
 
+echo "### Laravel processes: scheduler and queue workers as sandboxed systemd services of the site's user"
+# A stand-in artisan: it records how it runs, then stays up as the real commands do.
+cat > /tmp/basalt-artisan <<'PHP'
+<?php
+$out = __DIR__ . "/logs/" . str_replace(":", "-", $argv[1] ?? "none") . ".txt";
+$who = posix_getpwuid(posix_geteuid())["name"];
+$read = @file_get_contents("/etc/passwd") === false ? "fenced" : "open";
+# A program it starts (allowed here, unlike in pages) is fenced by systemd:
+# a folder anyone may write to on the host is read-only.
+$write = trim((string) shell_exec("touch /var/lib/php/sessions/basalt-escape 2>/dev/null && echo writable || echo readonly"));
+file_put_contents($out, "$who " . ini_get("open_basedir") . " $read $write\n", FILE_APPEND);
+sleep(3600);
+PHP
+docker cp /tmp/basalt-artisan basalt-panel:/root/artisan
+$API -X PUT -H Content-Type:application/octet-stream --data-binary @/root/artisan "http://127.0.0.1:8080/api/v1/sites/$SITE/files/content?path=/artisan" >/dev/null
+$API -X PUT -d '{"scheduler":true,"workers":2}' http://127.0.0.1:8080/api/v1/sites/$SITE/laravel | python3 -c 'import sys,json; d=json.load(sys.stdin); print("  laravel:", d.get("site",{}).get("laravel"), d.get("error",""))'
+for u in schedule queue-1 queue-2; do
+  docker exec basalt-node1 systemctl is-active basalt-php-site-$SITE-$u.service || { docker exec basalt-node1 journalctl -u basalt-php-site-$SITE-$u.service --no-pager | tail -20; exit 1; }
+done
+for i in $(seq 30); do
+  docker exec basalt-node1 test -s /srv/basalt/sites/$SITE/logs/queue-work.txt && docker exec basalt-node1 test -s /srv/basalt/sites/$SITE/logs/schedule-work.txt && break; sleep 1
+done
+for f in schedule-work queue-work; do
+  RAN=$(docker exec basalt-node1 head -1 /srv/basalt/sites/$SITE/logs/$f.txt)
+  echo "  $f: $RAN"
+  [ "$RAN" = "basalt-s$SITE /srv/basalt/sites/$SITE/ fenced readonly" ] || { echo "$f does not run as the site's user in its fence"; exit 1; }
+done
+LIMITS=$(docker exec basalt-node1 systemctl show -p CPUQuotaPerSecUSec -p MemoryMax --value basalt-sites-laravel$SITE.slice | tr '\n' ' ')
+echo "  slice limits: $LIMITS"
+[ "$LIMITS" = "500ms 268435456 " ] || { echo "the site's limits are not on the Laravel processes"; exit 1; }
+echo "  exposure score: $(docker exec basalt-node1 systemd-analyze security basalt-php-site-$SITE-queue-1.service 2>/dev/null | tail -1)"
+$API -X PUT -d '{"scheduler":false,"workers":1}' http://127.0.0.1:8080/api/v1/sites/$SITE/laravel >/dev/null
+docker exec basalt-node1 systemctl is-active basalt-php-site-$SITE-queue-1.service
+docker exec basalt-node1 sh -c "! ls /etc/systemd/system/basalt-php-site-$SITE-schedule.service /etc/systemd/system/basalt-php-site-$SITE-queue-2.service 2>/dev/null" || { echo "units left"; exit 1; }
+$API -X PUT -d '{"scheduler":false,"workers":0}' http://127.0.0.1:8080/api/v1/sites/$SITE/laravel >/dev/null
+docker exec basalt-node1 sh -c "! ls /etc/systemd/system/basalt-php-site-$SITE-* /etc/systemd/system/basalt-sites-laravel$SITE.slice 2>/dev/null" || { echo "units left"; exit 1; }
+docker exec basalt-node1 sh -c "! pgrep -u basalt-s$SITE -f artisan" || { echo "Laravel processes still running"; exit 1; }
+# A site without artisan cannot have them.
+$API -d '{"paths":["/artisan"]}' "http://127.0.0.1:8080/api/v1/sites/$SITE/files/delete" >/dev/null
+$API -X PUT -d '{"scheduler":true,"workers":0}' http://127.0.0.1:8080/api/v1/sites/$SITE/laravel | grep -q 'artisan' || { echo "Laravel processes accepted without artisan"; exit 1; }
+
 echo "### app on node1 (container reached by its IP on a private network, no published port)"
 APP=$($API -d "{\"server_id\":$NODE,\"name\":\"who\",\"image\":\"traefik/whoami:v1.10\",\"port\":80,\"domains\":[\"who.test\"],\"tls\":\"internal\"}" http://127.0.0.1:8080/api/v1/apps | python3 -c 'import sys,json; print(json.load(sys.stdin)["app"]["id"])')
 $API -X PUT -d '{"env":{"WHOAMI_NAME":"basalt-on-node1"}}' http://127.0.0.1:8080/api/v1/apps/$APP/env >/dev/null

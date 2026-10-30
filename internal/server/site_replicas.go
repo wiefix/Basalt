@@ -293,7 +293,10 @@ func (s *Server) writeSite(w http.ResponseWriter, r *http.Request, status int, i
 // pool).
 func (s *Server) ensureSiteOn(ctx context.Context, site *store.Site, serverID int64) error {
 	req := agentproto.SiteRequest{SiteID: site.ID, PHPVersion: site.PHPVersion, PHP: site.PHP}
-	if serverID != site.ServerID {
+	if serverID == site.ServerID {
+		// Only the primary runs them: a job must not run once per copy.
+		req.Laravel = site.Laravel
+	} else {
 		// A copy reaches the databases on the site's server, if it has any.
 		dbs, err := s.db.Databases(ctx, site.ID)
 		if err != nil {

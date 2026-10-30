@@ -147,6 +147,7 @@ var apiDocs = map[string]apiDoc{
 	"PUT /api/v1/sites/{id}/domains":      {summary: "Set a site's domains", body: siteDomainsRequest{}, resp: siteResp},
 	"PUT /api/v1/sites/{id}/php":          {summary: "Switch a site between static and a PHP version", body: sitePHPRequest{}, resp: siteResp},
 	"PUT /api/v1/sites/{id}/php-settings": {summary: "Change a site's PHP options (memory, upload size, time limits, errors, timezone)", body: php.Settings{}, resp: obj("site", siteView{})},
+	"PUT /api/v1/sites/{id}/laravel":      {summary: "Turn a Laravel site's scheduler and queue workers on or off (systemd services of the site's user on its primary server)", body: php.Laravel{}, resp: obj("site", siteView{})},
 	"GET /api/v1/sites/{id}/php-log":      {summary: "The end of a site's PHP error log", resp: obj("log", "", "size", 0, "truncated?", false, "path", "")},
 	"GET /api/v1/sites/{id}/access-log":   {summary: "The latest requests to a site (newest first)", query: []queryParam{q("limit", "how many, 1–1000, default 200")}, resp: accessResp},
 	"POST /api/v1/apps/{id}/password": {summary: "Give a container database a new password; linked apps holding its URL get the new one", body: dbPasswordRequest{},

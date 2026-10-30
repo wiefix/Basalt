@@ -183,6 +183,9 @@ type SiteRequest struct {
 	// DB, on a server serving a copy of the site, is where the site's
 	// databases live: its PHP reaches them through the tunnel.
 	DB *SiteDBRoute `json:"db,omitempty"`
+	// Laravel are the background processes of a Laravel site (on its
+	// primary server only: copies do not run them).
+	Laravel php.Laravel `json:"laravel,omitzero"`
 }
 
 // SiteDBRoute is the server whose MariaDB a site uses, and where its

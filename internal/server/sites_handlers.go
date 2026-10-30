@@ -26,6 +26,7 @@ type siteView struct {
 	TLS        proxy.TLSMode `json:"tls"`
 	PHPVersion string        `json:"php_version"`
 	PHP        php.Settings  `json:"php_settings"`
+	Laravel    php.Laravel   `json:"laravel"`
 	Usage      siteUsageView `json:"usage"`
 	QuotaMB    int           `json:"quota_mb"`
 	OverQuota  bool          `json:"over_quota"`
@@ -36,7 +37,7 @@ type siteView struct {
 
 func viewSite(s *store.Site) siteView {
 	return siteView{ID: s.ID, ServerID: s.ServerID, ProjectID: s.ProjectID, Name: s.Name, Kind: s.Kind,
-		Domains: s.Domains, TLS: s.TLS, PHPVersion: s.PHPVersion, PHP: s.PHP, CreatedAt: s.CreatedAt,
+		Domains: s.Domains, TLS: s.TLS, PHPVersion: s.PHPVersion, PHP: s.PHP, Laravel: s.Laravel, CreatedAt: s.CreatedAt,
 		Usage:   siteUsageView{DiskBytes: s.Usage.DiskBytes, DiskFiles: s.Usage.DiskFiles, DBBytes: s.Usage.DBBytes, At: s.Usage.At},
 		QuotaMB: s.QuotaMB, OverQuota: s.QuotaMB > 0 && s.Usage.Total() > int64(s.QuotaMB)<<20, Replicas: s.Replicas}
 }
@@ -452,6 +453,57 @@ func (s *Server) handleSetSitePHPSettings(w http.ResponseWriter, r *http.Request
 	}
 	site.PHP = req
 	s.audit(r, &p.user.ID, "site.php_settings_changed", map[string]any{"site_id": site.ID, "settings": req})
+	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site)})
+}
+
+// handleSetSiteLaravel turns a Laravel site's scheduler and queue workers
+// on or off. They run on the site's primary server, as systemd services of
+// the site's user.
+func (s *Server) handleSetSiteLaravel(w http.ResponseWriter, r *http.Request, p *principal) {
+	site, ok := s.pathSite(w, r)
+	if !ok {
+		return
+	}
+	var req php.Laravel
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if err := req.Validate(); err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	if !req.IsZero() {
+		if site.PHPVersion == "" {
+			writeError(w, http.StatusUnprocessableEntity, "Laravel processes need a PHP site")
+			return
+		}
+		srv, err := s.db.ServerByID(r.Context(), site.ServerID)
+		if err != nil {
+			s.internalError(w, r, "load server", err)
+			return
+		}
+		if !srv.PHPLimits {
+			writeError(w, http.StatusUnprocessableEntity, "Laravel processes need systemd on the server (each site's PHP running as its own service)")
+			return
+		}
+	}
+	if !s.agents.Connected(site.ServerID) {
+		writeError(w, http.StatusConflict, "the server is offline; try again when it reconnects")
+		return
+	}
+	// Applied first: a site that is not a Laravel project keeps its setting.
+	next := *site
+	next.Laravel = req
+	if err := s.ensureSite(r.Context(), &next); err != nil {
+		writeAgentError(w, err)
+		return
+	}
+	if err := s.db.SetSiteLaravel(r.Context(), site.ID, req); err != nil {
+		s.internalError(w, r, "set site laravel", err)
+		return
+	}
+	site.Laravel = req
+	s.audit(r, &p.user.ID, "site.laravel_changed", map[string]any{"site_id": site.ID, "scheduler": req.Scheduler, "workers": req.Workers})
 	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site)})
 }
 

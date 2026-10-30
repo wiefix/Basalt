@@ -23,7 +23,9 @@ type Site struct {
 	TLS        proxy.TLSMode
 	PHPVersion string
 	PHP        php.Settings
-	Usage      SiteUsage
+	// Laravel are the site's Laravel processes (scheduler, queue workers).
+	Laravel php.Laravel
+	Usage   SiteUsage
 	// QuotaMB is a soft limit on Usage (0: none); QuotaAlerted, that going
 	// over it was reported.
 	QuotaMB      int
@@ -132,7 +134,7 @@ func (db *DB) SetSiteDomains(ctx context.Context, siteID int64, domains []string
 	return tx.Commit()
 }
 
-const siteQuery = `SELECT s.id, s.server_id, s.project_id, s.name, s.kind, s.php_version, s.php_settings,
+const siteQuery = `SELECT s.id, s.server_id, s.project_id, s.name, s.kind, s.php_version, s.php_settings, s.laravel,
 	s.disk_bytes, s.disk_files, s.db_bytes, s.usage_at, s.quota_mb, s.quota_alerted,
 	s.created_at, r.id, r.tls,
 	(SELECT json_group_array(o.server_id) FROM proxy_routes o WHERE o.site_id = s.id AND o.server_id != s.server_id),
@@ -146,9 +148,9 @@ func (db *DB) scanSites(rows *sql.Rows) ([]*Site, error) {
 	for rows.Next() {
 		var s Site
 		var created int64
-		var domain, settings, replicas string
+		var domain, settings, laravel, replicas string
 		var usageAt sql.NullInt64
-		if err := rows.Scan(&s.ID, &s.ServerID, &s.ProjectID, &s.Name, &s.Kind, &s.PHPVersion, &settings,
+		if err := rows.Scan(&s.ID, &s.ServerID, &s.ProjectID, &s.Name, &s.Kind, &s.PHPVersion, &settings, &laravel,
 			&s.Usage.DiskBytes, &s.Usage.DiskFiles, &s.Usage.DBBytes, &usageAt, &s.QuotaMB, &s.QuotaAlerted,
 			&created, &s.RouteID, &s.TLS, &replicas, &domain); err != nil {
 			return nil, err
@@ -158,6 +160,9 @@ func (db *DB) scanSites(rows *sql.Rows) ([]*Site, error) {
 		}
 		s.Usage.At = timePtr(usageAt)
 		if err := json.Unmarshal([]byte(settings), &s.PHP); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(laravel), &s.Laravel); err != nil {
 			return nil, err
 		}
 		if n := len(out); n > 0 && out[n-1].ID == s.ID {
@@ -262,6 +267,12 @@ func (db *DB) SetSiteQuotaAlerted(ctx context.Context, siteID int64, alerted boo
 func (db *DB) SetSitePHPSettings(ctx context.Context, siteID int64, st php.Settings) error {
 	b, _ := json.Marshal(st)
 	return db.execOne(ctx, `UPDATE sites SET php_settings = ? WHERE id = ?`, string(b), siteID)
+}
+
+// SetSiteLaravel stores a site's Laravel processes.
+func (db *DB) SetSiteLaravel(ctx context.Context, siteID int64, l php.Laravel) error {
+	b, _ := json.Marshal(l)
+	return db.execOne(ctx, `UPDATE sites SET laravel = ? WHERE id = ?`, string(b), siteID)
 }
 
 // SetSitePHP switches a site between static ("") and a PHP version.

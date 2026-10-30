@@ -675,6 +675,7 @@ function SettingsTab({ site, phpVersions, phpLimits, panelAdmin }: { site: Site;
       <UsageCard site={site} />
       <RuntimeCard site={site} phpVersions={phpVersions} />
       {site.php_version && <PHPOptionsCard site={site} limits={phpLimits} />}
+      {site.php_version && <LaravelCard site={site} systemd={phpLimits} />}
       {panelAdmin && <MoveProjectCard kind="sites" id={site.id} current={site.project_id} what="the site" />}
       <DeleteCard site={site} />
     </div>
@@ -858,6 +859,63 @@ function PHPOptionsCard({ site, limits }: { site: Site; limits: boolean }) {
         <input type="checkbox" checked={f.display} onChange={(e) => setF({ ...f, display: e.target.checked })} />
         Show PHP errors in pages (for development; errors always go to the PHP log)
       </label>
+      <div>
+        <button className="btn primary" disabled={save.isPending}>
+          Apply
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// LaravelCard turns a Laravel site's scheduler and queue workers on or off.
+function LaravelCard({ site, systemd }: { site: Site; systemd: boolean }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const cur = site.laravel ?? { scheduler: false, workers: 0 };
+  const [scheduler, setScheduler] = useState(cur.scheduler);
+  const [workers, setWorkers] = useState(String(cur.workers));
+  const save = useMutation({
+    mutationFn: () => api.setSiteLaravel(site.id, { scheduler, workers: Number(workers) || 0 }),
+    onSuccess: (r) => {
+      qc.setQueryData(["site", site.id], (old: { site: Site } | undefined) => (old ? { ...old, site: r.site } : old));
+      toast("Laravel processes applied");
+    },
+  });
+  const running = cur.scheduler || cur.workers > 0;
+  if (!systemd && !running) {
+    return (
+      <div className="card card-body stack">
+        <h2>Laravel</h2>
+        <p className="faint small" style={{ margin: 0 }}>
+          The scheduler and queue workers of a Laravel site need each site's PHP to run as its own systemd service (servers installed
+          with the installer on systemd).
+        </p>
+      </div>
+    );
+  }
+  return (
+    <form
+      className="card card-body form"
+      onSubmit={(e: FormEvent) => {
+        e.preventDefault();
+        save.mutate();
+      }}
+    >
+      <h2>Laravel</h2>
+      <p className="faint small" style={{ margin: 0 }}>
+        For a Laravel project in the site's folder (with <code>artisan</code> beside <code>public/</code>). The processes run as the
+        site's user on its primary server, within the site's CPU and memory limits; their output goes to the server's journal, errors
+        to the PHP log. Unlike pages, they may start other programs (the scheduler runs commands that way).
+      </p>
+      <ErrorBox error={save.error} />
+      <label className="row small">
+        <input type="checkbox" checked={scheduler} onChange={(e) => setScheduler(e.target.checked)} />
+        Run the scheduler (<code>artisan schedule:work</code>: scheduled tasks every minute)
+      </label>
+      <Field label="Queue workers" help="artisan queue:work processes, 0–8; each restarts every hour to pick up new code">
+        <input className="input mono" type="number" min={0} max={8} value={workers} onChange={(e) => setWorkers(e.target.value)} />
+      </Field>
       <div>
         <button className="btn primary" disabled={save.isPending}>
           Apply

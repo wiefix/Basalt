@@ -117,6 +117,7 @@ export const checks = [
   fits<Returns<A["setSiteDomains"]>>()<G.PutSitesIdDomainsResponse>(),
   fits<Returns<A["setSitePHP"]>>()<G.PutSitesIdPhpResponse>(),
   fits<Returns<A["setSitePHPSettings"]>>()<G.PutSitesIdPhpSettingsResponse>(),
+  fits<Returns<A["setSiteLaravel"]>>()<G.PutSitesIdLaravelResponse>(),
   fits<Returns<A["installSite"]>>()<G.PostSitesIdInstallResponse>(),
   fits<Returns<A["siteAdminer"]>>()<G.GetSitesIdAdminerResponse>(),
   fits<Returns<A["installAdminer"]>>()<G.PostSitesIdAdminerResponse>(),

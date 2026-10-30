@@ -378,6 +378,7 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("PUT /api/v1/sites/{id}/domains", s.requireProject(store.RoleAdmin, s.handleSetSiteDomains))
 	rt.Handle("PUT /api/v1/sites/{id}/php", s.requireProject(store.RoleAdmin, s.handleSetSitePHP))
 	rt.Handle("PUT /api/v1/sites/{id}/php-settings", s.requireProject(store.RoleAdmin, s.handleSetSitePHPSettings))
+	rt.Handle("PUT /api/v1/sites/{id}/laravel", s.requireProject(store.RoleAdmin, s.handleSetSiteLaravel))
 	rt.Handle("GET /api/v1/sites/{id}/php-log", s.requireProject(store.RoleViewer, s.handlePHPLog))
 	rt.Handle("GET /api/v1/sites/{id}/access-log", s.requireProject(store.RoleMember, s.handleSiteAccessLog))
 	rt.Handle("POST /api/v1/apps/{id}/password", s.requireProject(store.RoleAdmin, s.handleDatabasePassword))

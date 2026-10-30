@@ -164,6 +164,10 @@ func (a *Agent) installLaravel(ctx context.Context, req agentproto.SiteInstall, 
 		return agentproto.SiteInstallResponse{}, fmt.Errorf("artisan migrate: %w", err)
 	}
 
+	if err := laravelStorage(site, app); err != nil {
+		return agentproto.SiteInstallResponse{}, err
+	}
+
 	count := 0
 	if err := site.Walk(func(p string, _ bool) bool { return !strings.HasPrefix(p+"/", laravelStage+"/") }, func(e files.WalkEntry) error {
 		if strings.HasPrefix(e.Path, laravelStage+"/app/") && !e.Dir {
@@ -224,6 +228,23 @@ func moveLaravel(site *files.Site, app string, placeholder bool) error {
 		}
 	}
 	return nil
+}
+
+// laravelStorage does what artisan storage:link would without a link out
+// of public/ (the proxy follows none): the files of the public disk move to
+// public/storage and storage/app/public becomes a link to them.
+func laravelStorage(site *files.Site, app string) error {
+	disk, link := app+"/storage/app/public", app+"/public/storage"
+	if e, err := site.Stat(disk); err != nil || e.Type != "dir" {
+		return nil // a project without one
+	}
+	if _, err := site.Stat(link); err == nil {
+		return nil
+	}
+	if err := site.Rename(disk, link); err != nil {
+		return err
+	}
+	return site.Symlink("../../public/storage", disk)
 }
 
 var envKeyRE = regexp.MustCompile(`^#?\s*([A-Z][A-Z0-9_]*)=`)
