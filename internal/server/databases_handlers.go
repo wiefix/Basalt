@@ -188,11 +188,18 @@ func (s *Server) handleDeleteDatabase(w http.ResponseWriter, r *http.Request, p 
 }
 
 type siteInstallRequest struct {
-	App string `json:"app"` // wordpress
+	App string `json:"app"` // wordpress, laravel
 }
 
-// handleSiteInstall installs an application (WordPress) into a PHP site's
-// empty public folder, with a new database for it.
+// siteApps are the applications a site can get, with the suffix of their
+// database's name.
+var siteApps = map[string]struct{ name, db string }{
+	agentproto.AppWordPress: {"WordPress", "_wp"},
+	agentproto.AppLaravel:   {"Laravel", "_lv"},
+}
+
+// handleSiteInstall installs an application (WordPress, Laravel) into a
+// PHP site's empty public folder, with a new database for it.
 func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *principal) {
 	site, ok := s.pathSite(w, r)
 	if !ok {
@@ -202,12 +209,13 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if req.App != agentproto.AppWordPress {
-		writeError(w, http.StatusUnprocessableEntity, "unknown application (wordpress is available)")
+	app, ok := siteApps[req.App]
+	if !ok {
+		writeError(w, http.StatusUnprocessableEntity, "unknown application (wordpress and laravel are available)")
 		return
 	}
 	if site.PHPVersion == "" {
-		writeError(w, http.StatusUnprocessableEntity, "WordPress needs PHP: switch the site to a PHP version first")
+		writeError(w, http.StatusUnprocessableEntity, app.name+" needs PHP: switch the site to a PHP version first")
 		return
 	}
 	if msg, err := s.replicatedDBProblem(r, site); err != nil {
@@ -218,7 +226,7 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 		return
 	}
 	if v, _ := s.db.ServerMariaDB(r.Context(), site.ServerID); v == "" {
-		writeError(w, http.StatusUnprocessableEntity, "WordPress needs MariaDB, which is not installed on this server")
+		writeError(w, http.StatusUnprocessableEntity, app.name+" needs MariaDB, which is not installed on this server")
 		return
 	}
 	if !s.agents.Connected(site.ServerID) {
@@ -228,7 +236,7 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 	var d *store.Database
 	var err error
 	for i := 1; i <= 9; i++ {
-		name := "s" + strconv.FormatInt(site.ID, 10) + "_wp"
+		name := "s" + strconv.FormatInt(site.ID, 10) + app.db
 		if i > 1 {
 			name += strconv.Itoa(i)
 		}
@@ -249,11 +257,16 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 		writeAgentError(w, err)
 		return
 	}
+	url := ""
+	if len(site.Domains) > 0 && !strings.HasPrefix(site.Domains[0], "*.") {
+		url = "https://" + site.Domains[0]
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
 	var resp agentproto.SiteInstallResponse
 	err = s.agents.Stream(ctx, site.ServerID, agentproto.TypeSiteInstall, agentproto.SiteInstall{
 		SiteID: site.ID, App: req.App, DBName: d.Name, DBUser: d.Username, DBPassword: password,
+		PHPVersion: site.PHPVersion, URL: url,
 	}, &resp, func(json.RawMessage) error { return nil })
 	if err != nil {
 		// Nothing half-done stays: the new database goes again.

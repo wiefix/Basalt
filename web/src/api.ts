@@ -202,6 +202,13 @@ export interface SFTPConnection {
   host_key_fingerprint: string;
 }
 
+export interface Adminer {
+  installed: boolean;
+  path?: string;
+  url?: string;
+  version?: string;
+}
+
 export interface Database {
   id: number;
   name: string;
@@ -1110,8 +1117,11 @@ export const api = {
     put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/domains`, { domains }),
   setSitePHP: (id: number, version: string) => put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/php`, { version }),
   setSitePHPSettings: (id: number, s: PHPSettings) => put<{ site: Site }>(`/api/v1/sites/${id}/php-settings`, s),
-  installSite: (id: number, app: "wordpress") =>
+  installSite: (id: number, app: "wordpress" | "laravel") =>
     post<{ app: string; version: string; files: number; url?: string; database: Database }>(`/api/v1/sites/${id}/install`, { app }),
+  siteAdminer: (id: number) => get<{ adminer: Adminer }>(`/api/v1/sites/${id}/adminer`),
+  installAdminer: (id: number) => post<{ adminer: Adminer }>(`/api/v1/sites/${id}/adminer`),
+  removeAdminer: (id: number) => del<{ adminer: Adminer }>(`/api/v1/sites/${id}/adminer`),
   measureSite: (id: number) => post<{ site: Site }>(`/api/v1/sites/${id}/usage`),
   setSiteQuota: (id: number, quota_mb: number) => put<{ site: Site }>(`/api/v1/sites/${id}/quota`, { quota_mb }),
   phpLog: (id: number) => get<{ log: string; size: number; truncated?: boolean; path: string }>(`/api/v1/sites/${id}/php-log`),

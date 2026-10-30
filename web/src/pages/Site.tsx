@@ -961,6 +961,68 @@ function DeleteCard({ site }: { site: Site }) {
   );
 }
 
+function AdminerCard({ site }: { site: Site }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const status = useQuery({ queryKey: ["adminer", site.id], queryFn: () => api.siteAdminer(site.id), retry: false });
+  const change = useMutation({
+    mutationFn: (install: boolean) => (install ? api.installAdminer(site.id) : api.removeAdminer(site.id)),
+    onSuccess: (r) => qc.setQueryData(["adminer", site.id], r),
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  const a = status.data?.adminer;
+  return (
+    <div className="card card-body stack">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <h2>Adminer</h2>
+        {a?.installed && <span className="faint small">{a.version}</span>}
+      </div>
+      <p className="muted small">
+        A page of the site for browsing and editing its databases, run by the site&apos;s PHP. It signs in to this
+        server&apos;s MariaDB only, with a database user and password from above. Its address is random; remove it when you
+        are done.
+      </p>
+      {status.isPending ? (
+        <Loading />
+      ) : status.error ? (
+        <ErrorBox error={status.error} />
+      ) : a?.installed ? (
+        <>
+          {a.url ? <CodeBox text={a.url} /> : <code className="mono">{a.path}</code>}
+          <div className="row">
+            {a.url && (
+              <a className="btn sm primary" href={a.url} target="_blank" rel="noopener noreferrer">
+                Open Adminer
+              </a>
+            )}
+            <button
+              className="btn sm"
+              disabled={change.isPending}
+              onClick={async () => {
+                if (!(await confirm({ title: "Move Adminer to a new address?", body: <p>The current address stops working.</p>, confirm: "New address" })))
+                  return;
+                change.mutate(true);
+              }}
+            >
+              New address
+            </button>
+            <button className="btn sm ghost" disabled={change.isPending} onClick={() => change.mutate(false)}>
+              <Icon name="trash" size={14} /> Remove
+            </button>
+          </div>
+        </>
+      ) : (
+        <div>
+          <button className="btn sm" disabled={change.isPending} onClick={() => change.mutate(true)}>
+            {change.isPending ? "Installing…" : "Install Adminer"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DatabasesTab({ site, user }: { site: Site; user: User }) {
   const qc = useQueryClient();
   const toast = useToast();
@@ -1081,6 +1143,7 @@ function DatabasesTab({ site, user }: { site: Site; user: User }) {
           </table>
         )}
       </div>
+      {can(user, "admin") && site.php_version && <AdminerCard site={site} />}
       {can(user, "admin") && (
         <form
           className="card card-body form"

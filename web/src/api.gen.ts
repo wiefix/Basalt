@@ -15,6 +15,13 @@ export interface AddPasskeyRequest {
   name?: string;
 }
 
+export interface AdminerView {
+  installed: boolean;
+  path?: string;
+  url?: string;
+  version?: string;
+}
+
 export interface AgentprotoAccessEntry {
   at: string;
   bytes: number;
@@ -1558,6 +1565,10 @@ export type DeleteSitesIdResponse = {
   sync: ProxySyncView;
 };
 
+export type DeleteSitesIdAdminerResponse = {
+  adminer: AdminerView;
+};
+
 export type DeleteSitesIdBackupPolicyResponse = {
   ok: boolean;
 };
@@ -1876,6 +1887,10 @@ export type GetSitesIdResponse = {
 
 export type GetSitesIdAccessLogResponse = {
   entries: AgentprotoAccessEntry[];
+};
+
+export type GetSitesIdAdminerResponse = {
+  adminer: AdminerView;
 };
 
 export type GetSitesIdBackupsResponse = {
@@ -2280,6 +2295,10 @@ export type PostSitesResponse = {
 };
 
 export type PostSitesBody = CreateSiteRequest;
+
+export type PostSitesIdAdminerResponse = {
+  adminer: AdminerView;
+};
 
 export type PostSitesIdBackupsResponse = {
   backup: BackupView;

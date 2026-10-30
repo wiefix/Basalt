@@ -10,22 +10,27 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -416,6 +421,94 @@ try {
 	p.call(http.StatusUnprocessableEntity, "POST", "/api/v1/sites/"+idW+"/install", map[string]any{"app": "wordpress"})
 	if dbs := p.call(200, "GET", "/api/v1/sites/"+idW+"/databases", nil)["databases"].([]any); len(dbs) != 1 {
 		t.Fatalf("a failed install left a database: %v", dbs)
+	}
+
+	// Laravel in one click, for real (Composer, Packagist): its front page
+	// starts a session, which Laravel keeps in its MariaDB database.
+	rl := p.call(http.StatusCreated, "POST", "/api/v1/sites", map[string]any{
+		"server_id": mustAtoi(sid), "name": "lv", "domains": []string{"lv.localhost"}, "tls": "internal", "php_version": phpVersion,
+	})
+	idL := jsonID(rl["site"].(map[string]any)["id"])
+	instL := p.call(http.StatusCreated, "POST", "/api/v1/sites/"+idL+"/install", map[string]any{"app": "laravel"})
+	if instL["database"].(map[string]any)["name"] != "s"+idL+"_lv" || instL["version"] == "" {
+		t.Fatalf("Laravel install = %v", instL)
+	}
+	t.Logf("Laravel %v, %v files", instL["version"], instL["files"])
+	eventually(t, "Laravel answers", func() bool {
+		code, body := get("lv.localhost", "/")
+		return code == 200 && strings.Contains(body, "Laravel")
+	})
+	if n := mysql("SELECT COUNT(*) FROM s" + idL + "_lv.sessions"); n == "0" {
+		t.Fatal("Laravel keeps no session in its database")
+	}
+	lvDir := filepath.Join(sitesRoot, idL)
+	if fi, err := os.Stat(filepath.Join(lvDir, ".env")); err != nil || fi.Mode().Perm() != 0o600 ||
+		strconv.Itoa(int(fi.Sys().(*syscall.Stat_t).Uid)) != mustUID(t, "basalt-s"+idL) {
+		t.Fatalf(".env: %v %v", fi, err)
+	}
+	if fi, err := os.Stat(filepath.Join(lvDir, "vendor", "autoload.php")); err != nil || strconv.Itoa(int(fi.Sys().(*syscall.Stat_t).Uid)) != mustUID(t, "basalt-s"+idL) {
+		t.Fatalf("vendor/ is not the site user's: %v", err)
+	}
+	if code, _ := get("lv.localhost", "/../.env"); code == 200 {
+		t.Fatal(".env is served")
+	}
+
+	// Adminer in the Laravel site: it signs in to this server's MariaDB
+	// whatever server the form names.
+	credL := p.call(http.StatusCreated, "POST", "/api/v1/sites/"+idL+"/databases", map[string]any{"name": "extra"})["credentials"].(map[string]any)
+	ad := p.call(200, "POST", "/api/v1/sites/"+idL+"/adminer", nil)["adminer"].(map[string]any)
+	if ad["installed"] != true || ad["url"] != "https://lv.localhost"+ad["path"].(string) {
+		t.Fatalf("adminer = %v", ad)
+	}
+	if st := p.call(200, "GET", "/api/v1/sites/"+idL+"/adminer", nil)["adminer"].(map[string]any); st["path"] != ad["path"] {
+		t.Fatalf("adminer status = %v", st)
+	}
+	jar, _ := cookiejar.New(nil)
+	ac := &http.Client{Jar: jar, Timeout: 30 * time.Second, Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, "127.0.0.1:"+strconv.Itoa(httpsPort))
+		},
+	}}
+	page := ad["url"].(string)
+	resp, err := ac.Get(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	login, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(login), "auth[username]") || strings.Contains(string(login), "auth[server]") {
+		phpLog, _ := os.ReadFile(filepath.Join(lvDir, "logs", "php-error.log"))
+		t.Fatalf("Adminer login page: %d %.300s\nPHP: %s", resp.StatusCode, login, phpLog)
+	}
+	token := regexp.MustCompile(`name='token' value='([^']+)'`).FindStringSubmatch(string(login))
+	if token == nil {
+		t.Fatalf("no token on Adminer's login page: %.500s", login)
+	}
+	resp, err = ac.PostForm(page, url.Values{
+		"token": {token[1]}, "auth[driver]": {"server"}, "auth[server]": {"192.0.2.1:3306"},
+		"auth[username]": {credL["username"].(string)}, "auth[password]": {credL["password"].(string)}, "auth[db]": {credL["database"].(string)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signed, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(signed), "Logout") || !strings.Contains(string(signed), credL["database"].(string)) {
+		msg := string(signed)
+		if i := strings.Index(msg, "class='error'"); i >= 0 {
+			msg = msg[i:min(len(msg), i+300)]
+		}
+		t.Fatalf("Adminer sign-in: %d %.500s", resp.StatusCode, msg)
+	}
+	if code, _ := get("lv.localhost", "/../.basalt-adminer/adminer.php"); code == 200 {
+		t.Fatal("Adminer itself is served")
+	}
+	if a := p.call(200, "DELETE", "/api/v1/sites/"+idL+"/adminer", nil)["adminer"].(map[string]any); a["installed"] != false {
+		t.Fatalf("adminer after remove = %v", a)
+	}
+	if code, _ := get("lv.localhost", ad["path"].(string)); code == 200 {
+		t.Fatal("Adminer answers after its removal")
 	}
 
 	// Sites with databases cannot be deleted by accident.

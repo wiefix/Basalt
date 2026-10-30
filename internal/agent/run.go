@@ -152,6 +152,9 @@ type Agent struct {
 	collector       *collector
 	updater         *updater
 	wordpressURL    string
+	// Tests replace the pinned downloads and the site's PHP CLI.
+	composer, adminer pinnedFile
+	sitePHP           sitePHPRunner
 }
 
 func New(cfg Config, log *slog.Logger) (*Agent, error) {
@@ -623,6 +626,13 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		resp, err := a.siteInstall(ctx, req)
+		return resp, publicError(err)
+	case agentproto.TypeSiteAdminer:
+		var req agentproto.SiteAdminer
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		resp, err := a.siteAdminer(ctx, req)
 		return resp, publicError(err)
 	case agentproto.TypeDBPassword:
 		var req agentproto.ContainerDBPassword

@@ -10,7 +10,7 @@ exec docker run --rm \
   -e GOFLAGS=-mod=mod -e CGO_ENABLED=0 -e GOTOOLCHAIN=auto \
   golang:1.27-trixie bash -euo pipefail -c '
     apt-get update -qq >/dev/null
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-fpm php-mysql mariadb-server restic >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-fpm php-mysql php-mbstring php-xml php-curl php-zip php-intl mariadb-server restic >/dev/null
     V=$(ls /etc/php | sort -V | tail -1)
     mkdir -p /run/php /run/mysqld && chown mysql:mysql /run/mysqld
     php-fpm$V --daemonize

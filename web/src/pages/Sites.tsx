@@ -111,25 +111,30 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
   const [projectId, setProjectId] = useNewProject();
   const server = enrolled.find((s) => s.id === Number(serverId || enrolled[0]?.id));
   const phpVersions = server?.isolated ? server.php_versions : [];
-  const canWordPress = phpVersions.length > 0 && !!server?.mariadb;
+  const canApps = phpVersions.length > 0 && !!server?.mariadb;
   const toast = useToast();
   const create = useMutation({
     mutationFn: async () => {
-      const wordpress = php === "wordpress";
+      const app = php === "wordpress" || php === "laravel" ? php : null;
       const r = await api.createSite({
         server_id: Number(serverId || enrolled[0]?.id),
         name: name.trim(),
         domains: domains.split(/[\s,]+/).filter(Boolean),
         tls,
-        php_version: wordpress ? phpVersions[0] : php,
+        php_version: app ? phpVersions[0] : php,
         project_id: projectId,
       });
-      if (wordpress) {
+      if (app) {
+        const name = app === "wordpress" ? "WordPress" : "Laravel";
         try {
-          const w = await api.installSite(r.site.id, "wordpress");
-          toast(`WordPress ${w.version} installed: open the site now to choose its admin account`);
+          const w = await api.installSite(r.site.id, app);
+          toast(
+            app === "wordpress"
+              ? `WordPress ${w.version} installed: open the site now to choose its admin account`
+              : `Laravel ${w.version} installed, with its tables in database ${w.database.name}`,
+          );
         } catch (e) {
-          toast(`The site was created, but WordPress was not installed: ${errorMessage(e)}`, true);
+          toast(`The site was created, but ${name} was not installed: ${errorMessage(e)}`, true);
         }
       }
       return r;
@@ -209,13 +214,21 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
                   PHP {v}
                 </option>
               ))}
-              {canWordPress && <option value="wordpress">WordPress (PHP {phpVersions[0]}, MariaDB)</option>}
+              {canApps && <option value="wordpress">WordPress (PHP {phpVersions[0]}, MariaDB)</option>}
+              {canApps && <option value="laravel">Laravel (PHP {phpVersions[0]}, MariaDB)</option>}
             </select>
           </Field>
           {php === "wordpress" && (
             <div className="alert warn small">
               WordPress is downloaded from wordpress.org with a new database. Open the site right after: whoever opens it
               first chooses the admin account.
+            </div>
+          )}
+          {php === "laravel" && (
+            <div className="alert small">
+              A new Laravel project is created with Composer (from Packagist) as the site's user, with a new database and
+              its tables. It takes a minute or two. The project sits next to <code>public/</code>; edit it over SFTP or in
+              Files.
             </div>
           )}
           <Field label="Certificate">

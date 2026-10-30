@@ -517,7 +517,10 @@ type SiteUsageResponse struct {
 const TypeSiteInstall = "site_install"
 
 // Site applications.
-const AppWordPress = "wordpress"
+const (
+	AppWordPress = "wordpress"
+	AppLaravel   = "laravel"
+)
 
 type SiteInstall struct {
 	SiteID int64  `json:"site_id"`
@@ -526,11 +529,38 @@ type SiteInstall struct {
 	DBName     string `json:"db_name"`
 	DBUser     string `json:"db_user"`
 	DBPassword string `json:"db_password"`
+	// Laravel: the site's PHP version (its CLI runs Composer and artisan)
+	// and the site's address (APP_URL).
+	PHPVersion string `json:"php_version,omitempty"`
+	URL        string `json:"url,omitempty"`
 }
 
 type SiteInstallResponse struct {
 	Version string `json:"version,omitempty"`
 	Files   int    `json:"files"`
+}
+
+// TypeSiteAdminer reports, installs (again, with a new address) or removes
+// Adminer in a PHP site: a page in public/ that reaches the server's
+// MariaDB only.
+const TypeSiteAdminer = "site_adminer"
+
+const (
+	AdminerStatus  = "status"
+	AdminerInstall = "install"
+	AdminerRemove  = "remove"
+)
+
+type SiteAdminer struct {
+	SiteID int64  `json:"site_id"`
+	Op     string `json:"op"`
+}
+
+// SiteAdminerResponse: Path is the page's path on the site ("" when
+// Adminer is not installed).
+type SiteAdminerResponse struct {
+	Path    string `json:"path,omitempty"`
+	Version string `json:"version,omitempty"`
 }
 
 // TypeSiteTrash lists the folders of deleted sites waiting in the trash;
