@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,8 @@ type fakeHub struct {
 	deploys []agentproto.AppSpec
 	servers []int64 // the server of each deployment
 	calls   []fakeCall
+	// compose: the file a git app's repository has (compose_file requests).
+	compose string
 }
 
 type fakeCall struct {
@@ -28,10 +31,13 @@ type fakeCall struct {
 }
 
 func (h *fakeHub) Connected(int64) bool { return true }
-func (h *fakeHub) Call(_ context.Context, _ int64, msgType string, req, _ any) error {
+func (h *fakeHub) Call(_ context.Context, _ int64, msgType string, req, resp any) error {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	h.calls = append(h.calls, fakeCall{msgType, req})
-	h.mu.Unlock()
+	if r, ok := resp.(*agentproto.ComposeFileResponse); ok && msgType == agentproto.TypeComposeFile {
+		r.Commit, r.Compose = strings.Repeat("c", 40), h.compose
+	}
 	return nil
 }
 

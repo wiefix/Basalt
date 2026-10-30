@@ -320,6 +320,8 @@ export interface AppPlacement {
   primary: boolean;
   health_check?: number;
   status?: "unknown" | "up" | "down";
+  // The checks of the copies of other services with domains of their own.
+  services?: { service: string; health_check: number; status: "unknown" | "up" | "down" }[];
 }
 
 export interface AppSettings {

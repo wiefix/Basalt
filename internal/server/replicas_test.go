@@ -134,4 +134,82 @@ func TestComposeRouteReplicas(t *testing.T) {
 			t.Fatalf("service %s: port %d, route port %d", svc.Name, svc.Port, svc.RoutePort)
 		}
 	}
+
+	// The service's copy on each server has a health check of its own, and
+	// DNS answers for its domains with the servers where it works.
+	serviceChecks := func() map[float64]map[string]any {
+		t.Helper()
+		out := map[float64]map[string]any{}
+		for _, p := range c.want(http.StatusOK, "GET", app, nil).body["placements"].([]any) {
+			p := p.(map[string]any)
+			list, _ := p["services"].([]any)
+			for _, sc := range list {
+				out[p["server_id"].(float64)] = sc.(map[string]any)
+			}
+		}
+		return out
+	}
+	checks := serviceChecks()
+	if len(checks) != 2 || checks[float64(servers[0])]["service"] != "api" {
+		t.Fatalf("service checks = %v", checks)
+	}
+	check, err := srv.db.HealthCheck(t.Context(), int64(checks[float64(servers[1])]["health_check"].(float64)))
+	if err != nil || check.Host != "192.0.2.11" || check.HostHeader != "api.example.test" {
+		t.Fatalf("check of the copy on s2 = %+v, %v", check, err)
+	}
+	if _, err := srv.db.SetHealthStatus(t.Context(), check.ID, "down", "HTTP 502", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	answers := func(name string) []string {
+		t.Helper()
+		_, zones, err := srv.db.DesiredDNS(t.Context(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, z := range zones {
+			for _, r := range z.Records {
+				if r.Name+"."+z.Name == name && r.Type == "A" {
+					out = append(out, r.Value)
+				}
+			}
+		}
+		return out
+	}
+	if a := answers("api.example.test"); len(a) != 1 || a[0] != "192.0.2.10" {
+		t.Fatalf("api answers %v", a)
+	}
+	if a := answers("stack.example.test"); len(a) != 2 {
+		t.Fatalf("the published service answers %v", a)
+	}
+	// Other domains: the check asks them; no service with domains, no check.
+	c.want(http.StatusOK, "PUT", app+"/routes", route("api2.example.test"))
+	if checks := serviceChecks(); len(checks) != 2 {
+		t.Fatalf("after new domains: %v", checks)
+	} else if c, err := srv.db.HealthCheck(t.Context(), int64(checks[float64(servers[1])]["health_check"].(float64))); err != nil ||
+		c.HostHeader != "api2.example.test" || c.Status != "unknown" {
+		t.Fatalf("after new domains: %+v, %v", c, err)
+	}
+	c.want(http.StatusOK, "PUT", app+"/routes", map[string]any{"routes": []any{}})
+	if checks := serviceChecks(); len(checks) != 0 {
+		t.Fatalf("without routes: %v", checks)
+	}
+	// Removing the replica takes the checks of both copies.
+	c.want(http.StatusOK, "PUT", app+"/routes", route("api.example.test"))
+	c.want(http.StatusOK, "DELETE", app+"/replicas/"+strconv.FormatInt(servers[1], 10), nil)
+	var n int
+	srv.db.R.QueryRow(`SELECT (SELECT COUNT(*) FROM health_checks) + (SELECT COUNT(*) FROM proxy_route_checks)`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d checks left", n)
+	}
+	// Deleting a replicated app takes them too.
+	c.want(http.StatusCreated, "POST", app+"/replicas", map[string]any{"server_id": servers[1]})
+	if len(serviceChecks()) != 2 {
+		t.Fatal("no service checks")
+	}
+	c.want(http.StatusOK, "DELETE", app, nil)
+	srv.db.R.QueryRow(`SELECT COUNT(*) FROM health_checks`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d checks left after deleting the app", n)
+	}
 }

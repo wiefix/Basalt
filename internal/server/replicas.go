@@ -29,14 +29,78 @@ type placementView struct {
 	Primary     bool   `json:"primary"`
 	HealthCheck int64  `json:"health_check,omitempty"`
 	Status      string `json:"status,omitempty"` // of the health check
+	// Services: the checks of the copies of other services with domains of
+	// their own there (compose apps on several servers).
+	Services []serviceCheckView `json:"services,omitempty"`
 }
 
-func viewPlacements(ps []store.AppPlacement) []placementView {
+type serviceCheckView struct {
+	Service     string `json:"service"`
+	HealthCheck int64  `json:"health_check"`
+	Status      string `json:"status"`
+}
+
+func viewPlacements(ps []store.AppPlacement, checks []store.ServiceCheck) []placementView {
 	out := make([]placementView, len(ps))
 	for i, p := range ps {
 		out[i] = placementView{ServerID: p.ServerID, Primary: p.Primary, HealthCheck: p.HealthCheck, Status: p.CheckStatus}
+		for _, c := range checks {
+			if c.RouteID == p.RouteID {
+				out[i].Services = append(out[i].Services, serviceCheckView{Service: c.Service, HealthCheck: c.HealthCheck, Status: c.CheckStatus})
+			}
+		}
 	}
 	return out
+}
+
+// syncServiceChecks gives each server's copy of the other services of app
+// with domains of their own a health check, once the app runs on several
+// servers (none otherwise): DNS answers for a service's domains with the
+// servers where that service works.
+func (s *Server) syncServiceChecks(ctx context.Context, app *store.App) {
+	want := map[int64]map[string]*store.HealthCheck{}
+	err := func() error {
+		if len(app.Replicas) == 0 || len(app.Routes) == 0 {
+			return nil
+		}
+		places, err := s.db.AppPlacements(ctx, app.ID)
+		if err != nil {
+			return err
+		}
+		for _, p := range places {
+			srv, err := s.db.ServerByID(ctx, p.ServerID)
+			if err != nil {
+				return err
+			}
+			for _, rt := range app.Routes {
+				if len(rt.Domains) == 0 {
+					continue
+				}
+				c, err := placementCheck("app", app.ID, app.Name+"-"+rt.Service, rt.Domains, srv)
+				if err != nil {
+					return err
+				}
+				if want[p.RouteID] == nil {
+					want[p.RouteID] = map[string]*store.HealthCheck{}
+				}
+				want[p.RouteID][rt.Service] = c
+			}
+		}
+		return nil
+	}()
+	if err != nil {
+		s.log.Warn("health checks of services", "app_id", app.ID, "err", err)
+		return
+	}
+	changed, err := s.db.SetServiceChecks(ctx, app.ID, want)
+	if err != nil {
+		s.log.Warn("health checks of services", "app_id", app.ID, "err", err)
+		return
+	}
+	if changed {
+		s.healthChanged(ctx)
+		s.syncAutoDNS(ctx)
+	}
 }
 
 // replicaProblem says why app cannot run on several servers ("" if it can).
@@ -190,6 +254,9 @@ func (s *Server) handleAddReplica(w http.ResponseWriter, r *http.Request, p *pri
 		return
 	}
 	s.audit(r, &p.user.ID, "app.replica_added", map[string]any{"app_id": app.ID, "server_id": srv.ID, "check_id": check.ID})
+	if a, err := s.db.AppByID(r.Context(), app.ID); err == nil {
+		s.syncServiceChecks(r.Context(), a)
+	}
 	s.healthChanged(r.Context())
 	// Every route of the app now takes its certificates through DNS-01.
 	s.PushProxy(r.Context(), app.ServerID)
@@ -228,6 +295,9 @@ func (s *Server) handleRemoveReplica(w http.ResponseWriter, r *http.Request, p *
 		return
 	}
 	s.audit(r, &p.user.ID, "app.replica_removed", map[string]any{"app_id": app.ID, "server_id": sid})
+	if a, err := s.db.AppByID(r.Context(), app.ID); err == nil {
+		s.syncServiceChecks(r.Context(), a)
+	}
 	s.healthChanged(r.Context())
 	s.syncAutoDNS(r.Context())
 	s.PushProxy(r.Context(), sid)

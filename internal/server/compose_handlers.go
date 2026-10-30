@@ -300,6 +300,7 @@ func (s *Server) handleSetAppRoutes(w http.ResponseWriter, r *http.Request, p *p
 		s.PushProxy(r.Context(), id)
 	}
 	app.Routes = routes
+	s.syncServiceChecks(r.Context(), app)
 	writeJSON(w, http.StatusOK, map[string]any{"app": viewApp(app), "sync": s.proxySync(r.Context(), app.ServerID)})
 }
 

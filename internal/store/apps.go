@@ -443,6 +443,12 @@ func (db *DB) SetAppCompose(ctx context.Context, id int64, sealed []byte, sum Co
 		sealed, string(b), service, port, id)
 }
 
+// SetAppService sets the service a compose app publishes on its port,
+// before it has a file (a preview of an app running one from git).
+func (db *DB) SetAppService(ctx context.Context, id int64, service string, port int) error {
+	return db.execOne(ctx, `UPDATE apps SET service = ?, port = ? WHERE id = ?`, service, port, id)
+}
+
 // LinkApp makes a database reachable from an app.
 func (db *DB) LinkApp(ctx context.Context, databaseID, appID int64) error {
 	_, err := db.W.ExecContext(ctx, `INSERT OR IGNORE INTO app_links (database_id, app_id) VALUES (?, ?)`, databaseID, appID)
@@ -580,6 +586,11 @@ func (db *DB) DeleteApp(ctx context.Context, id int64) ([]int64, error) {
 	}
 	if len(routes) == 0 {
 		return nil, ErrNotFound
+	}
+	for _, r := range routes {
+		if err := dropServiceChecks(ctx, tx, r.RouteID); err != nil {
+			return nil, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM apps WHERE id = ?`, id); err != nil {
 		return nil, err

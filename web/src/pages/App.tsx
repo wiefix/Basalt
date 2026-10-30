@@ -231,7 +231,7 @@ function Overview({ app, user, me, placements }: { app: App; user: User; me: Use
       </div>
 
       {app.template && <TemplateCard app={app} user={user} />}
-      {app.source === "git" && !!app.git?.source_id && !app.preview_of && app.git.builder !== "compose" && (
+      {app.source === "git" && !!app.git?.source_id && !app.preview_of && (
         <PreviewsCard app={app} user={user} />
       )}
       {(app.source === "image" || app.source === "git" || app.source === "compose") && !app.preview_of && (
@@ -1522,6 +1522,17 @@ function ServersCard({ app, user, me, placements }: { app: App; user: User; me: 
                       {p.status ?? "unknown"}
                     </Link>
                   ) : null}
+                  {p.services?.map((c) => (
+                    <Link
+                      key={c.service}
+                      to="/monitoring"
+                      className={checkBadge[c.status] ?? "badge"}
+                      style={{ marginLeft: 6 }}
+                      title={`The health check of service ${c.service} there: DNS leaves out a server whose copy is down for its domains`}
+                    >
+                      {c.service}: {c.status}
+                    </Link>
+                  ))}
                 </td>
                 <td className="num">
                   {admin && !p.primary && (
@@ -1853,7 +1864,14 @@ function PreviewsCard({ app, user }: { app: App; user: User }) {
                   Each pull request (merge request on GitLab) into <span className="mono">{app.git?.branch}</span> runs at{" "}
                   <span className="mono">pr-&lt;number&gt;.{domain.trim() || "preview.example.com"}</span>. Point{" "}
                   <span className="mono">*.{domain.trim() || "preview.example.com"}</span> at this app's server (automatic if
-                  the zone is under DNS). Empty: no previews.
+                  the zone is under DNS).
+                  {app.git?.builder === "compose" && (
+                    <>
+                      {" "}
+                      There a preview publishes service <span className="mono">{app.service}</span>; other services get no domains.
+                    </>
+                  )}{" "}
+                  Empty: no previews.
                 </>
               }
             >

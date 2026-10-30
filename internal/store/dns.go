@@ -382,7 +382,8 @@ func bumpDNSIfFollowed(ctx context.Context, tx *sql.Tx, checkID int64) (bool, er
 	var n int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT (SELECT count(*) FROM dns_records WHERE health_check_id = ?) +
-		        (SELECT count(*) FROM proxy_routes WHERE health_check_id = ?)`, checkID, checkID).Scan(&n); err != nil {
+		        (SELECT count(*) FROM proxy_routes WHERE health_check_id = ?) +
+		        (SELECT count(*) FROM proxy_route_checks WHERE health_check_id = ?)`, checkID, checkID, checkID).Scan(&n); err != nil {
 		return false, err
 	}
 	if n == 0 {
@@ -524,11 +525,12 @@ func (db *DB) DNSServers(ctx context.Context) ([]DNSServerStatus, error) {
 // the input of automatic records.
 func DNSTargets(ctx context.Context, q queryer) ([]dns.AutoTarget, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT d.domain, s.public_ips, s.detected_ips, s.last_ip, COALESCE(r.health_check_id, 0),
+		`SELECT d.domain, s.public_ips, s.detected_ips, s.last_ip, COALESCE(c.health_check_id, r.health_check_id, 0),
 		        CASE WHEN st.id IS NOT NULL THEN 'site ' || st.name
 		             WHEN a.id IS NOT NULL THEN 'app ' || a.name ELSE 'route' END
 		 FROM proxy_route_domains d
 		 JOIN proxy_routes r ON r.id = d.route_id
+		 LEFT JOIN proxy_route_checks c ON c.route_id = d.route_id AND c.service = d.service AND d.service != ''
 		 JOIN servers s ON s.id = d.server_id
 		 LEFT JOIN sites st ON st.id = r.site_id
 		 LEFT JOIN apps a ON a.id = r.app_id

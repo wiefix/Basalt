@@ -514,8 +514,13 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request, p *princip
 		s.internalError(w, r, "list app placements", err)
 		return
 	}
+	checks, err := s.db.AppServiceChecks(r.Context(), app.ID)
+	if err != nil {
+		s.internalError(w, r, "list service checks", err)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"app": s.viewAppFull(app), "sync": s.proxySync(r.Context(), app.ServerID),
-		"placements": viewPlacements(placements)})
+		"placements": viewPlacements(placements, checks)})
 }
 
 func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request, p *principal) {

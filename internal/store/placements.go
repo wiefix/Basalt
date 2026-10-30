@@ -204,6 +204,9 @@ func (db *DB) removeReplica(ctx context.Context, owner string, id, serverID int6
 			continue
 		}
 		found = true
+		if err := dropServiceChecks(ctx, tx, r.RouteID); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM proxy_routes WHERE id = ?`, r.RouteID); err != nil {
 			return err
 		}
@@ -214,8 +217,13 @@ func (db *DB) removeReplica(ctx context.Context, owner string, id, serverID int6
 	if !found {
 		return ErrNotFound
 	}
-	if len(routes) == 2 && routes[0].Primary && routes[0].HealthCheck != 0 {
-		drop = append(drop, routes[0].HealthCheck)
+	if len(routes) == 2 && routes[0].Primary {
+		if routes[0].HealthCheck != 0 {
+			drop = append(drop, routes[0].HealthCheck)
+		}
+		if err := dropServiceChecks(ctx, tx, routes[0].RouteID); err != nil {
+			return err
+		}
 	}
 	for _, id := range drop {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM health_checks WHERE id = ?`, id); err != nil {
@@ -308,4 +316,120 @@ func (db *DB) SetSitePrimary(ctx context.Context, siteID, serverID int64) error 
 		}
 	}
 	return tx.Commit()
+}
+
+// ServiceCheck is the health check a server's copy of another service of a
+// compose app (one with domains of its own) follows, as the route's own
+// check does for the published service.
+type ServiceCheck struct {
+	ServerID    int64
+	RouteID     int64
+	Service     string
+	HealthCheck int64
+	CheckStatus string
+	HostHeader  string
+}
+
+func serviceChecks(ctx context.Context, q queryer, appID int64) ([]ServiceCheck, error) {
+	rows, err := q.QueryContext(ctx,
+		`SELECT r.server_id, r.id, c.service, c.health_check_id, h.status, h.host_header
+		 FROM proxy_route_checks c JOIN proxy_routes r ON r.id = c.route_id JOIN health_checks h ON h.id = c.health_check_id
+		 WHERE r.app_id = ? ORDER BY r.server_id, c.service`, appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ServiceCheck{}
+	for rows.Next() {
+		var c ServiceCheck
+		if err := rows.Scan(&c.ServerID, &c.RouteID, &c.Service, &c.HealthCheck, &c.CheckStatus, &c.HostHeader); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// AppServiceChecks lists the checks of an app's other services, on every
+// server it runs on.
+func (db *DB) AppServiceChecks(ctx context.Context, appID int64) ([]ServiceCheck, error) {
+	return serviceChecks(ctx, db.R, appID)
+}
+
+// SetServiceChecks makes the checks of an app's other services those of
+// want (route ID → service → check, created here). A check already there
+// stays, with its status, unless want asks another host; the others go.
+// It reports whether anything changed.
+func (db *DB) SetServiceChecks(ctx context.Context, appID int64, want map[int64]map[string]*HealthCheck) (bool, error) {
+	tx, err := db.W.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var projectID int64
+	if err := tx.QueryRowContext(ctx, `SELECT project_id FROM apps WHERE id = ?`, appID).Scan(&projectID); errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	} else if err != nil {
+		return false, err
+	}
+	routes, err := appRoutes(ctx, tx, appID)
+	if err != nil {
+		return false, err
+	}
+	have, err := serviceChecks(ctx, tx, appID)
+	if err != nil {
+		return false, err
+	}
+	kept := map[int64]map[string]bool{}
+	changed := false
+	for _, c := range have {
+		if w := want[c.RouteID][c.Service]; w != nil && w.HostHeader == c.HostHeader {
+			if kept[c.RouteID] == nil {
+				kept[c.RouteID] = map[string]bool{}
+			}
+			kept[c.RouteID][c.Service] = true
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM health_checks WHERE id = ?`, c.HealthCheck); err != nil {
+			return false, err
+		}
+		changed = true
+	}
+	for _, r := range routes {
+		for service, check := range want[r.RouteID] {
+			if kept[r.RouteID][service] {
+				continue
+			}
+			check.ProjectID = projectID
+			if err := insertHealthCheck(ctx, tx, check); err != nil {
+				return false, err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO proxy_route_checks (route_id, service, health_check_id) VALUES (?, ?, ?)`,
+				r.RouteID, service, check.ID); err != nil {
+				return false, err
+			}
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	if err := bumpHealthRevision(ctx, tx); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// dropServiceChecks deletes the checks of the other services on a route
+// about to go (the rows would go by cascade, the checks would stay).
+func dropServiceChecks(ctx context.Context, tx *sql.Tx, routeID int64) error {
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM health_checks WHERE id IN (SELECT health_check_id FROM proxy_route_checks WHERE route_id = ?)`, routeID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return bumpHealthRevision(ctx, tx)
+	}
+	return nil
 }

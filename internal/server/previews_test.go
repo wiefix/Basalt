@@ -332,3 +332,86 @@ func TestForgePreviews(t *testing.T) {
 		})
 	}
 }
+
+// TestComposePreviews: an app running a compose file from git gets
+// previews too, once it publishes a service: the preview reads the file
+// from the request's branch, publishes the same service at
+// pr-<n>.<domain>, and keeps its data in volumes of its own.
+func TestComposePreviews(t *testing.T) {
+	f := forgetest.New(t, "gitea", forgetest.Repo{FullName: "acme/shop", DefaultBranch: "main", Branches: []string{"main"}})
+	hub := &fakeHub{compose: "services:\n  web:\n    build: .\n    expose: [\"80\"]\n  db:\n    image: postgres:17\n" +
+		"    volumes: [data:/var/lib/postgresql/data]\nvolumes:\n  data:\n"}
+	clock := &testClock{t: time.Now()}
+	srv := newTestServerWith(t, Options{SetupToken: testSetupToken, Now: clock.Now, Agents: hub})
+	ts := httptest.NewServer(srv.Handler())
+	t.Cleanup(ts.Close)
+	c := (&env{t: t, srv: srv, ts: ts, clock: clock}).setupOwner()
+	c.want(http.StatusOK, "PUT", "/api/v1/notifications/panel-url", map[string]any{"url": "https://panel.example.com"})
+	sid := c.want(http.StatusCreated, "POST", "/api/v1/git-sources", map[string]any{"kind": "gitea", "name": "work", "url": f.URL,
+		"token": f.Token, "allow_private": true}).body["source"].(map[string]any)["id"]
+	srvID := c.want(http.StatusCreated, "POST", "/api/v1/servers", map[string]string{"name": "s1"}).body["server"].(map[string]any)["id"]
+	srv.db.W.Exec(`UPDATE servers SET docker = '28.0.0' WHERE id = ?`, srvID)
+	create := func(name string, extra map[string]any) string {
+		body := map[string]any{"server_id": srvID, "name": name, "source": "git",
+			"git": map[string]any{"source_id": sid, "repo": "acme/shop", "branch": "main", "builder": "compose"}}
+		for k, v := range extra {
+			body[k] = v
+		}
+		a := c.want(http.StatusCreated, "POST", "/api/v1/apps", body).body["app"].(map[string]any)
+		return "/api/v1/apps/" + strconv.Itoa(int(a["id"].(float64)))
+	}
+	// Without a published service, a preview would have nothing to serve.
+	bare := create("bare", nil)
+	if c.want(http.StatusOK, "GET", bare+"/previews", nil).body["supported"].(bool) {
+		t.Fatal("previews of an app publishing no service")
+	}
+	c.want(http.StatusUnprocessableEntity, "PUT", bare+"/previews", map[string]any{"domain": "preview.example.com"})
+
+	app := create("shop", map[string]any{"service": "web", "port": 80})
+	if !c.want(http.StatusOK, "GET", app+"/previews", nil).body["supported"].(bool) {
+		t.Fatal("previews not supported")
+	}
+	c.want(http.StatusOK, "PUT", app+"/previews", map[string]any{"domain": "preview.example.com"})
+	secret := c.want(http.StatusOK, "GET", app+"/webhook", nil).body["webhook"].(map[string]any)["secret"].(string)
+	body, _ := json.Marshal(map[string]any{"action": "opened", "number": 4, "repository": map[string]any{"full_name": "acme/shop"},
+		"pull_request": map[string]any{"head": map[string]any{"ref": "feature", "sha": strings.Repeat("a", 40),
+			"repo": map[string]any{"full_name": "acme/shop"}}, "base": map[string]any{"ref": "main"}}})
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	req, _ := http.NewRequest("POST", ts.URL+strings.Replace(app, "/apps/", "/webhooks/apps/", 1), bytes.NewReader(body))
+	req.Header.Set("X-Gitea-Event", "pull_request")
+	req.Header.Set("X-Gitea-Signature", hex.EncodeToString(mac.Sum(nil)))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("pull request: %d", resp.StatusCode)
+	}
+	for range 300 {
+		if len(hub.deployed()) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(hub.deployed()) == 0 {
+		t.Fatal("the preview did not deploy")
+	}
+	d := hub.deployed()[0]
+	pv := c.want(http.StatusOK, "GET", app+"/previews", nil).body["previews"].([]any)[0].(map[string]any)
+	g := pv["git"].(map[string]any)
+	if d.AppID != int64(pv["id"].(float64)) || g["builder"] != "compose" || g["branch"] != "feature" || pv["service"] != "web" ||
+		pv["port"] != float64(80) || pv["domains"].([]any)[0] != "pr-4.preview.example.com" {
+		t.Fatalf("preview: %v", pv)
+	}
+	if len(d.Services) != 2 || d.Git == nil || d.Git.Commit != strings.Repeat("c", 40) || d.Git.ComposeFile != "compose.yaml" ||
+		len(d.ComposeVolumes) != 1 {
+		t.Fatalf("preview deployment: %+v", d)
+	}
+	for _, svc := range d.Services {
+		if svc.Name == "web" && (svc.Build == nil || svc.Port != 80) {
+			t.Fatalf("published service: %+v", svc)
+		}
+	}
+}

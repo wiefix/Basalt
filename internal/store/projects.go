@@ -310,7 +310,8 @@ func projectUsage(ctx context.Context, q querier, id int64) (ProjectUsage, error
 		(SELECT COUNT(*) FROM apps WHERE project_id = ?1 AND source = 'database'),
 		(SELECT COUNT(*) FROM dns_zones WHERE project_id = ?1),
 		(SELECT COUNT(*) FROM health_checks WHERE project_id = ?1
-		 AND id NOT IN (SELECT health_check_id FROM proxy_routes WHERE health_check_id IS NOT NULL)),
+		 AND id NOT IN (SELECT health_check_id FROM proxy_routes WHERE health_check_id IS NOT NULL)
+		 AND id NOT IN (SELECT health_check_id FROM proxy_route_checks)),
 		(SELECT COALESCE(SUM(disk_bytes + db_bytes), 0) FROM sites WHERE project_id = ?1)`, id).
 		Scan(&u.Sites, &u.Apps, &u.Databases, &u.DNSZones, &u.HealthChecks, &u.DiskBytes)
 	if err != nil {
@@ -514,13 +515,15 @@ func (db *DB) MoveToProject(ctx context.Context, kind ProjectResource, id, proje
 			return ErrProjectMismatch
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE health_checks SET project_id = ? WHERE id IN (SELECT health_check_id FROM proxy_routes WHERE app_id = ?)`,
+			`UPDATE health_checks SET project_id = ?1 WHERE id IN (SELECT health_check_id FROM proxy_routes WHERE app_id = ?2)
+			 OR id IN (SELECT c.health_check_id FROM proxy_route_checks c JOIN proxy_routes r ON r.id = c.route_id WHERE r.app_id = ?2)`,
 			projectID, id); err != nil {
 			return err
 		}
 	case ResourceHealthCheck:
 		var n int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM proxy_routes WHERE health_check_id = ?`, id).Scan(&n); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM proxy_routes WHERE health_check_id = ?1) +
+			(SELECT COUNT(*) FROM proxy_route_checks WHERE health_check_id = ?1)`, id).Scan(&n); err != nil {
 			return err
 		}
 		if n > 0 {

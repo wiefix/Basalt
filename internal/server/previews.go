@@ -14,10 +14,11 @@ import (
 	"github.com/wiefix/basalt/internal/store"
 )
 
-// Preview deployments (20.5, 20.11): an app built through a git source
-// (GitHub App, GitLab, Gitea), with a preview domain, gets a copy of
+// Preview deployments (20.5, 20.11, 20.13): an app built through a git
+// source (GitHub App, GitLab, Gitea), with a preview domain, gets a copy of
 // itself for each pull (merge) request into its branch, at
-// pr-<number>.<domain>. The forge reports the request (webhook of the
+// pr-<number>.<domain> (an app running a compose file: its published
+// service; other services get no domains). The forge reports the request (webhook of the
 // GitHub App, or the app's own webhook on GitLab and Gitea): opened,
 // reopened or pushed to — the preview is created if needed and deploys the
 // request's head commit; closed or merged — it is deleted with its data.
@@ -37,8 +38,8 @@ func previewParent(app *store.App) error {
 	if app.Source != store.SourceGit || app.Git.SourceID == 0 || app.Git.Repo == "" {
 		return errors.New("previews need an app built from a repository of a git source (GitHub, GitLab, Gitea)")
 	}
-	if app.ComposeFromGit() {
-		return errors.New("compose apps have no previews yet")
+	if app.ComposeFromGit() && app.Service == "" {
+		return errors.New("choose the service the app's domains point to first (Compose tab)")
 	}
 	if app.PreviewOf != 0 {
 		return errors.New("this app is a preview")
@@ -266,7 +267,8 @@ func (s *Server) ensurePreview(ctx context.Context, parent *store.App, number in
 	if number <= 0 {
 		return nil, errors.New("invalid pull request")
 	}
-	g := agentproto.GitSource{URL: parent.Git.URL, Branch: branch, Dockerfile: parent.Git.Dockerfile, Context: parent.Git.Context}
+	g := agentproto.GitSource{URL: parent.Git.URL, Branch: branch, Dockerfile: parent.Git.Dockerfile, Context: parent.Git.Context,
+		Builder: parent.Git.Builder, ComposeFile: parent.Git.ComposeFile}
 	if err := g.Validate(); err != nil {
 		return nil, err
 	}
@@ -300,6 +302,13 @@ func (s *Server) ensurePreview(ctx context.Context, parent *store.App, number in
 		}
 	} else if err := s.db.UpdateAppSettings(ctx, pv.ID, st); err != nil {
 		return nil, err
+	}
+	// A compose file is read from the branch when the preview deploys; its
+	// domain goes to the parent's published service.
+	if parent.ComposeFromGit() {
+		if err := s.db.SetAppService(ctx, pv.ID, parent.Service, parent.Port); err != nil {
+			return nil, err
+		}
 	}
 	// The parent's environment, as it is now.
 	env, err := s.appEnv(parent)

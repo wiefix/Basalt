@@ -969,6 +969,7 @@ export interface PlacementView {
   health_check?: number;
   primary: boolean;
   server_id: number;
+  services?: ServiceCheckView[];
   status?: string;
 }
 
@@ -1139,6 +1140,12 @@ export interface ServerView {
   public_ips: string[];
   railpack: string;
   restic: string;
+  status: string;
+}
+
+export interface ServiceCheckView {
+  health_check: number;
+  service: string;
   status: string;
 }
 
