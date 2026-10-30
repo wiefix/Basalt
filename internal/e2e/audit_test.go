@@ -121,3 +121,91 @@ func TestAuditLog(t *testing.T) {
 		t.Fatalf("after tampering: %v", e)
 	}
 }
+
+// TestAuditAnchor: each agent keeps the newest audit log entry it was
+// given, so a log that lost its end (an older copy of the database put
+// back) is found although its chain holds; an owner accepts it.
+func TestAuditAnchor(t *testing.T) {
+	got := make(chan map[string]any, 8)
+	receiver := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var m map[string]any
+		json.NewDecoder(r.Body).Decode(&m)
+		got <- m
+	}))
+	t.Cleanup(receiver.Close)
+	p := startPanel(t)
+	h := startHost(t, p)
+	p.call(http.StatusCreated, "POST", "/api/v1/notifications", map[string]any{"name": "ops", "kind": "webhook",
+		"url": receiver.URL, "allow_private": true, "events": []string{"audit.broken"}})
+	p.call(http.StatusCreated, "POST", "/api/v1/users", map[string]string{
+		"email": "a@example.com", "name": "A", "password": "admin password 1", "role": "admin",
+	})
+	anchor := func() map[string]any {
+		t.Helper()
+		check := p.call(200, "GET", "/api/v1/audit/verify", nil)
+		a := check["anchors"].([]any)
+		if len(a) != 1 || a[0].(map[string]any)["server_id"] != float64(mustAtoi(h.id)) {
+			t.Fatalf("anchors: %v", check)
+		}
+		return a[0].(map[string]any)
+	}
+	var head int64
+	p.db.R.QueryRow(`SELECT MAX(id) FROM audit_log`).Scan(&head)
+	if a := anchor(); a["ok"] != true || a["entry"] != float64(head) {
+		t.Fatalf("first anchor: %v (head %d)", a, head)
+	}
+	// Newer entries, given to the agent; then the database goes back to
+	// before them.
+	p.call(http.StatusCreated, "POST", "/api/v1/servers", map[string]string{"name": "node-a"})
+	p.call(http.StatusCreated, "POST", "/api/v1/servers", map[string]string{"name": "node-b"})
+	var newer int64
+	p.db.R.QueryRow(`SELECT MAX(id) FROM audit_log`).Scan(&newer)
+	if a := anchor(); a["ok"] != true || a["entry"] != float64(newer) {
+		t.Fatalf("anchor after new entries: %v", a)
+	}
+	if _, err := p.db.W.Exec(`DROP TRIGGER audit_log_no_delete`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.db.W.Exec(`DELETE FROM audit_log WHERE id > ?`, head); err != nil {
+		t.Fatal(err)
+	}
+	check := p.call(200, "GET", "/api/v1/audit/verify", nil)
+	a := check["anchors"].([]any)[0].(map[string]any)
+	if check["intact"] != true || a["ok"] != false || a["entry"] != float64(newer) || !strings.Contains(a["problem"].(string), "were removed") {
+		t.Fatalf("after losing the end: %v", check)
+	}
+	select {
+	case m := <-got:
+		if m["event"] != "audit.broken" || !strings.Contains(m["title"].(string), "lost entries") {
+			t.Fatalf("message: %v", m)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no notification")
+	}
+	// The agent keeps its anchor: still found, notified once.
+	if a := anchor(); a["ok"] != false {
+		t.Fatalf("checked again: %v", a)
+	}
+	select {
+	case m := <-got:
+		t.Fatalf("notified again: %v", m)
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	// Only an owner accepts the log as it is.
+	admin := *p
+	admin.hc = &http.Client{Jar: newJar()}
+	admin.call(200, "POST", "/api/v1/auth/login", map[string]string{"email": "a@example.com", "password": "admin password 1"})
+	admin.call(http.StatusForbidden, "POST", "/api/v1/audit/anchors/reset", nil)
+	r := p.call(200, "POST", "/api/v1/audit/anchors/reset", nil)
+	if a := r["anchors"].([]any)[0].(map[string]any); a["ok"] != true {
+		t.Fatalf("after the reset: %v", r)
+	}
+	e := p.call(200, "GET", "/api/v1/audit?action=audit.anchors_reset", nil)["entries"].([]any)
+	if len(e) != 1 || !strings.Contains(fmt.Sprint(e[0].(map[string]any)["details"]), "were removed") {
+		t.Fatalf("reset entry: %v", e)
+	}
+	if a := anchor(); a["ok"] != true {
+		t.Fatalf("checked after the reset: %v", a)
+	}
+}

@@ -2,6 +2,7 @@ package dbengine
 
 import (
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 
@@ -83,5 +84,37 @@ func TestRejected(t *testing.T) {
 	}
 	if _, ok := Get("mongodb"); ok {
 		t.Error("unknown engine found")
+	}
+}
+
+func TestUpgradeTargets(t *testing.T) {
+	for _, c := range []struct {
+		engine, from string
+		want         []string
+	}{
+		{"postgres", "15", []string{"18"}}, // dumped into the newest version
+		{"postgres", "17", []string{"18"}},
+		{"postgres", "18", nil},
+		{"mariadb", "10.11", []string{"11.4"}}, // one release at a time
+		{"mariadb", "11.4", []string{"11.8"}},
+		{"mariadb", "11.8", nil},
+		{"redis", "7.4", []string{"8"}},
+		{"redis", "8", nil},
+		{"mysql", "8.4", nil},
+		{"postgres", "9.6", nil},
+	} {
+		e, _ := Get(c.engine)
+		if got := e.UpgradeTargets(c.from); !slices.Equal(got, c.want) {
+			t.Errorf("%s %s: %v, want %v", c.engine, c.from, got, c.want)
+		}
+	}
+	pg, _ := Get("postgres")
+	my, _ := Get("mariadb")
+	if !pg.DumpUpgrade() || my.DumpUpgrade() {
+		t.Error("DumpUpgrade")
+	}
+	svc, err := my.Service("db", "11.8", my.Env(my.NewCredentials("db")), Limits{})
+	if err != nil || svc.Env["MARIADB_AUTO_UPGRADE"] != "1" {
+		t.Fatalf("mariadb upgrades its files at start: %v %v", svc.Env, err)
 	}
 }

@@ -304,6 +304,8 @@ func (a *Agent) httpClient() *http.Client {
 	roots.AddCert(id.ca)
 	var protocols http.Protocols
 	protocols.SetHTTP2(true)
+	// No timeout: the connection to the panel is one long stream; other
+	// requests (renewal, downloads) bound themselves by their context.
 	return &http.Client{Transport: &http.Transport{
 		Protocols: &protocols,
 		TLSClientConfig: &tls.Config{
@@ -636,6 +638,19 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		resp, err := a.siteAdminer(ctx, req)
+		return resp, publicError(err)
+	case agentproto.TypeAuditAnchor:
+		var req agentproto.AuditAnchor
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.auditAnchor(req)
+	case agentproto.TypeSiteLaravel:
+		var req agentproto.SiteLaravel
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		resp, err := a.sites.LaravelProcesses(ctx, req)
 		return resp, publicError(err)
 	case agentproto.TypeDBPassword:
 		var req agentproto.ContainerDBPassword

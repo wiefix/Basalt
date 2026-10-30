@@ -115,7 +115,7 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
   const toast = useToast();
   const create = useMutation({
     mutationFn: async () => {
-      const app = php === "wordpress" || php === "laravel" ? php : null;
+      const app = php === "wordpress" || php === "laravel" || php === "symfony" ? php : null;
       const r = await api.createSite({
         server_id: Number(serverId || enrolled[0]?.id),
         name: name.trim(),
@@ -125,13 +125,15 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
         project_id: projectId,
       });
       if (app) {
-        const name = app === "wordpress" ? "WordPress" : "Laravel";
+        const name = app === "wordpress" ? "WordPress" : app === "laravel" ? "Laravel" : "Symfony";
         try {
           const w = await api.installSite(r.site.id, app);
           toast(
             app === "wordpress"
               ? `WordPress ${w.version} installed: open the site now to choose its admin account`
-              : `Laravel ${w.version} installed, with its tables in database ${w.database.name}`,
+              : app === "laravel"
+                ? `Laravel ${w.version} installed, with its tables in database ${w.database.name}`
+                : `Symfony ${w.version} installed; DATABASE_URL in .env.local points at database ${w.database.name}`,
           );
         } catch (e) {
           toast(`The site was created, but ${name} was not installed: ${errorMessage(e)}`, true);
@@ -216,6 +218,7 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
               ))}
               {canApps && <option value="wordpress">WordPress (PHP {phpVersions[0]}, MariaDB)</option>}
               {canApps && <option value="laravel">Laravel (PHP {phpVersions[0]}, MariaDB)</option>}
+              {canApps && <option value="symfony">Symfony (PHP {phpVersions[0]}, MariaDB)</option>}
             </select>
           </Field>
           {php === "wordpress" && (
@@ -229,6 +232,13 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
               A new Laravel project is created with Composer (from Packagist) as the site's user, with a new database and
               its tables. It takes a minute or two. The project sits next to <code>public/</code>; edit it over SFTP or in
               Files.
+            </div>
+          )}
+          {php === "symfony" && (
+            <div className="alert small">
+              A new Symfony project (the skeleton, set up by Symfony Flex) is created with Composer as the site's user, with a new
+              database: <code>DATABASE_URL</code> in <code>.env.local</code> points at it, for Doctrine when you add it. The project
+              sits next to <code>public/</code>.
             </div>
           )}
           <Field label="Certificate">

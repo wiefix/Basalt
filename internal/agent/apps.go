@@ -542,6 +542,7 @@ func answersHTTP(ctx context.Context, addr string) bool {
 }
 
 var readinessClient = &http.Client{
+	Timeout:       2 * time.Second, // as answersHTTP's context
 	Transport:     &http.Transport{DisableKeepAlives: true, Proxy: nil},
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }

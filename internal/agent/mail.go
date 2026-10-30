@@ -64,7 +64,7 @@ func (m *appsManager) mailPost(ctx context.Context, appID int64, user, password 
 	}
 	hr.Header.Set("Content-Type", "application/json")
 	hr.SetBasicAuth(user, password)
-	resp, err := (&http.Client{}).Do(hr)
+	resp, err := (&http.Client{Timeout: time.Minute}).Do(hr)
 	if err != nil {
 		return 0, nil, fmt.Errorf("mail server: %w", publicError(err))
 	}

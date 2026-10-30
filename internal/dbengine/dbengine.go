@@ -67,6 +67,29 @@ func Get(id string) (*Engine, bool) {
 // ValidVersion reports whether the engine offers version.
 func (e *Engine) ValidVersion(v string) bool { return slices.Contains(e.Versions, v) }
 
+// UpgradeTargets are the versions a database of version from can move to
+// (none to an older one: data a newer version has written stays there).
+// PostgreSQL goes to the newest version directly (its data is dumped and
+// loaded into a new cluster, DumpUpgrade); MariaDB one release at a time
+// (it upgrades its files in place at start, MARIADB_AUTO_UPGRADE); the
+// others to any newer version (they read older files).
+func (e *Engine) UpgradeTargets(from string) []string {
+	i := slices.Index(e.Versions, from)
+	switch {
+	case i <= 0:
+		return nil
+	case e.ID == "postgres":
+		return e.Versions[:1]
+	case e.ID == "mariadb":
+		return e.Versions[i-1 : i]
+	}
+	return slices.Clone(e.Versions[:i])
+}
+
+// DumpUpgrade reports whether an upgrade moves the data through a dump
+// (agentproto.DBUpgrade) rather than the new version reading it in place.
+func (e *Engine) DumpUpgrade() bool { return e.ID == "postgres" }
+
 // Image is the image reference of a version.
 func (e *Engine) Image(version string) string { return e.image + ":" + version + e.tag }
 
@@ -190,6 +213,10 @@ func (e *Engine) Service(name, version string, env map[string]string, l Limits) 
 		svc.Health.Test = []string{"CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "--silent"}
 	case "mariadb":
 		svc.Health.Test = []string{"CMD", "healthcheck.sh", "--connect", "--innodb_initialized"}
+		// After a new major version (or a minor update that needs it), the
+		// image runs mariadb-upgrade at start, having backed up the system
+		// tables.
+		svc.Env["MARIADB_AUTO_UPGRADE"] = "1"
 	case "redis":
 		path = "/data"
 		svc.Command = []string{"redis-server", "--appendonly", "yes", "--requirepass", c.Password}

@@ -65,7 +65,7 @@ func (s *Server) initDatabase(ctx context.Context, app *store.App) error {
 
 // databaseSpec prepares the deployment of a database; pinned are the
 // images of the deployment rolled back to.
-func (s *Server) databaseSpec(app *store.App, pinned map[string]string, spec *agentproto.AppSpec) error {
+func (s *Server) databaseSpec(app *store.App, version string, pinned map[string]string, spec *agentproto.AppSpec) error {
 	e, ok := dbengine.Get(app.Engine)
 	if !ok {
 		return errors.New("unknown database engine " + app.Engine)
@@ -74,7 +74,7 @@ func (s *Server) databaseSpec(app *store.App, pinned map[string]string, spec *ag
 	if err != nil {
 		return err
 	}
-	svc, err := e.Service(app.Name, app.EngineVersion, env, dbengine.Limits{MemoryMB: app.MemoryMB, CPUs: app.CPUs})
+	svc, err := e.Service(app.Name, version, env, dbengine.Limits{MemoryMB: app.MemoryMB, CPUs: app.CPUs})
 	if err != nil {
 		return err
 	}

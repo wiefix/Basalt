@@ -172,6 +172,7 @@ func probeErr(ctx context.Context, c agentproto.HealthCheck) error {
 		Proxy:             nil,
 	}
 	defer tr.CloseIdleConnections()
+	// No timeout: probe's context carries the check's own.
 	hc := &http.Client{Transport: tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	// As browsers do, the default port is left out of the Host header.
 	authority := net.JoinHostPort(host, strconv.Itoa(c.Port))

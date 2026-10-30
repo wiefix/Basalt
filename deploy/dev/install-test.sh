@@ -171,6 +171,8 @@ $read = @file_get_contents("/etc/passwd") === false ? "fenced" : "open";
 # a folder anyone may write to on the host is read-only.
 $write = trim((string) shell_exec("touch /var/lib/php/sessions/basalt-escape 2>/dev/null && echo writable || echo readonly"));
 file_put_contents($out, "$who " . ini_get("open_basedir") . " $read $write\n", FILE_APPEND);
+echo "started " . ($argv[1] ?? "") . "\n";
+fwrite(STDERR, "<3>error from " . ($argv[1] ?? "") . "\n");
 sleep(3600);
 PHP
 docker cp /tmp/basalt-artisan basalt-panel:/root/artisan
@@ -191,6 +193,32 @@ LIMITS=$(docker exec basalt-node1 systemctl show -p CPUQuotaPerSecUSec -p Memory
 echo "  slice limits: $LIMITS"
 [ "$LIMITS" = "500ms 268435456 " ] || { echo "the site's limits are not on the Laravel processes"; exit 1; }
 echo "  exposure score: $(docker exec basalt-node1 systemd-analyze security basalt-php-site-$SITE-queue-1.service 2>/dev/null | tail -1)"
+# Their state, output and restart in the panel.
+$API http://127.0.0.1:8080/api/v1/sites/$SITE/laravel | python3 -c '
+import sys, json
+p = json.load(sys.stdin)["processes"]
+print("  processes:", [(x["name"], x["state"], x["sub_state"]) for x in p])
+assert [x["name"] for x in p] == ["schedule", "queue-1", "queue-2"] and all(x["state"] == "active" and x["since"] for x in p), p
+' || exit 1
+for i in $(seq 15); do
+  $API "http://127.0.0.1:8080/api/v1/sites/$SITE/laravel/log?lines=50" > /tmp/basalt-laravel-log.json
+  python3 -c '
+import sys, json
+l = json.load(open("/tmp/basalt-laravel-log.json"))["lines"]
+assert any(x["process"] == "schedule" and x["message"] == "started schedule:work" for x in l)
+assert any(x["process"] == "queue-2" and x["message"] == "error from queue:work" and x.get("error") for x in l)
+' 2>/dev/null && break
+  [ $i = 15 ] && { echo "the processes' output is not in the panel:"; cat /tmp/basalt-laravel-log.json; exit 1; }
+  sleep 1
+done
+echo "  output: $(python3 -c 'import json; print(len(json.load(open("/tmp/basalt-laravel-log.json"))["lines"]))') lines"
+$API -X POST http://127.0.0.1:8080/api/v1/sites/$SITE/laravel/restart | grep -q '"processes"' || { echo "restart failed"; exit 1; }
+for i in $(seq 30); do
+  [ "$(docker exec basalt-node1 cat /srv/basalt/sites/$SITE/logs/schedule-work.txt | wc -l)" -ge 2 ] && break
+  [ $i = 30 ] && { echo "the scheduler was not restarted"; exit 1; }
+  sleep 1
+done
+echo "  restarted from the panel"
 $API -X PUT -d '{"scheduler":false,"workers":1}' http://127.0.0.1:8080/api/v1/sites/$SITE/laravel >/dev/null
 docker exec basalt-node1 systemctl is-active basalt-php-site-$SITE-queue-1.service
 docker exec basalt-node1 sh -c "! ls /etc/systemd/system/basalt-php-site-$SITE-schedule.service /etc/systemd/system/basalt-php-site-$SITE-queue-2.service 2>/dev/null" || { echo "units left"; exit 1; }
@@ -252,6 +280,18 @@ for i in $(seq 30); do
 done
 docker exec basalt-panel dig +noall +answer @$NODEIP shop.test A
 [ "$(docker exec basalt-panel dig +short @$NODEIP shop.test A)" = "$NODEIP" ] || { echo "no automatic record"; exit 1; }
+echo "### the panel's own domain, in a zone of Basalt, points at the panel's server"
+# The containers' addresses are private: given as the servers' public ones.
+for srv in $($API http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print(" ".join("%d:%s" % (s["id"], s["name"]) for s in json.load(sys.stdin)["servers"] if s["name"] != "node1"))'); do
+  ip=$PANELIP; [ "${srv#*:}" = spare ] && ip=$STANDBYIP
+  $API -X PUT -d "{\"ips\":[\"$ip\"]}" http://127.0.0.1:8080/api/v1/servers/${srv%%:*}/public-ips >/dev/null
+done
+$API -X PUT -d '{"url":"https://panel.zone.test"}' http://127.0.0.1:8080/api/v1/notifications/panel-url >/dev/null
+for i in $(seq 30); do
+  [ "$(docker exec basalt-panel dig +short @$NODEIP panel.zone.test A)" = "$PANELIP" ] && break; sleep 1
+done
+docker exec basalt-panel dig +noall +answer @$NODEIP panel.zone.test A
+[ "$(docker exec basalt-panel dig +short @$NODEIP panel.zone.test A)" = "$PANELIP" ] || { echo "no record for the panel's domain"; exit 1; }
 echo "### DNS-01 relay: the proxy user asks the agent, the panel publishes the TXT record"
 docker exec basalt-node1 stat -c '  %n %U %a' /var/lib/basalt/proxy/acme.sock
 [ "$(docker exec basalt-node1 stat -c '%U %a' /var/lib/basalt/proxy/acme.sock)" = "basalt-proxy 600" ] || { echo "acme socket not private to the proxy"; exit 1; }
@@ -534,6 +574,11 @@ $API http://127.0.0.1:8080/api/v1/sites | python3 -c 'import sys,json; l=json.lo
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "site down after the takeover"; exit 1; }
 ping_node1() { $API -X POST http://127.0.0.1:8080/api/v1/servers/$NODE/ping | python3 -c 'import sys,json; print("  ping node1 from the new panel:", json.load(sys.stdin)["rtt_ms"], "ms")'; }
 ping_node1
+for i in $(seq 60); do
+  [ "$(docker exec basalt-panel dig +short @$NODEIP panel.zone.test A)" = "$STANDBYIP" ] && break; sleep 1
+done
+echo "  the panel's domain now: $(docker exec basalt-panel dig +short @$NODEIP panel.zone.test A)"
+[ "$(docker exec basalt-panel dig +short @$NODEIP panel.zone.test A)" = "$STANDBYIP" ] || { echo "the panel's domain did not follow the takeover"; exit 1; }
 for i in $(seq 120); do [ "$(spare2 panel)" = "https://$STANDBYIP:8443" ] && [ "$(spare2 connected)" = True ] && [ "$(spare2 ready)" = True ] && break; sleep 1; done
 echo "  the second standby follows: $(spare2 panel), epoch $(spare2 epoch), ready $(spare2 ready)"
 [ "$(spare2 panel)" = "https://$STANDBYIP:8443" ] && [ "$(spare2 epoch)" = 1 ] && [ "$(spare2 ready)" = True ] || { echo "the second standby did not follow the new panel"; exit 1; }

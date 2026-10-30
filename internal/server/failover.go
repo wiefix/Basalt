@@ -205,11 +205,15 @@ func (s *Server) announcePromotion(ctx context.Context) {
 	if err := s.db.Audit(ctx, nil, "panel.promoted", "", map[string]any{"epoch": p.Epoch, "auto": p.Auto}); err != nil {
 		s.log.Error("audit", "err", err)
 	}
+	domain := "Point the panel's domain here"
+	if panel, err := s.db.PanelDomainInZone(ctx); err == nil && panel != "" {
+		domain = "The panel's domain " + panel + " follows by itself (its automatic records in Basalt's DNS point here)"
+	}
 	s.notify(notify.Message{
 		Event: EventPanelFailover,
 		Title: "A standby panel took over",
-		Text: fmt.Sprintf("This server became the panel %s, at %s (epoch %d). Point the panel's domain here, and keep the former panel stopped.",
-			how, p.At.UTC().Format(time.RFC3339), p.Epoch),
+		Text: fmt.Sprintf("This server became the panel %s, at %s (epoch %d). %s, and keep the former panel stopped.",
+			how, p.At.UTC().Format(time.RFC3339), p.Epoch, domain),
 		Link: "/servers",
 	})
 }

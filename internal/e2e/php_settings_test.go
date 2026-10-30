@@ -45,6 +45,16 @@ func TestPHPSettingsAPI(t *testing.T) {
 	if l := p.call(http.StatusOK, "PUT", base+"/laravel", map[string]any{"scheduler": false, "workers": 0})["site"].(map[string]any)["laravel"].(map[string]any); l["scheduler"] != false || l["workers"] != float64(0) {
 		t.Fatalf("laravel = %v", l)
 	}
+	// Their state, output and restart (on Linux with systemd: the install test).
+	if pr := p.call(http.StatusOK, "GET", base+"/laravel", nil)["processes"].([]any); len(pr) != 0 {
+		t.Fatalf("processes of a site without them: %v", pr)
+	}
+	if ls := p.call(http.StatusOK, "GET", base+"/laravel/log?lines=5", nil)["lines"].([]any); len(ls) != 0 {
+		t.Fatalf("output of a static site: %v", ls)
+	}
+	p.call(http.StatusBadRequest, "GET", base+"/laravel/log?lines=0", nil)
+	p.call(http.StatusBadRequest, "GET", base+"/laravel/log?lines=1001", nil)
+	p.call(http.StatusUnprocessableEntity, "POST", base+"/laravel/restart", nil)
 
 	// WordPress needs a PHP site (the install itself is in the Linux test).
 	p.call(http.StatusUnprocessableEntity, "POST", base+"/install", map[string]any{"app": "drupal"})
@@ -76,4 +86,6 @@ func TestPHPSettingsAPI(t *testing.T) {
 	v.call(http.StatusOK, "GET", base+"/php-log", nil)
 	v.call(http.StatusForbidden, "PUT", base+"/php-settings", map[string]any{"memory_mb": 128})
 	v.call(http.StatusForbidden, "PUT", base+"/laravel", map[string]any{})
+	v.call(http.StatusOK, "GET", base+"/laravel/log", nil)
+	v.call(http.StatusForbidden, "POST", base+"/laravel/restart", nil)
 }

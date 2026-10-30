@@ -47,7 +47,7 @@ func (DNSProvider) CaddyModule() caddy.ModuleInfo {
 }
 
 func (p *DNSProvider) client() *http.Client {
-	return &http.Client{Transport: &http.Transport{
+	return &http.Client{Timeout: 2 * time.Minute, Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", p.Socket)
 		},

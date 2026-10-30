@@ -188,7 +188,18 @@ export interface AuditActor {
   name?: string;
 }
 
+export interface AuditAnchorView {
+  at?: string;
+  checked_at: string;
+  entry: number;
+  ok: boolean;
+  problem?: string;
+  server: string;
+  server_id: number;
+}
+
 export interface AuditCheckView {
+  anchors: AuditAnchorView[];
   at: string;
   broken_at?: number;
   entries: number;
@@ -480,6 +491,31 @@ export interface DbCredentialsView {
 
 export interface DbPasswordRequest {
   redeploy_apps?: boolean;
+}
+
+export interface DbUpgrade {
+  backup_id?: number;
+  error?: string;
+  state: string;
+  version: string;
+}
+
+export interface DbUpgradeRequest {
+  backup?: boolean;
+  version?: string;
+}
+
+export interface DbUpgradeStarted {
+  deployment: DeploymentView | null;
+  upgrade: DbUpgrade | null;
+}
+
+export interface DbUpgradeView {
+  backups: boolean;
+  dump: boolean;
+  targets: string[];
+  upgrade: DbUpgrade | null;
+  version: string;
 }
 
 export interface DbengineCredentials {
@@ -953,9 +989,24 @@ export interface PhpLaravel {
   workers?: number;
 }
 
+export interface PhpLaravelLogLine {
+  error?: boolean;
+  message: string;
+  process: string;
+  time: string;
+}
+
 export interface PhpLaravelOut {
   scheduler: boolean;
   workers: number;
+}
+
+export interface PhpLaravelProcess {
+  name: string;
+  restarts: number;
+  since?: string;
+  state: string;
+  sub_state: string;
 }
 
 export interface PhpSettings {
@@ -1702,6 +1753,8 @@ export type GetAppsIdTemplateResponse = {
   update_available: boolean;
 };
 
+export type GetAppsIdUpgradeResponse = DbUpgradeView;
+
 export type GetAppsIdWebhookResponse = {
   webhook: WebhookView;
 };
@@ -1934,6 +1987,14 @@ export type GetSitesIdFilesTextResponse = {
   size: number;
 };
 
+export type GetSitesIdLaravelResponse = {
+  processes: PhpLaravelProcess[];
+};
+
+export type GetSitesIdLaravelLogResponse = {
+  lines: PhpLaravelLogLine[];
+};
+
 export type GetSitesIdPhpLogResponse = {
   log: string;
   path: string;
@@ -2074,6 +2135,14 @@ export type PostAppsIdTemplateUpdateResponse = {
 };
 
 export type PostAppsIdTemplateUpdateBody = TemplateUpdateRequest;
+
+export type PostAppsIdUpgradeResponse = DbUpgradeStarted;
+
+export type PostAppsIdUpgradeBody = DbUpgradeRequest;
+
+export type PostAuditAnchorsResetResponse = {
+  anchors: AuditAnchorView[];
+};
 
 export type PostAuthLoginResponse = {
   mfa_required: boolean;
@@ -2342,6 +2411,10 @@ export type PostSitesIdInstallResponse = {
 };
 
 export type PostSitesIdInstallBody = SiteInstallRequest;
+
+export type PostSitesIdLaravelRestartResponse = {
+  processes: PhpLaravelProcess[];
+};
 
 export type PostSitesIdReplicasResponse = {
   placements: SitePlacementView[];

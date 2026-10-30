@@ -618,6 +618,8 @@ type Deployment struct {
 	// each service ran.
 	ComposeSealed []byte
 	Digests       map[string]string
+	// Databases: the major version deployed.
+	EngineVersion string
 	ActorID       *int64
 	CreatedAt     time.Time
 	FinishedAt    *time.Time
@@ -651,6 +653,7 @@ type DeploymentResult struct {
 	CommitMessage string
 	ComposeSealed []byte
 	Digests       map[string]string
+	EngineVersion string
 }
 
 // FinishDeployment records the outcome of a running deployment.
@@ -668,8 +671,8 @@ func (db *DB) FinishDeployment(ctx context.Context, id int64, r DeploymentResult
 	}
 	return db.execOne(ctx,
 		`UPDATE deployments SET status = ?, error = ?, log = ?, image_digest = ?, commit_sha = ?, commit_message = ?,
-		 compose = ?, digests = ?, finished_at = unixepoch() WHERE id = ? AND status = 'running'`,
-		status, r.Error, r.Log, r.ImageDigest, r.CommitSHA, r.CommitMessage, r.ComposeSealed, string(digests), id)
+		 compose = ?, digests = ?, engine_version = ?, finished_at = unixepoch() WHERE id = ? AND status = 'running'`,
+		status, r.Error, r.Log, r.ImageDigest, r.CommitSHA, r.CommitMessage, r.ComposeSealed, string(digests), r.EngineVersion, id)
 }
 
 // FailUnfinishedDeployments marks deployments interrupted by a panel
@@ -685,7 +688,7 @@ func (db *DB) FailUnfinishedDeployments(ctx context.Context) (int64, error) {
 }
 
 const deploymentColumns = `id, app_id, image, commit_sha, commit_message, status, error, log, image_digest, actor_id,
-	created_at, finished_at, compose, digests`
+	created_at, finished_at, compose, digests, engine_version`
 
 func scanDeployment(row interface{ Scan(...any) error }) (*Deployment, error) {
 	var d Deployment
@@ -693,7 +696,7 @@ func scanDeployment(row interface{ Scan(...any) error }) (*Deployment, error) {
 	var finished sql.NullInt64
 	var digests string
 	err := row.Scan(&d.ID, &d.AppID, &d.Image, &d.CommitSHA, &d.CommitMessage, &d.Status, &d.Error, &d.Log,
-		&d.ImageDigest, &d.ActorID, &created, &finished, &d.ComposeSealed, &digests)
+		&d.ImageDigest, &d.ActorID, &created, &finished, &d.ComposeSealed, &digests, &d.EngineVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -780,6 +783,12 @@ func (db *DB) SucceededDigests(ctx context.Context, appID int64) ([]map[string]s
 // SetAppTemplateRevision records the template revision an app now runs.
 func (db *DB) SetAppTemplateRevision(ctx context.Context, id int64, revision int) error {
 	return db.execOne(ctx, `UPDATE apps SET template_revision = ? WHERE id = ?`, revision, id)
+}
+
+// SetAppEngineVersion records a database's new major version and its
+// image (after an upgrade deployed it).
+func (db *DB) SetAppEngineVersion(ctx context.Context, id int64, version, image string) error {
+	return db.execOne(ctx, `UPDATE apps SET engine_version = ?, image = ? WHERE id = ? AND source = 'database'`, version, image, id)
 }
 
 // builderColumn is what git_builder holds: compose apps are told by their

@@ -376,6 +376,11 @@ func (s *AppSpec) ValidateCompose() error {
 	if err := ValidateImageRefs(s.PruneImages); err != nil {
 		return err
 	}
+	if s.DBUpgrade != nil {
+		if err := s.DBUpgrade.validate(s, vols); err != nil {
+			return err
+		}
+	}
 	return ValidateAttach(s.AppID, s.Attach)
 }
 

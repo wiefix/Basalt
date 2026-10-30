@@ -453,6 +453,30 @@ try {
 		t.Fatal(".env is served")
 	}
 
+	// Symfony in one click, for real (Composer, Flex recipes): its kernel
+	// answers in production (no route yet: its own 404 page).
+	rsf := p.call(http.StatusCreated, "POST", "/api/v1/sites", map[string]any{
+		"server_id": mustAtoi(sid), "name": "sf", "domains": []string{"sf.localhost"}, "tls": "internal", "php_version": phpVersion,
+	})
+	idS := jsonID(rsf["site"].(map[string]any)["id"])
+	instS := p.call(http.StatusCreated, "POST", "/api/v1/sites/"+idS+"/install", map[string]any{"app": "symfony"})
+	if instS["database"].(map[string]any)["name"] != "s"+idS+"_sf" || instS["version"] == "" {
+		t.Fatalf("Symfony install = %v", instS)
+	}
+	t.Logf("Symfony %v, %v files", instS["version"], instS["files"])
+	eventually(t, "Symfony answers", func() bool {
+		code, body := get("sf.localhost", "/")
+		return code == 404 && strings.Contains(body, "Not Found")
+	})
+	sfDir := filepath.Join(sitesRoot, idS)
+	if fi, err := os.Stat(filepath.Join(sfDir, ".env.local")); err != nil || fi.Mode().Perm() != 0o600 ||
+		strconv.Itoa(int(fi.Sys().(*syscall.Stat_t).Uid)) != mustUID(t, "basalt-s"+idS) {
+		t.Fatalf(".env.local: %v %v", fi, err)
+	}
+	if _, err := os.Stat(filepath.Join(sfDir, "var", "cache", "prod")); err != nil {
+		t.Fatalf("no production cache: %v", err)
+	}
+
 	// Adminer in the Laravel site: it signs in to this server's MariaDB
 	// whatever server the form names.
 	credL := p.call(http.StatusCreated, "POST", "/api/v1/sites/"+idL+"/databases", map[string]any{"name": "extra"})["credentials"].(map[string]any)

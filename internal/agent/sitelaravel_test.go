@@ -246,3 +246,73 @@ func TestSiteAdminer(t *testing.T) {
 		t.Fatal("status after remove")
 	}
 }
+
+// TestSiteInstallSymfony: Composer runs the skeleton's scripts (Flex
+// makes its files); the project gets .env.local with a secret and the
+// site's database, and its production cache.
+func TestSiteInstallSymfony(t *testing.T) {
+	a, site := testSiteAgent(t, 5)
+	a.composer = pinnedServer(t, "composer-test.phar", []byte("<?php // composer"), "")
+	var calls []string
+	flex := true
+	a.sitePHP = func(ctx context.Context, siteID int64, version, dir string, env, args []string) error {
+		args = args[4:]
+		calls = append(calls, strings.Join(args[1:min(len(args), 3)], " "))
+		if args[1] == "create-project" {
+			if slices.Contains(args, "--no-scripts") {
+				t.Error("Symfony needs its scripts (Flex)")
+			}
+			app := args[len(args)-1]
+			files := map[string]string{
+				"public/index.php":                      "<?php // front controller",
+				"vendor/symfony/http-kernel/Kernel.php": "<?php\nabstract class Kernel {\n    public const VERSION = '7.4.2';\n}\n",
+				".env":                                  "APP_ENV=dev\nAPP_SECRET=\n",
+			}
+			if flex {
+				files["bin/console"] = "<?php // console"
+			}
+			for name, body := range files {
+				p := filepath.Join(app, name)
+				os.MkdirAll(filepath.Dir(p), 0o755)
+				os.WriteFile(p, []byte(body), 0o644)
+			}
+		} else if _, err := os.Stat(filepath.Join(dir, ".env.local")); err != nil {
+			t.Errorf("console without .env.local in %s", dir)
+		}
+		return nil
+	}
+	ctx := context.Background()
+	req := agentproto.SiteInstall{SiteID: 5, App: agentproto.AppSymfony, DBName: "s5_sf", DBUser: "s5_sf",
+		DBPassword: "ABCDEFGHIJKLMNOP234567", PHPVersion: "8.4", URL: "https://example.com"}
+
+	// Without Flex's files nothing moves.
+	flex = false
+	if _, err := a.siteInstall(ctx, req); err == nil || !strings.Contains(err.Error(), "bin/console") {
+		t.Fatalf("without bin/console: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(site, "vendor")); !os.IsNotExist(err) {
+		t.Fatal("files moved")
+	}
+	flex, calls = true, nil
+	resp, err := a.siteInstall(ctx, req)
+	if err != nil || resp.Version != "7.4.2" || resp.Files != 5 {
+		t.Fatalf("install = %+v, %v", resp, err)
+	}
+	if strings.Join(calls, ",") != "create-project --no-dev,cache:clear --env=prod" {
+		t.Fatalf("calls %v", calls)
+	}
+	env, _ := os.ReadFile(filepath.Join(site, ".env.local"))
+	for _, want := range []string{"APP_ENV=prod\n", "APP_DEBUG=0\n", "APP_SECRET=", `DATABASE_URL="mysql://s5_sf:ABCDEFGHIJKLMNOP234567@localhost:3306/s5_sf?charset=utf8mb4"`} {
+		if !strings.Contains(string(env), want) {
+			t.Errorf(".env.local lacks %q:\n%s", want, env)
+		}
+	}
+	if fi, _ := os.Stat(filepath.Join(site, ".env.local")); fi.Mode().Perm() != 0o600 {
+		t.Fatalf(".env.local mode %v", fi.Mode().Perm())
+	}
+	for _, p := range []string{"bin/console", "public/index.php"} {
+		if _, err := os.Stat(filepath.Join(site, p)); err != nil {
+			t.Errorf("%s: %v", p, err)
+		}
+	}
+}

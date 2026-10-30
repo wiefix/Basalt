@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -228,5 +229,69 @@ func TestDNSFailover(t *testing.T) {
 	}
 	if d, err := db.DeleteHealthCheck(ctx, unused.ID); err != nil || d {
 		t.Fatalf("delete unused: %v %v", d, err)
+	}
+}
+
+// TestPanelDomainDNS: the panel's domain, in a zone of Basalt's DNS, gets
+// the addresses of the server the panel runs on, and follows it to a
+// standby's server when that one takes over.
+func TestPanelDomainDNS(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTemp(t)
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	z, err := db.CreateDNSZone(ctx, 0, "example.com", nil, func(z *dns.Zone) error { return z.Validate() }, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := func(name, ip string) int64 {
+		srv, err := db.CreateServer(ctx, name, []byte(name), now.Add(time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.W.Exec(`UPDATE servers SET enrolled_at = 1, public_ips = ? WHERE id = ?`, `["`+ip+`"]`, srv.ID)
+		return srv.ID
+	}
+	main, standby := server("main", "192.0.2.10"), server("standby", "192.0.2.20")
+	panel := func() string {
+		t.Helper()
+		recs, err := db.DNSZoneAuto(ctx, z.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, r := range recs {
+			if r.Source == "panel" {
+				out = append(out, r.Name+" "+r.Value)
+			}
+		}
+		return strings.Join(out, ", ")
+	}
+	if got := panel(); got != "" {
+		t.Fatalf("without a panel address: %q", got)
+	}
+	db.SetSetting(ctx, "panel_url", "https://Panel.example.com")
+	if got := panel(); got != "" {
+		t.Fatalf("without the panel's server: %q", got)
+	}
+	db.SetSetting(ctx, SettingPanelServer, strconv.FormatInt(main, 10))
+	if got := panel(); got != "panel 192.0.2.10" {
+		t.Fatalf("panel domain: %q", got)
+	}
+	// A standby took over: its host's server is the panel's now.
+	db.SetSetting(ctx, SettingPanelServer, strconv.FormatInt(standby, 10))
+	if got := panel(); got != "panel 192.0.2.20" {
+		t.Fatalf("after a takeover: %q", got)
+	}
+	if changed, err := db.SyncAutoDNS(ctx, now); err != nil || !changed {
+		t.Fatalf("sync: %v %v", changed, err)
+	}
+	// An address (no domain), or a domain outside the zones: nothing.
+	db.SetSetting(ctx, "panel_url", "https://192.0.2.20:8443")
+	if got := panel(); got != "" {
+		t.Fatalf("panel at an address: %q", got)
+	}
+	db.SetSetting(ctx, "panel_url", "https://panel.example.org")
+	if got := panel(); got != "" {
+		t.Fatalf("panel outside the zones: %q", got)
 	}
 }

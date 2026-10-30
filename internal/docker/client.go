@@ -57,6 +57,8 @@ type Client struct {
 // New returns a client for the daemon listening on socket. It does not
 // connect; use Version to check the daemon.
 func New(socket string) *Client {
+	// No timeout: logs and builds stream for as long as they last; every
+	// call carries a context.
 	return &Client{socket: socket, hc: &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer

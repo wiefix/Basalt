@@ -905,15 +905,15 @@ function LaravelCard({ site, systemd }: { site: Site; systemd: boolean }) {
       <h2>Laravel</h2>
       <p className="faint small" style={{ margin: 0 }}>
         For a Laravel project in the site's folder (with <code>artisan</code> beside <code>public/</code>). The processes run as the
-        site's user on its primary server, within the site's CPU and memory limits; their output goes to the server's journal, errors
-        to the PHP log. Unlike pages, they may start other programs (the scheduler runs commands that way).
+        site's user on its primary server, within the site's CPU and memory limits; their state and output are on the Logs tab, PHP
+        errors in the PHP log. Unlike pages, they may start other programs (the scheduler runs commands that way).
       </p>
       <ErrorBox error={save.error} />
       <label className="row small">
         <input type="checkbox" checked={scheduler} onChange={(e) => setScheduler(e.target.checked)} />
         Run the scheduler (<code>artisan schedule:work</code>: scheduled tasks every minute)
       </label>
-      <Field label="Queue workers" help="artisan queue:work processes, 0–8; each restarts every hour to pick up new code">
+      <Field label="Queue workers" help="artisan queue:work processes, 0–8; each restarts every hour to pick up new code (or at once: Restart on the Logs tab)">
         <input className="input mono" type="number" min={0} max={8} value={workers} onChange={(e) => setWorkers(e.target.value)} />
       </Field>
       <div>
@@ -931,6 +931,7 @@ function LogsTab({ site, user }: { site: Site; user: User }) {
   return (
     <div className="stack">
       {can(user, "member") && <AccessLogCard base={`/api/v1/sites/${site.id}`} />}
+      {site.php_version && (site.laravel?.scheduler || (site.laravel?.workers ?? 0) > 0) && <LaravelProcessesCard site={site} user={user} />}
       <div className="card">
         <div className="card-head">
           <h2>PHP errors</h2>
@@ -961,6 +962,87 @@ function LogsTab({ site, user }: { site: Site; user: User }) {
             </>
           )}
         </div>
+      </div>
+    </div>
+  );
+}
+
+// LaravelProcessesCard shows the state of a Laravel site's scheduler and
+// queue workers and what they wrote, and restarts them.
+function LaravelProcessesCard({ site, user }: { site: Site; user: User }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const procs = useQuery({ queryKey: ["laravel", site.id], queryFn: () => api.laravelProcesses(site.id), refetchInterval: 10_000 });
+  const log = useQuery({ queryKey: ["laravel-log", site.id], queryFn: () => api.laravelLog(site.id), refetchInterval: 10_000 });
+  const restart = useMutation({
+    mutationFn: () => api.restartLaravel(site.id),
+    onSuccess: (r) => {
+      qc.setQueryData(["laravel", site.id], r);
+      toast("Laravel processes restarting");
+    },
+  });
+  const text = (log.data?.lines ?? [])
+    .map((l) => `${formatDate(l.time)}  ${l.process}${l.error ? " !" : ""}  ${l.message}`)
+    .join("\n");
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>Laravel processes</h2>
+        <div className="row">
+          {can(user, "member") && (
+            <button className="btn sm" onClick={() => restart.mutate()} disabled={restart.isPending} title="After deploying new code: workers finish their current job first">
+              <Icon name="refresh" size={14} /> Restart
+            </button>
+          )}
+          <button
+            className="btn sm"
+            onClick={() => {
+              procs.refetch();
+              log.refetch();
+            }}
+            disabled={procs.isFetching || log.isFetching}
+          >
+            <Icon name="refresh" size={14} /> Refresh
+          </button>
+        </div>
+      </div>
+      <div className="card-body stack">
+        <ErrorBox error={restart.error} />
+        {procs.isPending ? (
+          <Loading />
+        ) : procs.error ? (
+          <ErrorBox error={procs.error} />
+        ) : procs.data.processes.length === 0 ? (
+          <div className="empty small">No process is set up on the server yet.</div>
+        ) : (
+          <div className="stack" style={{ gap: 6 }}>
+            {procs.data.processes.map((p) => (
+              <div key={p.name} className="row small">
+                <code style={{ minWidth: 90 }}>{p.name === "schedule" ? "scheduler" : p.name.replace("queue-", "worker ")}</code>
+                <span className={`badge ${p.state === "active" ? "ok" : p.state === "failed" ? "err" : "warn"}`}>
+                  {p.state === "active" ? p.sub_state : `${p.state} (${p.sub_state})`}
+                </span>
+                {p.since && <span className="faint" title={formatDate(p.since)}>since {timeAgo(p.since)}</span>}
+                {p.restarts > 0 && <span className="badge warn" title="Restarted by systemd after exiting">{p.restarts} restarts</span>}
+              </div>
+            ))}
+          </div>
+        )}
+        <h3 style={{ margin: "8px 0 0" }}>Output</h3>
+        {log.isPending ? (
+          <Loading />
+        ) : log.error ? (
+          <ErrorBox error={log.error} />
+        ) : !text ? (
+          <div className="empty small">Nothing written yet.</div>
+        ) : (
+          <>
+            <p className="faint small" style={{ margin: 0 }}>
+              The last 200 lines from the server's journal (<code>!</code>: logged as an error). PHP errors go to the PHP log below.
+            </p>
+            <LogView text={text} tall />
+          </>
+        )}
       </div>
     </div>
   );

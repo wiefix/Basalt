@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -63,12 +64,35 @@ func (a *Agent) runSitePHP(ctx context.Context, siteID int64, version, dir strin
 
 var appURLRE = regexp.MustCompile(`^https?://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$`)
 
-// installLaravel makes the site a new Laravel project: Composer creates it
-// in a folder of the site, as the site's user; it gets its .env (MariaDB,
-// a fresh key) and its tables; only then do its files take their places,
-// public/ becoming the site's public folder. A failure leaves the site as
-// it was.
-func (a *Agent) installLaravel(ctx context.Context, req agentproto.SiteInstall, site *files.Site, placeholder bool) (agentproto.SiteInstallResponse, error) {
+// composerApp is a PHP framework installed with Composer as a project
+// whose public/ folder becomes the site's.
+type composerApp struct {
+	name string // Laravel
+	pkg  string // laravel/laravel
+	// scripts: Composer runs the project's scripts (Symfony Flex makes the
+	// project's files with them; Laravel's would set up SQLite).
+	scripts bool
+	// setup configures the project in app (hostApp on the host): its
+	// database and secrets, and its tables.
+	setup func(req agentproto.SiteInstall, site *files.Site, app, hostApp string, php func(wd string, args ...string) error) error
+	// version is the file whose VERSION constant is the version installed
+	// (from the site's folder).
+	version string
+}
+
+var (
+	laravelApp = composerApp{name: "Laravel", pkg: "laravel/laravel", setup: setupLaravel,
+		version: "/vendor/laravel/framework/src/Illuminate/Foundation/Application.php"}
+	symfonyApp = composerApp{name: "Symfony", pkg: "symfony/skeleton", scripts: true, setup: setupSymfony,
+		version: "/vendor/symfony/http-kernel/Kernel.php"}
+)
+
+// installComposerApp makes the site a new project of c: Composer creates
+// it in a folder of the site, as the site's user; it gets its
+// configuration (MariaDB, fresh secrets) and its tables; only then do its
+// files take their places, public/ becoming the site's public folder. A
+// failure leaves the site as it was.
+func (a *Agent) installComposerApp(ctx context.Context, req agentproto.SiteInstall, site *files.Site, placeholder bool, c composerApp) (agentproto.SiteInstallResponse, error) {
 	if a.sitePHP == nil && !slices.Contains(a.sites.PHPVersions(), req.PHPVersion) {
 		return agentproto.SiteInstallResponse{}, fmt.Errorf("PHP %q is not installed on this server", req.PHPVersion)
 	}
@@ -78,7 +102,7 @@ func (a *Agent) installLaravel(ctx context.Context, req agentproto.SiteInstall, 
 	if !appURLRE.MatchString(req.URL) {
 		return agentproto.SiteInstallResponse{}, errors.New("invalid site address")
 	}
-	// Laravel's top-level names must be free (logs/ and tmp/ are the
+	// The project's top-level names must be free (logs/ and tmp/ are the
 	// site's; a stage left by an agent that stopped midway goes).
 	if _, err := site.Stat("/" + laravelStage); err == nil {
 		if err := site.Delete("/" + laravelStage); err != nil {
@@ -125,46 +149,15 @@ func (a *Agent) installLaravel(ctx context.Context, req agentproto.SiteInstall, 
 		return a.runSitePHP(ctx, req.SiteID, req.PHPVersion, wd, env,
 			append([]string{"-d", "open_basedir=" + dir + "/:/dev/null", "-d", "memory_limit=1G"}, args...))
 	}
-	// No scripts: Laravel's would write a SQLite .env and migrate it.
-	if err := php(hostStage, filepath.Join(hostStage, "composer.phar"), "create-project", "--no-dev", "--no-scripts",
-		"--no-progress", "--prefer-dist", "--no-interaction", "laravel/laravel", filepath.Join(hostStage, "app")); err != nil {
+	args := []string{filepath.Join(hostStage, "composer.phar"), "create-project", "--no-dev", "--no-progress", "--prefer-dist", "--no-interaction"}
+	if !c.scripts {
+		args = append(args, "--no-scripts")
+	}
+	if err := php(hostStage, append(args, c.pkg, filepath.Join(hostStage, "app"))...); err != nil {
 		return agentproto.SiteInstallResponse{}, fmt.Errorf("composer create-project: %w", err)
 	}
 	app := stage + "/app"
-	example, _, err := site.Read(app+"/.env.example", 0, 64<<10)
-	if err != nil {
-		return agentproto.SiteInstallResponse{}, fmt.Errorf("the project has no .env.example: %w", err)
-	}
-	key := make([]byte, 32)
-	rand.Read(key)
-	env2 := laravelEnv(string(example), [][2]string{
-		{"APP_ENV", "production"},
-		{"APP_KEY", "base64:" + base64.StdEncoding.EncodeToString(key)},
-		{"APP_DEBUG", "false"},
-		{"APP_URL", req.URL},
-		{"DB_CONNECTION", "mysql"},
-		{"DB_HOST", "localhost"},
-		{"DB_PORT", "3306"},
-		{"DB_DATABASE", req.DBName},
-		{"DB_USERNAME", req.DBUser},
-		{"DB_PASSWORD", req.DBPassword},
-	})
-	if err := site.WriteFile(app+"/.env", []byte(env2)); err != nil {
-		return agentproto.SiteInstallResponse{}, err
-	}
-	// Only PHP (the site's user) reads the key and the database password.
-	if err := site.Chmod(app+"/.env", 0o600); err != nil {
-		return agentproto.SiteInstallResponse{}, err
-	}
-	hostApp := filepath.Join(hostStage, "app")
-	if err := php(hostApp, "artisan", "package:discover", "--no-interaction"); err != nil {
-		return agentproto.SiteInstallResponse{}, fmt.Errorf("artisan package:discover: %w", err)
-	}
-	if err := php(hostApp, "artisan", "migrate", "--force", "--no-interaction"); err != nil {
-		return agentproto.SiteInstallResponse{}, fmt.Errorf("artisan migrate: %w", err)
-	}
-
-	if err := laravelStorage(site, app); err != nil {
+	if err := c.setup(req, site, app, filepath.Join(hostStage, "app"), php); err != nil {
 		return agentproto.SiteInstallResponse{}, err
 	}
 
@@ -177,22 +170,85 @@ func (a *Agent) installLaravel(ctx context.Context, req agentproto.SiteInstall, 
 	}); err != nil {
 		return agentproto.SiteInstallResponse{}, err
 	}
-	if err := moveLaravel(site, app, placeholder); err != nil {
+	if err := moveProject(site, app, placeholder, c.name); err != nil {
 		return agentproto.SiteInstallResponse{}, err
 	}
 	done = true
 	site.Delete(stage)
 	version := ""
-	if b, _, err := site.Read("/vendor/laravel/framework/src/Illuminate/Foundation/Application.php", 0, 16<<10); err == nil {
+	if b, _, err := site.Read(c.version, 0, 64<<10); err == nil {
 		version = phpStringVar(string(b), "const VERSION")
 	}
 	return agentproto.SiteInstallResponse{Version: version, Files: count}, nil
 }
 
-// moveLaravel gives the project's files their places: public/'s entries
+// setupLaravel writes Laravel's .env (MariaDB, a fresh key) and creates
+// its tables.
+func setupLaravel(req agentproto.SiteInstall, site *files.Site, app, hostApp string, php func(wd string, args ...string) error) error {
+	example, _, err := site.Read(app+"/.env.example", 0, 64<<10)
+	if err != nil {
+		return fmt.Errorf("the project has no .env.example: %w", err)
+	}
+	key := make([]byte, 32)
+	rand.Read(key)
+	env := laravelEnv(string(example), [][2]string{
+		{"APP_ENV", "production"},
+		{"APP_KEY", "base64:" + base64.StdEncoding.EncodeToString(key)},
+		{"APP_DEBUG", "false"},
+		{"APP_URL", req.URL},
+		{"DB_CONNECTION", "mysql"},
+		{"DB_HOST", "localhost"},
+		{"DB_PORT", "3306"},
+		{"DB_DATABASE", req.DBName},
+		{"DB_USERNAME", req.DBUser},
+		{"DB_PASSWORD", req.DBPassword},
+	})
+	if err := site.WriteFile(app+"/.env", []byte(env)); err != nil {
+		return err
+	}
+	// Only PHP (the site's user) reads the key and the database password.
+	if err := site.Chmod(app+"/.env", 0o600); err != nil {
+		return err
+	}
+	if err := php(hostApp, "artisan", "package:discover", "--no-interaction"); err != nil {
+		return fmt.Errorf("artisan package:discover: %w", err)
+	}
+	if err := php(hostApp, "artisan", "migrate", "--force", "--no-interaction"); err != nil {
+		return fmt.Errorf("artisan migrate: %w", err)
+	}
+	return laravelStorage(site, app)
+}
+
+// setupSymfony writes Symfony's .env.local (production, a fresh secret,
+// DATABASE_URL of the site's MariaDB, for Doctrine when
+// the project adds it) and builds the production cache.
+func setupSymfony(req agentproto.SiteInstall, site *files.Site, app, hostApp string, php func(wd string, args ...string) error) error {
+	if _, err := site.Stat(app + "/bin/console"); err != nil {
+		return fmt.Errorf("the project has no bin/console (Symfony Flex did not set it up): %w", err)
+	}
+	secret := make([]byte, 16)
+	rand.Read(secret)
+	// The user and database names are [a-z0-9_]; "localhost" is PDO's
+	// socket (the pool's pdo_mysql.default_socket).
+	env := fmt.Sprintf("# Written by Basalt at install.\nAPP_ENV=prod\nAPP_DEBUG=0\nAPP_SECRET=%s\n"+
+		"DATABASE_URL=\"mysql://%s:%s@localhost:3306/%s?charset=utf8mb4\"\n",
+		hex.EncodeToString(secret), req.DBUser, url.QueryEscape(req.DBPassword), req.DBName)
+	if err := site.WriteFile(app+"/.env.local", []byte(env)); err != nil {
+		return err
+	}
+	if err := site.Chmod(app+"/.env.local", 0o600); err != nil {
+		return err
+	}
+	if err := php(hostApp, "bin/console", "cache:clear", "--env=prod", "--no-interaction"); err != nil {
+		return fmt.Errorf("bin/console cache:clear: %w", err)
+	}
+	return nil
+}
+
+// moveProject gives the project's files their places: public/'s entries
 // into the site's public folder, the rest beside it. Every name is checked
 // before anything moves.
-func moveLaravel(site *files.Site, app string, placeholder bool) error {
+func moveProject(site *files.Site, app string, placeholder bool, name string) error {
 	top, err := site.List(app)
 	if err != nil {
 		return err
@@ -206,7 +262,7 @@ func moveLaravel(site *files.Site, app string, placeholder bool) error {
 			continue
 		}
 		if _, err := site.Stat("/" + e.Name); err == nil {
-			return fmt.Errorf("the site already has %s, which Laravel needs: install into a new site", e.Name)
+			return fmt.Errorf("the site already has %s, which %s needs: install into a new site", e.Name, name)
 		}
 	}
 	if placeholder {

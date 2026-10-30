@@ -244,7 +244,10 @@ func runPanel(ctx context.Context, cfg config.Server, baseLog *slog.Logger) erro
 		GitHubAPI:           cfg.GitHubAPI,
 		GitHubWeb:           cfg.GitHubURL,
 	})
-	hub.OnConnect(api.SyncSites)
+	hub.OnConnect(func(ctx context.Context, serverID int64) {
+		api.SyncSites(ctx, serverID)
+		api.AnchorAudit(ctx, serverID)
+	})
 	hub.OnACMEChallenge(api.ACMEChallenge)
 	hub.OnHealthReport(api.HealthReport)
 	hub.OnSiteChanged(api.SiteChanged)
@@ -332,7 +335,7 @@ func runPromote(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	fmt.Fprint(stdout, "\nNext:\n  1. Start it: systemctl start basalt-server. Agents and the other standby\n     panels that cannot reach the former panel come here by themselves (they\n     learned this address).\n")
 	switch {
 	case p.Zone != "":
-		fmt.Fprintf(stdout, "  2. Point the panel's domain here: %s is in the zone %s of your Basalt\n     DNS. Sign in here and change its A/AAAA records under DNS.\n", p.PanelURL, p.Zone)
+		fmt.Fprintf(stdout, "  2. The panel's domain follows by itself: %s is in the zone %s of your\n     Basalt DNS, whose automatic A/AAAA records point at the server the panel\n     runs on (unless a record you added there overrides them).\n", p.PanelURL, p.Zone)
 	case p.PanelURL != "":
 		fmt.Fprintf(stdout, "  2. Point the panel's domain (%s) at this server at its DNS provider.\n", p.PanelURL)
 	default:

@@ -30,7 +30,7 @@ var appLimits = files.Limits{MaxTotalBytes: 1 << 30, MaxFiles: 50_000}
 // siteInstall puts an application into the site's public folder, which
 // must hold nothing but the placeholder page.
 func (a *Agent) siteInstall(ctx context.Context, req agentproto.SiteInstall) (agentproto.SiteInstallResponse, error) {
-	if req.App != agentproto.AppWordPress && req.App != agentproto.AppLaravel {
+	if req.App != agentproto.AppWordPress && req.App != agentproto.AppLaravel && req.App != agentproto.AppSymfony {
 		return agentproto.SiteInstallResponse{}, fmt.Errorf("unknown application %q", req.App)
 	}
 	if !mariadb.ValidName(req.DBName) || !mariadb.ValidName(req.DBUser) || req.DBPassword == "" ||
@@ -51,8 +51,11 @@ func (a *Agent) siteInstall(ctx context.Context, req agentproto.SiteInstall) (ag
 			return agentproto.SiteInstallResponse{}, errors.New("the site's public folder is not empty: install into a new site, or delete its files first")
 		}
 	}
-	if req.App == agentproto.AppLaravel {
-		return a.installLaravel(ctx, req, site, len(entries) > 0)
+	switch req.App {
+	case agentproto.AppLaravel:
+		return a.installComposerApp(ctx, req, site, len(entries) > 0, laravelApp)
+	case agentproto.AppSymfony:
+		return a.installComposerApp(ctx, req, site, len(entries) > 0, symfonyApp)
 	}
 
 	// Download and check the archive before any of it reaches the site.

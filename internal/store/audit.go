@@ -239,3 +239,26 @@ func (db *DB) VerifyAudit(ctx context.Context) (AuditCheck, error) {
 	}
 	return c, rows.Err()
 }
+
+// AuditHead is the newest signed entry of the log: its number and hash
+// (0 and nil when nothing is signed yet).
+func (db *DB) AuditHead(ctx context.Context) (int64, []byte, error) {
+	var id int64
+	var hash []byte
+	err := db.R.QueryRowContext(ctx, `SELECT id, hash FROM audit_log WHERE hash IS NOT NULL ORDER BY id DESC LIMIT 1`).Scan(&id, &hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil, nil
+	}
+	return id, hash, err
+}
+
+// AuditHash is the hash of entry id; ErrNotFound if the log has no such
+// entry.
+func (db *DB) AuditHash(ctx context.Context, id int64) ([]byte, error) {
+	var hash []byte
+	err := db.R.QueryRowContext(ctx, `SELECT hash FROM audit_log WHERE id = ?`, id).Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return hash, err
+}

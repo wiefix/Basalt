@@ -132,6 +132,7 @@ type Server struct {
 	catalogFetchMu    sync.Mutex     // one download at a time
 	health            healthChecks
 	tplUpdates        map[int64]*templateUpdate // running or failed template updates
+	dbUpgrades        map[int64]*dbUpgrade      // database upgrades waiting for a backup, or failed (under tplMu)
 	dataDir           string
 	restic            string
 	telegramAPI       string
@@ -150,6 +151,7 @@ type Server struct {
 	certCheckEvery    time.Duration
 	auditCheckEvery   time.Duration
 	auditWatch        auditWatch
+	anchors           auditAnchors
 	rel               releaseOptions
 	usageEvery        time.Duration
 	siteSyncEvery     time.Duration
@@ -251,6 +253,8 @@ func New(o Options) *Server {
 		mailCheckEvery:  o.MailCheckEvery,
 		catalog:         o.Catalog,
 		tplUpdates:      map[int64]*templateUpdate{},
+		dbUpgrades:      map[int64]*dbUpgrade{},
+		anchors:         auditAnchors{byServer: map[int64]auditAnchorView{}, reported: map[string]bool{}},
 		dataDir:         o.DataDir,
 		restic:          o.Restic,
 		telegramAPI:     o.TelegramAPI,
@@ -379,6 +383,9 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("PUT /api/v1/sites/{id}/php", s.requireProject(store.RoleAdmin, s.handleSetSitePHP))
 	rt.Handle("PUT /api/v1/sites/{id}/php-settings", s.requireProject(store.RoleAdmin, s.handleSetSitePHPSettings))
 	rt.Handle("PUT /api/v1/sites/{id}/laravel", s.requireProject(store.RoleAdmin, s.handleSetSiteLaravel))
+	rt.Handle("GET /api/v1/sites/{id}/laravel", s.requireProject(store.RoleViewer, s.handleSiteLaravelStatus))
+	rt.Handle("GET /api/v1/sites/{id}/laravel/log", s.requireProject(store.RoleViewer, s.handleSiteLaravelLog))
+	rt.Handle("POST /api/v1/sites/{id}/laravel/restart", s.requireProject(store.RoleMember, s.handleSiteLaravelRestart))
 	rt.Handle("GET /api/v1/sites/{id}/php-log", s.requireProject(store.RoleViewer, s.handlePHPLog))
 	rt.Handle("GET /api/v1/sites/{id}/access-log", s.requireProject(store.RoleMember, s.handleSiteAccessLog))
 	rt.Handle("POST /api/v1/apps/{id}/password", s.requireProject(store.RoleAdmin, s.handleDatabasePassword))
@@ -442,6 +449,7 @@ func (s *Server) Handler() http.Handler {
 
 	rt.Handle("GET /api/v1/audit", s.requireRole(store.RoleAdmin, s.handleAudit))
 	rt.Handle("GET /api/v1/audit/verify", s.requireRole(store.RoleAdmin, s.handleVerifyAudit))
+	rt.Handle("POST /api/v1/audit/anchors/reset", s.requireSession(store.RoleOwner, s.handleResetAuditAnchors))
 	rt.Handle("GET /api/v1/health-checks", s.requireRole(store.RoleUser, s.handleHealthChecks))
 	rt.Handle("POST /api/v1/health-checks", s.requireRole(store.RoleUser, s.handleCreateHealthCheck))
 	rt.Handle("PUT /api/v1/health-checks/{id}", s.requireProject(store.RoleAdmin, s.handleUpdateHealthCheck))
@@ -502,6 +510,8 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("PUT /api/v1/apps/{id}/previews", s.requireProject(store.RoleAdmin, s.handleSetPreviews))
 	rt.Handle("GET /api/v1/database-engines", s.requireRole(store.RoleUser, s.handleListEngines))
 	rt.Handle("GET /api/v1/apps/{id}/connection", s.requireProject(store.RoleAdmin, s.handleDatabaseConnection))
+	rt.Handle("GET /api/v1/apps/{id}/upgrade", s.requireProject(store.RoleViewer, s.handleDatabaseUpgradeInfo))
+	rt.Handle("POST /api/v1/apps/{id}/upgrade", s.requireProject(store.RoleAdmin, s.handleDatabaseUpgrade))
 	rt.Handle("POST /api/v1/apps/{id}/links", s.requireProject(store.RoleAdmin, s.handleLinkApp))
 	rt.Handle("DELETE /api/v1/apps/{id}/links/{app}", s.requireProject(store.RoleAdmin, s.handleUnlinkApp))
 	rt.Handle("GET /api/v1/apps/{id}/compose", s.requireProject(store.RoleAdmin, s.handleGetCompose))
@@ -574,6 +584,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go s.WatchServers(ctx)
 	go s.WatchCertificates(ctx)
 	go s.WatchAuditLog(ctx)
+	go s.auditAnchorLoop(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

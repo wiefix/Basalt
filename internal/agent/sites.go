@@ -223,6 +223,26 @@ func (m *sitesManager) Laravel(ctx context.Context, id int64, phpVersion string,
 	}, l)
 }
 
+// LaravelProcesses reports on, or restarts, the site's Laravel processes.
+func (m *sitesManager) LaravelProcesses(ctx context.Context, req agentproto.SiteLaravel) (agentproto.SiteLaravelResponse, error) {
+	var resp agentproto.SiteLaravelResponse
+	if req.SiteID <= 0 {
+		return resp, errors.New("bad site id")
+	}
+	var err error
+	switch req.Op {
+	case agentproto.LaravelStatus:
+		resp.Processes, err = m.php.LaravelStatus(ctx, req.SiteID)
+	case agentproto.LaravelLog:
+		resp.Lines, err = m.php.LaravelLog(ctx, req.SiteID, req.Lines)
+	case agentproto.LaravelRestart:
+		err = m.php.LaravelRestart(req.SiteID)
+	default:
+		err = fmt.Errorf("unknown operation %q", req.Op)
+	}
+	return resp, err
+}
+
 // Delete removes the site's PHP pool and system user and moves its files to
 // the trash directory rather than erasing them, so an accidental deletion
 // can be recovered by an operator.

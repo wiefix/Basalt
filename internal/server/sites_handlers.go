@@ -507,6 +507,107 @@ func (s *Server) handleSetSiteLaravel(w http.ResponseWriter, r *http.Request, p 
 	writeJSON(w, http.StatusOK, map[string]any{"site": viewSite(site)})
 }
 
+// laravelCall asks the site's primary server about its Laravel processes.
+func (s *Server) laravelCall(ctx context.Context, site *store.Site, req agentproto.SiteLaravel) (agentproto.SiteLaravelResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	req.SiteID = site.ID
+	var resp agentproto.SiteLaravelResponse
+	err := s.agents.Call(ctx, site.ServerID, agentproto.TypeSiteLaravel, req, &resp)
+	return resp, err
+}
+
+// handleSiteLaravelStatus reports the state of the site's Laravel
+// processes (none when they are off).
+func (s *Server) handleSiteLaravelStatus(w http.ResponseWriter, r *http.Request, p *principal) {
+	site, ok := s.pathSite(w, r)
+	if !ok {
+		return
+	}
+	procs := []php.LaravelProcess{}
+	if !site.Laravel.IsZero() {
+		if !s.agents.Connected(site.ServerID) {
+			writeError(w, http.StatusConflict, "the server is offline")
+			return
+		}
+		resp, err := s.laravelCall(r.Context(), site, agentproto.SiteLaravel{Op: agentproto.LaravelStatus})
+		if err != nil {
+			writeAgentError(w, err)
+			return
+		}
+		if resp.Processes != nil {
+			procs = resp.Processes
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"processes": procs})
+}
+
+// handleSiteLaravelLog returns the last lines the site's Laravel processes
+// wrote (?lines=, default 200), from the journal of its primary server.
+func (s *Server) handleSiteLaravelLog(w http.ResponseWriter, r *http.Request, p *principal) {
+	site, ok := s.pathSite(w, r)
+	if !ok {
+		return
+	}
+	n := 200
+	if v := r.URL.Query().Get("lines"); v != "" {
+		var err error
+		if n, err = strconv.Atoi(v); err != nil || n < 1 || n > php.MaxLaravelLogLines {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("lines must be 1–%d", php.MaxLaravelLogLines))
+			return
+		}
+	}
+	lines := []php.LaravelLogLine{}
+	if site.PHPVersion != "" {
+		if !s.agents.Connected(site.ServerID) {
+			writeError(w, http.StatusConflict, "the server is offline")
+			return
+		}
+		resp, err := s.laravelCall(r.Context(), site, agentproto.SiteLaravel{Op: agentproto.LaravelLog, Lines: n})
+		if err != nil {
+			writeAgentError(w, err)
+			return
+		}
+		if resp.Lines != nil {
+			lines = resp.Lines
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"lines": lines})
+}
+
+// handleSiteLaravelRestart restarts the site's Laravel processes: after a
+// deployment of new code, so the workers do not finish the hour on the old
+// one.
+func (s *Server) handleSiteLaravelRestart(w http.ResponseWriter, r *http.Request, p *principal) {
+	site, ok := s.pathSite(w, r)
+	if !ok {
+		return
+	}
+	if site.Laravel.IsZero() {
+		writeError(w, http.StatusUnprocessableEntity, "the site runs no Laravel processes")
+		return
+	}
+	if !s.agents.Connected(site.ServerID) {
+		writeError(w, http.StatusConflict, "the server is offline")
+		return
+	}
+	if _, err := s.laravelCall(r.Context(), site, agentproto.SiteLaravel{Op: agentproto.LaravelRestart}); err != nil {
+		writeAgentError(w, err)
+		return
+	}
+	s.audit(r, &p.user.ID, "site.laravel_restarted", map[string]any{"site_id": site.ID})
+	resp, err := s.laravelCall(r.Context(), site, agentproto.SiteLaravel{Op: agentproto.LaravelStatus})
+	if err != nil {
+		writeAgentError(w, err)
+		return
+	}
+	procs := []php.LaravelProcess{}
+	if resp.Processes != nil {
+		procs = resp.Processes
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"processes": procs})
+}
+
 const phpLogTail = 256 << 10
 
 // handlePHPLog returns the end of the site's PHP error log, whole lines.

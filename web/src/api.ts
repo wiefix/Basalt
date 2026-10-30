@@ -181,6 +181,22 @@ export interface LaravelProcesses {
   workers: number; // queue workers, 0–8
 }
 
+// LaravelProcess is the state of one of them (systemd's view).
+export interface LaravelProcess {
+  name: string; // schedule, queue-1, …
+  state: string; // active, activating, failed, inactive, …
+  sub_state: string;
+  since?: string;
+  restarts: number;
+}
+
+export interface LaravelLogLine {
+  time: string;
+  process: string;
+  message: string;
+  error?: boolean;
+}
+
 export interface FileEntry {
   name: string;
   type: "file" | "dir" | "symlink" | "other";
@@ -356,6 +372,23 @@ export interface AppMetrics {
   mem_limit: number;
   net_rx: number; // bytes since the containers started
   net_tx: number;
+}
+
+// DatabaseUpgradeInfo: the major versions a database can move to, and an
+// upgrade waiting for its backup (or failed before its deployment).
+export interface DatabaseUpgradeInfo {
+  version: string;
+  targets: string[];
+  dump: boolean; // the data is copied into a new cluster (down meanwhile)
+  backups: boolean; // a backup policy exists
+  upgrade: DatabaseUpgrade | null;
+}
+
+export interface DatabaseUpgrade {
+  version: string;
+  state: "backing_up" | "failed";
+  backup_id?: number;
+  error?: string;
 }
 
 export interface Deployment {
@@ -883,6 +916,19 @@ export interface AuditCheck {
   intact: boolean;
   broken_at?: number;
   at: string;
+  anchors: AuditAnchor[];
+}
+
+// AuditAnchor: the newest entry a server's agent was given, kept outside
+// the panel's database.
+export interface AuditAnchor {
+  server_id: number;
+  server: string;
+  entry: number;
+  at?: string;
+  ok: boolean;
+  problem?: string;
+  checked_at: string;
 }
 
 export interface MailRelay {
@@ -1126,7 +1172,10 @@ export const api = {
   setSitePHP: (id: number, version: string) => put<{ site: Site; sync: Sync }>(`/api/v1/sites/${id}/php`, { version }),
   setSitePHPSettings: (id: number, s: PHPSettings) => put<{ site: Site }>(`/api/v1/sites/${id}/php-settings`, s),
   setSiteLaravel: (id: number, l: LaravelProcesses) => put<{ site: Site }>(`/api/v1/sites/${id}/laravel`, l),
-  installSite: (id: number, app: "wordpress" | "laravel") =>
+  laravelProcesses: (id: number) => get<{ processes: LaravelProcess[] }>(`/api/v1/sites/${id}/laravel`),
+  laravelLog: (id: number, lines = 200) => get<{ lines: LaravelLogLine[] }>(`/api/v1/sites/${id}/laravel/log?lines=${lines}`),
+  restartLaravel: (id: number) => post<{ processes: LaravelProcess[] }>(`/api/v1/sites/${id}/laravel/restart`),
+  installSite: (id: number, app: "wordpress" | "laravel" | "symfony") =>
     post<{ app: string; version: string; files: number; url?: string; database: Database }>(`/api/v1/sites/${id}/install`, { app }),
   siteAdminer: (id: number) => get<{ adminer: Adminer }>(`/api/v1/sites/${id}/adminer`),
   installAdminer: (id: number) => post<{ adminer: Adminer }>(`/api/v1/sites/${id}/adminer`),
@@ -1202,6 +1251,7 @@ export const api = {
   },
   openapi: () => get<OpenAPISpec>("/api/v1/openapi.json"),
   verifyAudit: () => get<AuditCheck>("/api/v1/audit/verify"),
+  resetAuditAnchors: () => post<{ anchors: AuditAnchor[] }>("/api/v1/audit/anchors/reset"),
   healthChecks: () => get<{ checks: HealthCheck[] }>("/api/v1/health-checks"),
   createHealthCheck: (b: HealthCheckInput) => post<{ check: { id: number } }>("/api/v1/health-checks", b),
   updateHealthCheck: (id: number, b: HealthCheckInput) => put<void>(`/api/v1/health-checks/${id}`, b),
@@ -1261,6 +1311,9 @@ export const api = {
   ) => post<{ app: App; sync: Sync; warnings: string[] }>("/api/v1/apps", b),
   databaseEngines: () => get<{ engines: Engine[] }>("/api/v1/database-engines"),
   databaseConnection: (id: number) => get<{ connection: DatabaseConnection }>(`/api/v1/apps/${id}/connection`),
+  databaseUpgradeInfo: (id: number) => get<DatabaseUpgradeInfo>(`/api/v1/apps/${id}/upgrade`),
+  upgradeDatabase: (id: number, version: string, backup: boolean) =>
+    post<{ upgrade: DatabaseUpgrade | null; deployment: Deployment | null }>(`/api/v1/apps/${id}/upgrade`, { version, backup }),
   databasePassword: (id: number, redeploy_apps: boolean) =>
     post<{ connection: DatabaseConnection; updated_apps: string[]; redeploying: string[]; deploy_error?: string }>(
       `/api/v1/apps/${id}/password`,

@@ -106,10 +106,14 @@ type auditCheckView struct {
 	Intact   bool      `json:"intact"`
 	BrokenAt int64     `json:"broken_at,omitempty"`
 	At       time.Time `json:"at"`
+	// Anchors: what each server's agent holds of the log (outside its
+	// database), as checked last.
+	Anchors []auditAnchorView `json:"anchors"`
 }
 
 // handleVerifyAudit recomputes the audit log's hash chain.
 func (s *Server) handleVerifyAudit(w http.ResponseWriter, r *http.Request, p *principal) {
+	s.anchorAll(r.Context(), nil, true, false)
 	c, err := s.verifyAudit(r.Context())
 	if err != nil {
 		s.internalError(w, r, "verify audit log", err)
@@ -130,7 +134,8 @@ func (s *Server) verifyAudit(ctx context.Context) (auditCheckView, error) {
 	if err != nil {
 		return auditCheckView{}, err
 	}
-	v := auditCheckView{Entries: c.Entries, Legacy: c.Legacy, Intact: c.BrokenAt == 0, BrokenAt: c.BrokenAt, At: s.now()}
+	v := auditCheckView{Entries: c.Entries, Legacy: c.Legacy, Intact: c.BrokenAt == 0, BrokenAt: c.BrokenAt, At: s.now(),
+		Anchors: s.anchorsView()}
 	if c.BrokenAt != 0 {
 		s.reportBrokenAudit(c.BrokenAt)
 	}

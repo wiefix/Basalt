@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -558,7 +560,74 @@ func DNSTargets(ctx context.Context, q queryer) ([]dns.AutoTarget, error) {
 			out = append(out, dns.AutoTarget{Domain: domain, IPs: ips, Source: source, HealthCheck: check})
 		}
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	panel, err := panelTarget(ctx, q)
+	if err != nil || panel == nil {
+		return out, err
+	}
+	return append(out, *panel), nil
+}
+
+// PanelDomainInZone is the panel's domain when it has automatic records
+// in one of Basalt's zones ("" otherwise).
+func (db *DB) PanelDomainInZone(ctx context.Context) (string, error) {
+	t, err := panelTarget(ctx, db.R)
+	if err != nil || t == nil {
+		return "", err
+	}
+	_, zones, _, err := db.manualDNS(ctx, db.R, nil)
+	if err != nil {
+		return "", err
+	}
+	for _, z := range zones {
+		if t.Domain == z.Name || strings.HasSuffix(t.Domain, "."+z.Name) {
+			return t.Domain, nil
+		}
+	}
+	return "", nil
+}
+
+// panelTarget is the panel's own domain (the host of its public address)
+// with the addresses of the server the panel runs on: when a standby
+// takes over, that server changes, and the domain follows it.
+func panelTarget(ctx context.Context, q queryer) (*dns.AutoTarget, error) {
+	var raw, public, detected string
+	var srv Server
+	rows, err := q.QueryContext(ctx,
+		`SELECT u.value, s.public_ips, s.detected_ips, s.last_ip
+		 FROM settings u, settings p JOIN servers s ON s.id = CAST(p.value AS INTEGER)
+		 WHERE u.key = 'panel_url' AND p.key = ? AND s.enrolled_at IS NOT NULL`, SettingPanelServer)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	if err := rows.Scan(&raw, &public, &detected, &srv.LastIP); err != nil {
+		return nil, err
+	}
+	u, err := url.Parse(raw)
+	host := ""
+	if err == nil {
+		host = strings.ToLower(u.Hostname())
+	}
+	if _, ipErr := netip.ParseAddr(host); host == "" || ipErr == nil {
+		return nil, nil // no domain
+	}
+	if err := json.Unmarshal([]byte(public), &srv.PublicIPs); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(detected), &srv.DetectedIPs); err != nil {
+		return nil, err
+	}
+	ips := srv.DNSAddrs()
+	if len(ips) == 0 {
+		return nil, nil
+	}
+	return &dns.AutoTarget{Domain: host, IPs: ips, Source: "panel"}, nil
 }
 
 // dnsChallenges lists the DNS-01 challenge records not yet expired.

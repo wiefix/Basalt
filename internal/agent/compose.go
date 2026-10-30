@@ -122,6 +122,11 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 				undo = append(undo, func(ctx context.Context) { dc.ContainerStart(ctx, id) })
 			}
 		}
+		if up := spec.DBUpgrade; up != nil && up.Service == svc.Name {
+			if err := m.upgradePostgres(ctx, dc, spec, svc, lg); err != nil {
+				return rollback(fmt.Errorf("upgrade %s: %w", svc.Name, err))
+			}
+		}
 		name := m.serviceContainer(spec.AppID, spec.DeploymentID, svc.Name)
 		if err := dc.ContainerRemove(ctx, name, true); err != nil { // left by an earlier attempt
 			return rollback(err)
@@ -188,6 +193,9 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 		if err := dc.ContainerRemove(ctx, c.ID, true); err != nil {
 			lg.printf("Remove failed: %v", err)
 		}
+	}
+	if spec.DBUpgrade != nil {
+		m.dropOldPostgres(ctx, dc, spec, lg)
 	}
 	m.refresh(ctx)
 	return digests, nil

@@ -36,7 +36,8 @@ type deployOptions struct {
 	ip         string
 	rollbackTo int64  // an earlier successful deployment to go back to
 	commit     string // git apps: build this commit instead of the branch head
-	trigger    string // recorded in the audit log: manual, rollback, webhook
+	trigger    string // recorded in the audit log: manual, rollback, webhook, update, upgrade
+	upgradeTo  string // databases: the newer major version to move to
 }
 
 // startDeployment records a deployment of app and runs it in the
@@ -52,6 +53,10 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		if (app.Source == store.SourceDatabase && d.Digests[app.Name] == "") ||
 			(app.Source == store.SourceMail && d.Digests[mailserver.Service] == "") {
 			return nil, &deployError{status: http.StatusUnprocessableEntity, msg: "this deployment has no recorded image"}
+		}
+		if app.Source == store.SourceDatabase && d.EngineVersion != app.EngineVersion {
+			return nil, &deployError{status: http.StatusUnprocessableEntity,
+				msg: fmt.Sprintf("this deployment ran version %s; the database has been upgraded to %s since, and its data cannot go back", d.EngineVersion, app.EngineVersion)}
 		}
 		if app.Source == store.SourceGit && d.CommitSHA == "" {
 			return nil, &deployError{status: http.StatusUnprocessableEntity, msg: "this deployment has no recorded commit"}
@@ -94,6 +99,7 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 		ReadOnly:    app.ReadOnly,
 		PruneImages: imagesToPrune(previous, s.imagesKept),
 	}
+	var engineVersion string  // databases: the major version this deployment runs
 	var composeContent []byte // compose apps: the file this deployment runs
 	var warnings []string
 	fetchCompose := false // a git app's compose file is to be read first
@@ -125,8 +131,17 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 			pinned = prev.Digests
 		}
 		spec = agentproto.AppSpec{AppID: app.ID}
-		if err := s.databaseSpec(app, pinned, &spec); err != nil {
+		engineVersion = app.EngineVersion
+		if o.upgradeTo != "" {
+			engineVersion = o.upgradeTo
+		}
+		if err := s.databaseSpec(app, engineVersion, pinned, &spec); err != nil {
 			return nil, &deployError{status: http.StatusUnprocessableEntity, msg: err.Error(), cause: err}
+		}
+		if o.upgradeTo != "" {
+			if err := s.databaseUpgrade(app, o.upgradeTo, &spec); err != nil {
+				return nil, &deployError{status: http.StatusUnprocessableEntity, msg: err.Error(), cause: err}
+			}
 		}
 	case store.SourceMail:
 		var pinned map[string]string
@@ -234,7 +249,8 @@ func (s *Server) startDeployment(ctx context.Context, app *store.App, o deployOp
 	live.append(notes)
 	stop := s.trackDeployment(dep.ID)
 	go s.runDeployment(targets, dep.ID, spec, live, stop, deploymentExtras{
-		commitMessage: keepMessage, compose: composeContent, notes: notes, projectID: project, fetchCompose: fetchCompose})
+		commitMessage: keepMessage, compose: composeContent, notes: notes, projectID: project, fetchCompose: fetchCompose,
+		engineVersion: engineVersion, upgrade: o.upgradeTo != ""})
 	return dep, nil
 }
 
@@ -287,6 +303,10 @@ type deploymentExtras struct {
 	// fetchCompose: the compose file of a git app is read from its
 	// repository before the deployment starts (fetchCompose).
 	fetchCompose bool
+	// Databases: the major version deployed; upgrade: a newer one than
+	// the app's, which becomes its version if the deployment succeeds.
+	engineVersion string
+	upgrade       bool
 }
 
 // gitSource prepares what the agent needs to build a git app: the
@@ -483,7 +503,7 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 	}
 	result := store.DeploymentResult{
 		OK: resp.OK, Error: resp.Error, Log: x.notes + resp.Log, ImageDigest: resp.ImageDigest,
-		CommitSHA: resp.Commit, CommitMessage: truncate(resp.CommitMessage, 400),
+		CommitSHA: resp.Commit, CommitMessage: truncate(resp.CommitMessage, 400), EngineVersion: x.engineVersion,
 	}
 	if x.compose != nil {
 		result.ComposeSealed = s.box.Seal(x.compose, deploymentComposeAD(depID))
@@ -515,6 +535,24 @@ func (s *Server) runDeployment(targets []deployTarget, depID int64, spec agentpr
 	delete(s.pending, spec.AppID)
 	s.pendMu.Unlock()
 
+	if resp.OK && x.upgrade {
+		// Recorded before followers learn the outcome, so the app they
+		// load shows the new version.
+		image := ""
+		if len(spec.Services) == 1 {
+			image = spec.Services[0].Image
+		}
+		if err := s.db.SetAppEngineVersion(context.Background(), spec.AppID, x.engineVersion, image); err != nil {
+			s.log.Error("record database version", "err", err, "app_id", spec.AppID)
+		}
+		details := map[string]any{"app_id": spec.AppID, "deployment_id": depID, "version": x.engineVersion}
+		if x.projectID != 0 {
+			details["project_id"] = x.projectID
+		}
+		if err := s.db.Audit(context.Background(), nil, "database.upgraded", "", details); err != nil {
+			s.log.Error("write audit log", "err", err)
+		}
+	}
 	// Followers now read the outcome from the database.
 	s.live.end(depID)
 	action := "app.deploy_failed"

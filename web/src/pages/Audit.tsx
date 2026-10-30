@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
-import { api, can, type AuditEntry, type User } from "../api";
-import { ErrorBox, Icon, Loading, formatDate } from "../components/ui";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, can, type AuditCheck, type AuditEntry, type User } from "../api";
+import { ErrorBox, Icon, Loading, formatDate, useConfirm, useToast } from "../components/ui";
 
 // detailText shows an entry's details as key: value pairs.
 const detailText = (d: Record<string, unknown>) =>
@@ -39,7 +39,7 @@ export function AuditPage({ user }: { user: User }) {
         </div>
       </div>
       <div className="stack">
-        <ChainCard check={check.data} error={check.error} pending={check.isFetching} onCheck={() => check.refetch()} />
+        <ChainCard check={check.data} error={check.error} pending={check.isFetching} onCheck={() => check.refetch()} owner={can(user, "owner")} />
         <div className="card">
           <div className="card-body row wrap">
             <select className="input" style={{ width: "auto", minWidth: 200 }} value={action} onChange={(e) => setAction(e.target.value)}>
@@ -140,12 +140,41 @@ function ChainCard({
   error,
   pending,
   onCheck,
+  owner,
 }: {
-  check?: { entries: number; legacy: number; intact: boolean; broken_at?: number; at: string };
+  check?: AuditCheck;
   error: unknown;
   pending: boolean;
   onCheck: () => void;
+  owner: boolean;
 }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const reset = useMutation({
+    mutationFn: api.resetAuditAnchors,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["audit-verify"] });
+      qc.invalidateQueries({ queryKey: ["audit"] });
+      toast("The servers now hold the log's newest entry");
+    },
+  });
+  const lost = check?.anchors.filter((a) => !a.ok) ?? [];
+  const accept = async () => {
+    const ok = await confirm({
+      title: "Accept the audit log as it is?",
+      body: (
+        <p>
+          Every server takes the log's newest entry, though it holds a newer or different one. Do this only when you know why the
+          entries went: the panel was restored from a backup, or a resting standby took over with an older copy. Each server
+          writes what it held to its journal, and this log records the reset.
+        </p>
+      ),
+      confirm: "Accept",
+      danger: true,
+    });
+    if (ok) reset.mutate();
+  };
   return (
     <div className="card card-body stack" style={{ gap: 10 }}>
       <div className="row wrap" style={{ justifyContent: "space-between" }}>
@@ -155,6 +184,8 @@ function ChainCard({
           {check &&
             (check.intact && check.entries > 0 && check.legacy === check.entries ? (
               <span className="badge plain">nothing signed yet</span>
+            ) : check.intact && lost.length > 0 ? (
+              <span className="badge err">entries missing</span>
             ) : check.intact ? (
               <span className="badge ok">intact</span>
             ) : (
@@ -172,6 +203,32 @@ function ChainCard({
           Entry #{check.broken_at} does not match its signature: it, or an entry before it, was changed or removed in the
           database outside the panel. Find out who has access to the panel's server and its database.
         </div>
+      )}
+      <ErrorBox error={reset.error} />
+      {lost.map((a) => (
+        <div key={a.server_id} className="alert err small">
+          {a.server}: {a.problem}.
+        </div>
+      ))}
+      {lost.length > 0 && owner && (
+        <div>
+          <button className="btn sm" onClick={accept} disabled={reset.isPending}>
+            Accept the log as it is
+          </button>
+        </div>
+      )}
+      {check && check.anchors.length > 0 && (
+        <p className="faint small" style={{ margin: 0 }}>
+          Kept outside the database by{" "}
+          {check.anchors.map((a, i) => (
+            <span key={a.server_id}>
+              {i > 0 && ", "}
+              {a.server} (#{a.entry})
+            </span>
+          ))}
+          : each server's agent holds the newest entry it was given, so a log that lost its end, or was replaced by an older copy,
+          is found too.
+        </p>
       )}
       <p className="faint small" style={{ margin: 0 }}>
         Each entry is signed together with the one before it, with a key derived from the panel's master key (which is

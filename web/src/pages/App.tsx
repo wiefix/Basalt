@@ -1767,6 +1767,7 @@ function ConnectionTab({ app }: { app: App }) {
     ) : null;
   return (
     <div className="stack" style={{ maxWidth: 760 }}>
+      <VersionCard app={app} />
       <div className="card card-body form">
         <h2>Connection</h2>
         <p className="muted" style={{ margin: 0 }}>
@@ -1791,6 +1792,90 @@ function ConnectionTab({ app }: { app: App }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// VersionCard upgrades a database to a newer major version.
+function VersionCard({ app }: { app: App }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const info = useQuery({
+    // Asked again once an upgrade has changed the version.
+    queryKey: ["db-upgrade", app.id, app.version],
+    queryFn: () => api.databaseUpgradeInfo(app.id),
+    refetchInterval: (q) => (q.state.data?.upgrade?.state === "backing_up" ? 3000 : false),
+  });
+  const [target, setTarget] = useState("");
+  const [backup, setBackup] = useState(true);
+  const start = useMutation({
+    mutationFn: (v: { version: string; backup: boolean }) => api.upgradeDatabase(app.id, v.version, v.backup),
+    onSuccess: (r) => {
+      qc.invalidateQueries({ queryKey: ["db-upgrade", app.id] });
+      qc.invalidateQueries({ queryKey: ["app", app.id] });
+      qc.invalidateQueries({ queryKey: ["deployments", app.id] });
+      toast(r.deployment ? "Upgrade deploying: follow it on Overview" : "Backing up first; the upgrade deploys when the backup succeeds");
+    },
+  });
+  if (info.isPending || info.error) return info.error ? <ErrorBox error={info.error} /> : null;
+  const d = info.data;
+  const to = target || d.targets[0] || "";
+  const engine = app.engine === "postgres" ? "PostgreSQL" : app.engine === "mariadb" ? "MariaDB" : app.engine === "redis" ? "Redis" : "MySQL";
+  const ask = async () => {
+    const withBackup = backup && d.backups;
+    const ok = await confirm({
+      title: `Upgrade ${app.name} to ${engine} ${to}?`,
+      body: (
+        <>
+          <p>
+            {d.dump
+              ? "The database stops; its data is dumped and loaded into a new cluster of the new version in the same volume. It is down for as long as that takes (seconds for small databases, longer for large ones). If anything fails, the old version starts again with its data as it was; once the new version runs, the old data is removed."
+              : `The new version starts on the same data files and upgrades them${app.engine === "mariadb" ? " (mariadb-upgrade, a few seconds of downtime)" : ""}.`}
+          </p>
+          <p>
+            There is no way back to {engine} {d.version} afterwards: rollbacks only go to deployments of the new version.
+            {withBackup ? " A backup is taken first; the upgrade starts only if it succeeds." : " Without a backup, a failed upgrade may leave nothing to go back to."}
+          </p>
+        </>
+      ),
+      confirm: "Upgrade",
+      danger: !withBackup,
+    });
+    if (ok) start.mutate({ version: to, backup: withBackup });
+  };
+  return (
+    <div className="card card-body form">
+      <h2>Version</h2>
+      <p className="muted" style={{ margin: 0 }}>
+        {engine} {d.version}: each deployment takes its latest minor release.
+        {d.targets.length === 0 && " This is the newest major version offered."}
+      </p>
+      {d.upgrade?.state === "backing_up" && (
+        <div className="alert">Backing up before the upgrade to {d.upgrade.version}…</div>
+      )}
+      {d.upgrade?.state === "failed" && d.upgrade.error && <div className="alert err">Upgrade to {d.upgrade.version} did not start: {d.upgrade.error}</div>}
+      <ErrorBox error={start.error} />
+      {d.targets.length > 0 && (
+        <>
+          <div className="row">
+            <select className="input" style={{ width: "auto" }} value={to} onChange={(e) => setTarget(e.target.value)}>
+              {d.targets.map((v) => (
+                <option key={v} value={v}>
+                  {engine} {v}
+                </option>
+              ))}
+            </select>
+            <button className="btn" onClick={ask} disabled={start.isPending || d.upgrade?.state === "backing_up"}>
+              <Icon name="upload" size={14} /> Upgrade
+            </button>
+          </div>
+          <label className="row small">
+            <input type="checkbox" checked={backup && d.backups} disabled={!d.backups} onChange={(e) => setBackup(e.target.checked)} />
+            {d.backups ? "Back up first (the upgrade starts only if the backup succeeds)" : "Back up first: set up backups on the Backups tab"}
+          </label>
+        </>
+      )}
     </div>
   );
 }

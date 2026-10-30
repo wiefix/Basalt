@@ -302,6 +302,97 @@ func checkSetgid(pkgs map[string]*pkg) []violation {
 	return out
 }
 
+// runners are the packages that may start other programs (os/exec): the
+// agent and the host tools it uses. The panel, the proxy and everything
+// they share start none.
+var runners = []string{"internal/agent", "internal/php", "internal/restic", "internal/sysuser"}
+
+// checkExec finds packages outside runners that import os/exec.
+func checkExec(pkgs map[string]*pkg) []violation {
+	var out []violation
+	for _, p := range sortedPkgs(pkgs) {
+		if slices.Contains(runners, p.path) {
+			continue
+		}
+		for _, f := range p.files {
+			for _, imp := range f.Imports {
+				if imp.Path.Value == `"os/exec"` {
+					out = append(out, violation{p.fset.Position(imp.Pos()), p.path + " starts programs (os/exec): only " + strings.Join(runners, ", ") + " may"})
+				}
+			}
+		}
+	}
+	return out
+}
+
+// noTimeout marks an http.Client deliberately without Timeout (a stream,
+// or each request bounded by its context); the reason follows.
+const noTimeout = "No timeout:"
+
+// checkHTTPTimeouts finds http.Client values without a Timeout (unless the
+// comment before them says why), and the package-level helpers that use
+// http.DefaultClient, which has none.
+func checkHTTPTimeouts(pkgs map[string]*pkg) []violation {
+	var out []violation
+	for _, p := range sortedPkgs(pkgs) {
+		for _, f := range p.files {
+			http := ""
+			for _, imp := range f.Imports {
+				if imp.Path.Value == `"net/http"` {
+					http = "http"
+					if imp.Name != nil {
+						http = imp.Name.Name
+					}
+				}
+			}
+			if http == "" {
+				continue
+			}
+			marked := map[int]bool{} // lines a noTimeout comment ends on
+			for _, cg := range f.Comments {
+				if strings.Contains(cg.Text(), noTimeout) {
+					marked[p.fset.Position(cg.End()).Line] = true
+				}
+			}
+			isHTTP := func(e ast.Expr, name string) bool {
+				sel, ok := e.(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != name {
+					return false
+				}
+				id, ok := sel.X.(*ast.Ident)
+				return ok && id.Name == http
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.CompositeLit:
+					if !isHTTP(n.Type, "Client") {
+						return true
+					}
+					for _, e := range n.Elts {
+						if kv, ok := e.(*ast.KeyValueExpr); ok {
+							if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Timeout" {
+								return true
+							}
+						}
+					}
+					pos := p.fset.Position(n.Pos())
+					if !marked[pos.Line-1] && !marked[pos.Line] {
+						out = append(out, violation{pos, "http.Client without Timeout: set one, or say why not in a comment before it starting \"" + noTimeout + "\""})
+					}
+				case *ast.SelectorExpr:
+					for _, name := range []string{"DefaultClient", "Get", "Post", "Head", "PostForm"} {
+						if isHTTP(n, name) {
+							out = append(out, violation{p.fset.Position(n.Pos()), "http." + name + " uses a client without a timeout"})
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	return out
+}
+
 func octal(lit string) bool {
 	return strings.HasPrefix(lit, "0o") || strings.HasPrefix(lit, "0O") ||
 		(len(lit) > 1 && lit[0] == '0' && lit[1] >= '0' && lit[1] <= '7')
@@ -336,6 +427,10 @@ func TestImports(t *testing.T) { report(t, checkImports(repo(t))) }
 func TestShellScripts(t *testing.T) { report(t, checkShell(repo(t))) }
 
 func TestSetgidLiterals(t *testing.T) { report(t, checkSetgid(repo(t))) }
+
+func TestExternalPrograms(t *testing.T) { report(t, checkExec(repo(t))) }
+
+func TestHTTPTimeouts(t *testing.T) { report(t, checkHTTPTimeouts(repo(t))) }
 
 // TestRulesCatch makes sure each check finds what it is meant to find.
 func TestRulesCatch(t *testing.T) {
@@ -406,4 +501,53 @@ import "github.com/wiefix/basalt/internal/server"
 		"12:shell -c without its script",
 		"9:shell -c script is not a constant")
 	check("setgid", msgs(checkSetgid(pkgs)), "13:setgid", "14:setgid")
+}
+
+// TestRulesCatchProgramsAndTimeouts makes sure the os/exec and HTTP
+// timeout checks find what they are meant to find.
+func TestRulesCatchProgramsAndTimeouts(t *testing.T) {
+	src := map[string]string{
+		"internal/server": `package server
+import (
+	"os/exec"
+	web "net/http"
+	"time"
+)
+func f() {
+	_ = &web.Client{}
+	// No timeout: a stream, bounded by its context.
+	_ = &web.Client{}
+	_ = web.Client{Timeout: time.Second}
+	web.Get("https://example.com")
+	_ = web.DefaultClient
+	exec.Command("true")
+}
+`,
+		"internal/agent": `package agent
+import "os/exec"
+var _ = exec.Command
+`,
+	}
+	fset := token.NewFileSet()
+	pkgs := map[string]*pkg{}
+	for path, s := range src {
+		f, err := parser.ParseFile(fset, path+"/x.go", s, parser.ParseComments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pkgs[path] = &pkg{path: path, imports: map[string][]token.Position{}, files: []*ast.File{f}, fset: fset}
+	}
+	lines := func(vs []violation) string {
+		var out []string
+		for _, v := range vs {
+			out = append(out, strconv.Itoa(v.pos.Line))
+		}
+		return strings.Join(out, ",")
+	}
+	if got := lines(checkExec(pkgs)); got != "3" {
+		t.Errorf("os/exec findings on lines %s, want 3", got)
+	}
+	if got := lines(checkHTTPTimeouts(pkgs)); got != "8,12,13" {
+		t.Errorf("timeout findings on lines %s, want 8,12,13", got)
+	}
 }

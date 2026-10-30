@@ -188,7 +188,7 @@ func (s *Server) handleDeleteDatabase(w http.ResponseWriter, r *http.Request, p 
 }
 
 type siteInstallRequest struct {
-	App string `json:"app"` // wordpress, laravel
+	App string `json:"app"` // wordpress, laravel, symfony
 }
 
 // siteApps are the applications a site can get, with the suffix of their
@@ -196,9 +196,10 @@ type siteInstallRequest struct {
 var siteApps = map[string]struct{ name, db string }{
 	agentproto.AppWordPress: {"WordPress", "_wp"},
 	agentproto.AppLaravel:   {"Laravel", "_lv"},
+	agentproto.AppSymfony:   {"Symfony", "_sf"},
 }
 
-// handleSiteInstall installs an application (WordPress, Laravel) into a
+// handleSiteInstall installs an application (WordPress, Laravel, Symfony) into a
 // PHP site's empty public folder, with a new database for it.
 func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *principal) {
 	site, ok := s.pathSite(w, r)
@@ -211,7 +212,7 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 	}
 	app, ok := siteApps[req.App]
 	if !ok {
-		writeError(w, http.StatusUnprocessableEntity, "unknown application (wordpress and laravel are available)")
+		writeError(w, http.StatusUnprocessableEntity, "unknown application (wordpress, laravel and symfony are available)")
 		return
 	}
 	if site.PHPVersion == "" {

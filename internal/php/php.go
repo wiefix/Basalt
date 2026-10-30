@@ -46,11 +46,14 @@ type Host struct {
 	// Units: each site's PHP runs as its own systemd service (its own FPM
 	// master in its own cgroup, so CPU and memory can be limited per site);
 	// without systemd, all sites' pools share the distribution's master.
-	Units        bool
-	UnitDir      string                     // /etc/systemd/system
-	ConfDir      string                     // per-site FPM configurations, /etc/basalt/php
-	Systemctl    func(args ...string) error // runs systemctl
-	ExtensionDir string                     // PHP extensions, /usr/lib/php/<api>/*.so
+	Units     bool
+	UnitDir   string                     // /etc/systemd/system
+	ConfDir   string                     // per-site FPM configurations, /etc/basalt/php
+	Systemctl func(args ...string) error // runs systemctl
+	// Output runs systemctl or journalctl and returns what it printed
+	// (default: the commands themselves).
+	Output       func(ctx context.Context, name string, args ...string) ([]byte, error)
+	ExtensionDir string // PHP extensions, /usr/lib/php/<api>/*.so
 }
 
 func DefaultHost(runDir string) *Host {
@@ -446,6 +449,13 @@ func (h *Host) RestartUpdated() ([]int64, error) {
 			continue
 		}
 		done = append(done, id)
+	}
+	laravel, err := h.restartUpdatedLaravel(extensions)
+	errs = append(errs, err)
+	for _, id := range laravel {
+		if !slices.Contains(done, id) {
+			done = append(done, id)
+		}
 	}
 	return done, errors.Join(errs...)
 }

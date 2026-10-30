@@ -385,38 +385,71 @@ func (s *Server) handleTemplateUpdate(w http.ResponseWriter, r *http.Request, p 
 	}
 	u := &templateUpdate{Revision: t.Revision, State: "backing_up"}
 	if req.Backup {
-		target := appTarget(app)
-		policy, err := s.db.BackupPolicy(r.Context(), target.BackupTarget)
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusUnprocessableEntity, "choose where to back it up under Backups first, or update without a backup")
-			return
-		} else if err != nil {
-			s.internalError(w, r, "load backup policy", err)
+		if u.BackupID, ok = s.backupFirst(w, r, p, app); !ok {
 			return
 		}
-		if !s.backupsAvailable(w, r, app.ServerID) {
-			return
-		}
-		b, err := s.startBackup(r.Context(), target, policy, "manual", &p.user.ID)
-		var de *deployError
-		switch {
-		case errors.As(err, &de):
-			writeError(w, de.status, de.msg)
-			return
-		case errors.Is(err, store.ErrBackupInProgress):
-			writeError(w, http.StatusConflict, err.Error())
-			return
-		case err != nil:
-			s.internalError(w, r, "start backup", err)
-			return
-		}
-		u.BackupID = b.ID
 	}
 	s.setTemplateUpdate(app.ID, u)
 	s.audit(r, &p.user.ID, "app.template_update", map[string]any{"app_id": app.ID, "template": t.ID,
 		"from": app.TemplateRevision, "to": t.Revision, "backup_id": u.BackupID, "added": added})
 	go s.runTemplateUpdate(app.ID, t, newEnv, cf, u, &p.user.ID, clientIP(r))
 	writeJSON(w, http.StatusAccepted, map[string]any{"update": u})
+}
+
+// backupFirst starts a backup of the app before a change (an update): it
+// needs the app's backup policy. It writes the error response when it
+// cannot.
+func (s *Server) backupFirst(w http.ResponseWriter, r *http.Request, p *principal, app *store.App) (int64, bool) {
+	target := appTarget(app)
+	policy, err := s.db.BackupPolicy(r.Context(), target.BackupTarget)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusUnprocessableEntity, "choose where to back it up under Backups first, or update without a backup")
+		return 0, false
+	} else if err != nil {
+		s.internalError(w, r, "load backup policy", err)
+		return 0, false
+	}
+	if !s.backupsAvailable(w, r, app.ServerID) {
+		return 0, false
+	}
+	b, err := s.startBackup(r.Context(), target, policy, "manual", &p.user.ID)
+	var de *deployError
+	switch {
+	case errors.As(err, &de):
+		writeError(w, de.status, de.msg)
+		return 0, false
+	case errors.Is(err, store.ErrBackupInProgress):
+		writeError(w, http.StatusConflict, err.Error())
+		return 0, false
+	case err != nil:
+		s.internalError(w, r, "start backup", err)
+		return 0, false
+	}
+	return b.ID, true
+}
+
+// waitBackup waits for a backup of the app (none: id 0) to succeed.
+func (s *Server) waitBackup(ctx context.Context, appID, id int64) error {
+	if id == 0 {
+		return nil
+	}
+	for {
+		b, err := s.db.BackupByID(ctx, store.BackupTarget{AppID: appID}, id)
+		if err != nil {
+			return errors.New("cannot follow the backup: " + err.Error())
+		}
+		if b.Status == "succeeded" {
+			return nil
+		}
+		if b.Status != "running" {
+			return errors.New("the backup failed, so nothing was changed: " + b.Error)
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("the backup took too long")
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // runTemplateUpdate waits for the backup, then applies the new template
@@ -429,28 +462,9 @@ func (s *Server) runTemplateUpdate(appID int64, t *catalog.Template, env map[str
 		s.setTemplateUpdate(appID, &templateUpdate{Revision: u.Revision, State: "failed", BackupID: u.BackupID, Error: msg})
 		s.log.Warn("template update", "app_id", appID, "err", msg)
 	}
-	if u.BackupID != 0 {
-		target := store.BackupTarget{AppID: appID}
-		for {
-			b, err := s.db.BackupByID(ctx, target, u.BackupID)
-			if err != nil {
-				fail("cannot follow the backup: " + err.Error())
-				return
-			}
-			if b.Status == "succeeded" {
-				break
-			}
-			if b.Status != "running" {
-				fail("the backup failed, so nothing was changed: " + b.Error)
-				return
-			}
-			select {
-			case <-ctx.Done():
-				fail("the backup took too long")
-				return
-			case <-time.After(time.Second):
-			}
-		}
+	if err := s.waitBackup(ctx, appID, u.BackupID); err != nil {
+		fail(err.Error())
+		return
 	}
 	app, err := s.db.AppByID(ctx, appID)
 	if err != nil {

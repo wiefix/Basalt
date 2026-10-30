@@ -320,6 +320,8 @@ type AppSpec struct {
 	// Attach lists apps whose networks the services join, reachable there
 	// by their service name (a database used by those apps).
 	Attach []int64 `json:"attach,omitempty"`
+	// DBUpgrade: this deployment moves a database to a newer major version.
+	DBUpgrade *DBUpgrade `json:"db_upgrade,omitempty"`
 	// Mail marks the mail server, the one app allowed to publish ports on
 	// the host (ServiceSpec.HostPorts).
 	Mail bool `json:"mail,omitempty"`
@@ -523,6 +525,7 @@ const TypeSiteInstall = "site_install"
 const (
 	AppWordPress = "wordpress"
 	AppLaravel   = "laravel"
+	AppSymfony   = "symfony"
 )
 
 type SiteInstall struct {
@@ -532,8 +535,8 @@ type SiteInstall struct {
 	DBName     string `json:"db_name"`
 	DBUser     string `json:"db_user"`
 	DBPassword string `json:"db_password"`
-	// Laravel: the site's PHP version (its CLI runs Composer and artisan)
-	// and the site's address (APP_URL).
+	// Laravel and Symfony: the site's PHP version (its CLI runs Composer
+	// and the framework's commands) and the site's address (APP_URL).
 	PHPVersion string `json:"php_version,omitempty"`
 	URL        string `json:"url,omitempty"`
 }
@@ -564,6 +567,27 @@ type SiteAdminer struct {
 type SiteAdminerResponse struct {
 	Path    string `json:"path,omitempty"`
 	Version string `json:"version,omitempty"`
+}
+
+// TypeSiteLaravel reports the state of a site's Laravel processes
+// (status), returns the last lines they wrote (log), or restarts them.
+const TypeSiteLaravel = "site_laravel"
+
+const (
+	LaravelStatus  = "status"
+	LaravelLog     = "log"
+	LaravelRestart = "restart"
+)
+
+type SiteLaravel struct {
+	SiteID int64  `json:"site_id"`
+	Op     string `json:"op"`
+	Lines  int    `json:"lines,omitempty"` // log: how many, at most php.MaxLaravelLogLines
+}
+
+type SiteLaravelResponse struct {
+	Processes []php.LaravelProcess `json:"processes,omitempty"`
+	Lines     []php.LaravelLogLine `json:"lines,omitempty"`
 }
 
 // TypeSiteTrash lists the folders of deleted sites waiting in the trash;
@@ -644,4 +668,26 @@ func (r *ContainerDBPassword) Validate() error {
 		return errors.New("invalid password")
 	}
 	return nil
+}
+
+// TypeAuditAnchor gives the agent the panel's newest audit log entry: its
+// number and hash. The agent keeps the newest it was given (outside the
+// panel's host, as root) and answers with what it had before, which the
+// panel checks against its log: an entry it no longer has, or one that
+// differs, means the log lost its end or was replaced. An older anchor is
+// not taken unless Replace (an owner accepted the loss).
+const TypeAuditAnchor = "audit_anchor"
+
+type AuditAnchor struct {
+	ID      int64  `json:"id"`
+	Hash    string `json:"hash"` // hex HMAC-SHA256
+	Replace bool   `json:"replace,omitempty"`
+}
+
+// AuditAnchorResponse: Before is what the agent held (zero: nothing), Kept
+// whether it still holds it (the given anchor was older or differed).
+type AuditAnchorResponse struct {
+	Before AuditAnchor `json:"before"`
+	At     time.Time   `json:"at,omitzero"` // when Before was given
+	Kept   bool        `json:"kept,omitempty"`
 }
