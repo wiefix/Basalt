@@ -1177,6 +1177,11 @@ export const api = {
         error_at?: string;
       }[];
     }>(`/api/v1/servers/${id}/certificates`),
+  // level: "" (all), "warn" or "error".
+  proxyLog: (id: number, tail: number, level = "") =>
+    get<{ log: string }>(`/api/v1/servers/${id}/proxy-log?tail=${tail}${level ? `&level=${level}` : ""}`),
+  proxyLogStreamUrl: (id: number, tail: number, level = "") =>
+    `/api/v1/servers/${id}/proxy-log/stream?tail=${tail}${level ? `&level=${level}` : ""}`,
   setPublicIPs: (id: number, ips: string[]) => put<{ server: Server }>(`/api/v1/servers/${id}/public-ips`, { ips }),
   pingServer: (id: number) => post<{ rtt_ms: number; agent_time: string }>(`/api/v1/servers/${id}/ping`),
 

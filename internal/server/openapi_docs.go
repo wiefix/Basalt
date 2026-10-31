@@ -127,10 +127,14 @@ var apiDocs = map[string]apiDoc{
 	"DELETE /api/v1/servers/{id}":           {summary: "Remove a server (its agent loses access)", resp: noContent},
 	"GET /api/v1/servers/{id}/metrics":      {summary: "A server's metrics", query: []queryParam{q("minutes", "how far back, default 60, at most 43200 (30 days); samples older than 6 hours are 5-minute averages")}, resp: obj("metrics", []metricsView{})},
 	"GET /api/v1/servers/{id}/certificates": {summary: "Public certificates of the server's domains and their expiry", resp: obj("certificates", []certView{})},
-	"POST /api/v1/servers/{id}/ping":        {summary: "Round trip to the server's agent", resp: obj("rtt_ms", 0.0, "agent_time", time.Time{})},
-	"PUT /api/v1/servers/{id}/public-ips":   {summary: "Set the addresses automatic DNS records use (empty: detected)", body: publicIPsRequest{}, resp: obj("server", serverView{})},
-	"GET /api/v1/panel":                     {summary: "This panel's epoch, and whether a standby panel took over from it", resp: obj("panel", panelView{})},
-	"GET /api/v1/standbys":                  {summary: "Standby panels: copies of this panel that can take over", resp: obj("standbys", []standbyView{}, "available", false, "failover", failoverView{})},
+	"GET /api/v1/servers/{id}/proxy-log": {summary: "Last lines of the server's proxy log: errors, certificate issuance, configuration loads", query: []queryParam{
+		q("tail", "number of lines, 1–5000, default 200"), q("level", "lowest level shown: warn or error (default: all)")}, resp: obj("log", "")},
+	"GET /api/v1/servers/{id}/proxy-log/stream": {summary: "Follow the server's proxy log", content: "stream", query: []queryParam{
+		q("tail", "lines to start with"), q("level", "lowest level shown: warn or error")}},
+	"POST /api/v1/servers/{id}/ping":      {summary: "Round trip to the server's agent", resp: obj("rtt_ms", 0.0, "agent_time", time.Time{})},
+	"PUT /api/v1/servers/{id}/public-ips": {summary: "Set the addresses automatic DNS records use (empty: detected)", body: publicIPsRequest{}, resp: obj("server", serverView{})},
+	"GET /api/v1/panel":                   {summary: "This panel's epoch, and whether a standby panel took over from it", resp: obj("panel", panelView{})},
+	"GET /api/v1/standbys":                {summary: "Standby panels: copies of this panel that can take over", resp: obj("standbys", []standbyView{}, "available", false, "failover", failoverView{})},
 	"POST /api/v1/standbys": {summary: "Add a standby panel; returns its one-time install command (owner)", body: createStandbyRequest{},
 		resp: obj("standby", standbyView{}, "server", serverView{}, "enrollment", standbyEnrollmentView{})},
 	"DELETE /api/v1/standbys/{id}": {summary: "Remove a standby panel (it stops getting the database; owner)", resp: noContent},

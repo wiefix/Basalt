@@ -370,6 +370,8 @@ func (s *Server) Handler() http.Handler {
 	rt.HandleFunc("POST /api/v1/webhooks/github", s.handleGitHubWebhook)
 	rt.Handle("GET /api/v1/servers/{id}/metrics", s.requireRole(store.RoleViewer, s.handleServerMetrics))
 	rt.Handle("GET /api/v1/servers/{id}/certificates", s.requireRole(store.RoleViewer, s.handleServerCerts))
+	rt.Handle("GET /api/v1/servers/{id}/proxy-log", s.requireRole(store.RoleAdmin, s.handleProxyLog))
+	rt.Handle("GET /api/v1/servers/{id}/proxy-log/stream", s.requireRole(store.RoleAdmin, s.handleProxyLogStream))
 	rt.Handle("POST /api/v1/servers/{id}/ping", s.requireRole(store.RoleMember, s.handlePingServer))
 	rt.Handle("PUT /api/v1/servers/{id}/public-ips", s.requireRole(store.RoleAdmin, s.handleSetPublicIPs))
 	rt.Handle("POST /api/v1/servers/{id}/enroll-token", s.requireRole(store.RoleAdmin, s.handleResetEnrollToken))

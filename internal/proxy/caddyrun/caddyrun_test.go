@@ -153,6 +153,25 @@ func TestProxyServes(t *testing.T) {
 	if code, _, _ := get("https://site.localhost/"); code != 200 {
 		t.Fatal("previous config lost after a failed load")
 	}
+
+	// Caddy's own messages reach the proxy's log file, including a rejected
+	// configuration; access logs do not.
+	bad, _, err := proxy.Build(proxy.Desired{}, proxy.BuildOptions{Dir: dir, HTTPPort: httpPort, HTTPSPort: httpPort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := admin.Load(ctx, bad); err == nil {
+		t.Fatal("config with one port for HTTP and HTTPS accepted")
+	}
+	var own string
+	waitFor(t, "proxy log", func() bool {
+		b, _ := os.ReadFile(proxy.OwnLogPath(dir))
+		own = string(b)
+		return strings.Contains(own, `"logger":"http`) && strings.Contains(own, `"msg":"request error"`)
+	})
+	if strings.Contains(own, "http.log.access") {
+		t.Fatalf("proxy log has access lines:\n%s", own)
+	}
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {

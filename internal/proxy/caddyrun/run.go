@@ -49,6 +49,8 @@ func Run(ctx context.Context, dir string, log *slog.Logger) error {
 		if err := caddy.Load(base, true); err != nil {
 			return fmt.Errorf("start proxy: %w", err)
 		}
+		// Also in the proxy's own log, where the panel shows it.
+		caddy.Log().Named("basalt").Error("saved configuration failed to load; started without sites: " + err.Error())
 	}
 	log.Info("proxy running", "admin", proxy.AdminSocket(dir))
 	<-ctx.Done()
