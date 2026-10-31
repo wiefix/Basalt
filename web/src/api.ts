@@ -1222,8 +1222,11 @@ export const api = {
   phpLog: (id: number) => get<{ log: string; size: number; truncated?: boolean; path: string }>(`/api/v1/sites/${id}/php-log`),
   deleteSite: (id: number) => del<{ sync: Sync; cleanup_error?: string }>(`/api/v1/sites/${id}`),
 
-  files: (siteId: number, path: string) =>
-    get<{ path: string; entries: FileEntry[] }>(`/api/v1/sites/${siteId}/files${q(path)}`),
+  files: (siteId: number, path: string, cursor = "") =>
+    get<{ path: string; entries: FileEntry[]; total: number; next?: string }>(
+      `/api/v1/sites/${siteId}/files${q(path)}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+    ),
+  statFile: (siteId: number, path: string) => get<{ entry: FileEntry | null }>(`/api/v1/sites/${siteId}/files/stat${q(path)}`),
   readText: (siteId: number, path: string) =>
     get<{ content: string; size: number }>(`/api/v1/sites/${siteId}/files/text${q(path)}`),
   fileOp: (siteId: number, op: string, b: Record<string, unknown>) =>

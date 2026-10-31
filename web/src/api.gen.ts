@@ -2020,7 +2020,9 @@ export type GetSitesIdDatabasesResponse = {
 
 export type GetSitesIdFilesResponse = {
   entries: FilesEntry[];
+  next?: string;
   path: string;
+  total: number;
 };
 
 export type GetSitesIdFilesStatResponse = {

@@ -227,6 +227,9 @@ type FilesRequest struct {
 	UploadID  string   `json:"upload_id,omitempty"`
 	Mode      uint32   `json:"mode,omitempty"`
 	Overwrite bool     `json:"overwrite,omitempty"`
+	// List: page size and the cursor from the previous page.
+	Limit  int    `json:"limit,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
 }
 
 type FilesResponse struct {
@@ -236,6 +239,9 @@ type FilesResponse struct {
 	Size     int64                `json:"size,omitempty"`
 	UploadID string               `json:"upload_id,omitempty"`
 	Extract  *files.ExtractResult `json:"extract,omitempty"`
+	// List: entries in the directory and the next page's cursor.
+	Total int    `json:"total,omitempty"`
+	Next  string `json:"next,omitempty"`
 }
 
 // SFTPApply is the complete set of SFTP accounts for the host.

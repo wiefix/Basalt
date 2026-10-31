@@ -131,6 +131,7 @@ export const checks = [
   fits<Returns<A["phpLog"]>>()<G.GetSitesIdPhpLogResponse>(),
   fits<Returns<A["deleteSite"]>>()<G.DeleteSitesIdResponse>(),
   fits<Returns<A["files"]>>()<G.GetSitesIdFilesResponse>(),
+  fits<Returns<A["statFile"]>>()<G.GetSitesIdFilesStatResponse>(),
   fits<Returns<A["readText"]>>()<G.GetSitesIdFilesTextResponse>(),
   fits<Returns<A["fileOp"]>>()<G.PostSitesIdFilesOpResponse>(),
   fits<Returns<A["databases"]>>()<G.GetSitesIdDatabasesResponse>(),

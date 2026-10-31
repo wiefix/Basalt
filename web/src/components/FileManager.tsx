@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router";
 import { api, ApiError, upload, type FileEntry } from "../api";
 import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useConfirm, useToast } from "./ui";
@@ -8,6 +8,9 @@ const TEXT_EXT =
   /\.(html?|css|js|mjs|cjs|ts|tsx|jsx|json|xml|svg|txt|md|markdown|csv|ya?ml|toml|ini|conf|env|php|py|rb|go|rs|sh|sql|htaccess|vue|svelte|map|lock|log|gitignore|webmanifest)$/i;
 const ARCHIVE_EXT = /\.(zip|tar|tar\.gz|tgz)$/i;
 const MAX_EDIT = 1 << 20;
+
+// The editor (CodeMirror) is a chunk of its own, loaded when a file opens.
+const CodeEditor = lazy(() => import("./CodeEditor"));
 
 const join = (dir: string, name: string) => (dir === "/" ? `/${name}` : `${dir}/${name}`);
 const parent = (p: string) => (p === "/" ? "/" : p.slice(0, p.lastIndexOf("/")) || "/");
@@ -26,7 +29,13 @@ export function FileManager({ siteId, canWrite }: { siteId: number; canWrite: bo
     setParams({ path: p });
   };
 
-  const listing = useQuery({ queryKey: ["files", siteId, path], queryFn: () => api.files(siteId, path) });
+  // A directory comes a page at a time; "Show more" follows the cursor.
+  const listing = useInfiniteQuery({
+    queryKey: ["files", siteId, path],
+    queryFn: ({ pageParam }) => api.files(siteId, path, pageParam),
+    initialPageParam: "",
+    getNextPageParam: (last) => last.next || undefined,
+  });
   const refresh = () => qc.invalidateQueries({ queryKey: ["files", siteId, path] });
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -43,7 +52,8 @@ export function FileManager({ siteId, canWrite }: { siteId: number; canWrite: bo
   const folderInput = useRef<HTMLInputElement>(null);
   const nextUpload = useRef(1);
 
-  const entries = listing.data?.entries ?? [];
+  const entries = listing.data?.pages.flatMap((p) => p.entries) ?? [];
+  const total = listing.data?.pages.at(-1)?.total ?? 0;
   const toggle = (name: string) =>
     setSelected((s) => {
       const n = new Set(s);
@@ -374,6 +384,16 @@ export function FileManager({ siteId, canWrite }: { siteId: number; canWrite: bo
               ))}
             </tbody>
           </table>
+          {listing.hasNextPage && (
+            <div className="row" style={{ justifyContent: "center", padding: 12 }}>
+              <span className="muted small">
+                Showing {entries.length} of {total}
+              </span>
+              <button className="btn sm" onClick={() => listing.fetchNextPage()} disabled={listing.isFetchingNextPage}>
+                {listing.isFetchingNextPage ? "Loading…" : "Show more"}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -393,9 +413,16 @@ export function FileManager({ siteId, canWrite }: { siteId: number; canWrite: bo
           onClose={() => setDialog(null)}
           onSubmit={async (name) => {
             const p = join(path, name);
-            if (entries.some((e) => e.name === name)) {
+            // Writing replaces a file, and the folder may not be loaded whole.
+            try {
+              await api.statFile(siteId, p);
               toast(`${name} already exists`, true);
               return false;
+            } catch (e) {
+              if (!(e instanceof ApiError && e.status === 404)) {
+                toast(errorMessage(e), true);
+                return false;
+              }
             }
             const ok = await run("File created", () => api.fileOp(siteId, "write", { path: p, content: "" }));
             if (ok && TEXT_EXT.test(name)) setTimeout(() => setDialog({ kind: "edit", path: p }));
@@ -605,21 +632,6 @@ function Editor({
       return;
     onClose();
   };
-  const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-      e.preventDefault();
-      save();
-    }
-    if (e.key === "Tab" && !e.shiftKey) {
-      e.preventDefault();
-      const t = e.currentTarget;
-      const { selectionStart: a, selectionEnd: b } = t;
-      const v = t.value.slice(0, a) + "\t" + t.value.slice(b);
-      setContent(v);
-      requestAnimationFrame(() => t.setSelectionRange(a + 1, a + 1));
-    }
-  };
-
   return (
     <Modal
       title={
@@ -651,15 +663,11 @@ function Editor({
         <ErrorBox error={file.error} />
       ) : (
         <div className="card" style={{ overflow: "hidden", margin: "-4px 0" }}>
-          <textarea
-            className="editor"
-            value={content ?? ""}
-            onChange={(e) => setContent(e.target.value)}
-            onKeyDown={onKey}
-            readOnly={readOnly}
-            spellCheck={false}
-            autoFocus
-          />
+          <Suspense fallback={<Loading />}>
+            {saved !== null && (
+              <CodeEditor name={path} initial={saved} readOnly={readOnly} onChange={setContent} onSave={save} />
+            )}
+          </Suspense>
         </div>
       )}
     </Modal>
