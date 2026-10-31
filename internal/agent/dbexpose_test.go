@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -71,9 +72,9 @@ func echoesOn(c net.Conn) error {
 func TestDBExpose(t *testing.T) {
 	dir := t.TempDir()
 	target := echoServer(t)
-	asked := 0
+	var asked atomic.Int32 // the forwarding goroutines call resolve
 	resolve := func(ctx context.Context, appID int64, service string, port int) (string, error) {
-		asked++
+		asked.Add(1)
 		if appID != 7 || service != "pg" || port != 5432 {
 			return "", errors.New("unknown database")
 		}
@@ -100,8 +101,8 @@ func TestDBExpose(t *testing.T) {
 	if err := echoes(port); err != nil {
 		t.Fatalf("forwarding: %v", err)
 	}
-	if err := echoes(port); err != nil || asked != 1 {
-		t.Fatalf("second connection: %v (target asked %d times)", err, asked)
+	if err := echoes(port); err != nil || asked.Load() != 1 {
+		t.Fatalf("second connection: %v (target asked %d times)", err, asked.Load())
 	}
 
 	// Connections from an address no longer allowed are closed, new ones
