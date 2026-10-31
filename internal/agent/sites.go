@@ -443,14 +443,18 @@ func (h hostPaths) scrub(err error) error {
 		return nil
 	}
 	msg := err.Error()
-	out := msg
+	if out := h.text(msg); out != msg {
+		return errors.New(out)
+	}
+	return err
+}
+
+// text rewrites the host directories in s (log output leaving the agent).
+func (h hostPaths) text(s string) string {
 	for _, p := range h {
-		out = p.re.ReplaceAllStringFunc(out, p.repl)
+		s = p.re.ReplaceAllStringFunc(s, p.repl)
 	}
-	if out == msg {
-		return err
-	}
-	return errors.New(out)
+	return s
 }
 
 func (m *sitesManager) addUpload(siteID int64, s *files.Site, u *files.Upload) string {

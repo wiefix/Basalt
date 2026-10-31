@@ -65,6 +65,22 @@ func AccessLogPath(dir, name string) string { return filepath.Join(dir, "logs", 
 // renewal, their errors) for the agent to report.
 func TLSLogPath(dir string) string { return filepath.Join(dir, "logs", "tls.log") }
 
+// OwnLogPath is the proxy's own log: everything Caddy reports (errors,
+// certificate issuance, configuration loads) except access logs.
+func OwnLogPath(dir string) string { return filepath.Join(dir, "logs", "proxy.log") }
+
+// ownLog is Caddy's default logger, written to OwnLogPath instead of
+// stderr so the agent can show it. The admin API's per-request lines stay
+// in (Caddy cannot drop them without its errors, such as a rejected
+// configuration); the agent skips them when reading.
+func ownLog(dir string) obj {
+	return obj{
+		"writer":  obj{"output": "file", "filename": OwnLogPath(dir), "roll_size_mb": 10, "roll_keep": 5, "roll_keep_days": 30},
+		"encoder": obj{"format": "json"},
+		"exclude": []any{"http.log.access"},
+	}
+}
+
 // Never served from static sites even if present in the site root. PHP
 // sources are hidden too: a site switched from PHP to static must not
 // expose its code (and the credentials in it) as plain text.
@@ -79,9 +95,9 @@ func adminConfig(dir string) obj {
 }
 
 // BaseConfig is what the proxy runs before the agent has delivered anything:
-// only the admin endpoint.
+// only the admin endpoint (and the proxy's own log).
 func BaseConfig(dir string) ([]byte, error) {
-	return json.Marshal(obj{"admin": adminConfig(dir)})
+	return json.Marshal(obj{"admin": adminConfig(dir), "logging": obj{"logs": obj{"default": ownLog(dir)}}})
 }
 
 // Build renders the Caddy JSON for d. It returns the config and a stable
@@ -96,8 +112,7 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 	filesystems := []any{}
 	loggerNames := obj{}
 	logs := obj{
-		// Everything but access logs goes where it always did (stderr).
-		"default": obj{"exclude": []any{"http.log.access"}},
+		"default": ownLog(o.Dir),
 		"tls": obj{
 			"writer":  obj{"output": "file", "filename": TLSLogPath(o.Dir), "roll_size_mb": 5, "roll_keep": 2},
 			"encoder": obj{"format": "json"},

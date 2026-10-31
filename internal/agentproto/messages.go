@@ -723,3 +723,21 @@ type AuditAnchorResponse struct {
 	At     time.Time   `json:"at,omitzero"` // when Before was given
 	Kept   bool        `json:"kept,omitempty"`
 }
+
+// TypeProxyLog returns the last lines of the proxy's own log (errors,
+// certificate issuance, configuration loads); TypeProxyLogFollow streams
+// LogChunk frames of it, the last lines first, until cancelled.
+const (
+	TypeProxyLog       = "proxy_log"
+	TypeProxyLogFollow = "proxy_log_follow"
+)
+
+type ProxyLogRequest struct {
+	Tail int `json:"tail"`
+	// Level is the lowest level shown: "" (all), "warn" or "error".
+	Level string `json:"level,omitempty"`
+}
+
+type ProxyLogResponse struct {
+	Log string `json:"log"`
+}

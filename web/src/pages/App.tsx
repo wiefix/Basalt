@@ -31,11 +31,11 @@ import {
   useConfirm,
   useToast,
 } from "../components/ui";
-import { useEventStream, type StreamState } from "../components/stream";
+import { useEventStream } from "../components/stream";
 import { Stat, SyncBadge } from "./Server";
 import { Chart, RangePicker, rangeRefresh, rangeTitle } from "../components/Chart";
 import { BackupsTab } from "./BackupsTab";
-import { LogView } from "../components/LogView";
+import { LogView, StreamBadge, trimLog } from "../components/LogView";
 import { AccessLogCard } from "../components/AccessLog";
 import { TemplateCard } from "./AppTemplate";
 import { MoveProjectCard, ProjectBadge, ServerLink, useAs } from "../components/projects";
@@ -424,22 +424,6 @@ function DeploymentModal({ appId, id, canCancel, onClose }: { appId: number; id:
       )}
     </Modal>
   );
-}
-
-const MAX_LOG_CHARS = 1_000_000;
-
-// Drop the oldest lines once the view holds too much text.
-function trimLog(t: string): string {
-  if (t.length <= MAX_LOG_CHARS) return t;
-  const cut = t.indexOf("\n", t.length - MAX_LOG_CHARS * 0.8);
-  return cut < 0 ? t.slice(-MAX_LOG_CHARS) : t.slice(cut + 1);
-}
-
-function StreamBadge({ state, ended }: { state: StreamState; ended: string | null }) {
-  if (ended !== null) return <span className="badge err" title={ended}>stopped</span>;
-  if (state === "open") return <span className="badge ok">live</span>;
-  if (state === "failed") return <span className="badge err">unavailable</span>;
-  return <span className="badge warn">connecting</span>;
 }
 
 function LogsTab({ app }: { app: App }) {

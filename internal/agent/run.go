@@ -673,6 +673,24 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 			return nil, err
 		}
 		return a.accessLog(req)
+	case agentproto.TypeProxyLog:
+		var req agentproto.ProxyLogRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.proxyLog(req)
+	case agentproto.TypeProxyLogFollow:
+		var req agentproto.ProxyLogRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		send := agentproto.StreamSender(ctx)
+		if send == nil {
+			return nil, errors.New("following logs needs a streaming request")
+		}
+		return struct{}{}, a.followProxyLog(ctx, req, func(s string) error {
+			return send(agentproto.LogChunk{Text: s})
+		})
 	case agentproto.TypeSiteManifest:
 		var req agentproto.SiteManifestRequest
 		if err := json.Unmarshal(payload, &req); err != nil {

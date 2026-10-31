@@ -231,6 +231,24 @@ func TestSitesAndFileManager(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(h.proxyDir, "logs", "site-"+sid+".log")); err != nil {
 		t.Fatalf("access log file: %v", err)
 	}
+	// The proxy's own log: the site's certificate, without host paths.
+	proxyLog := "/api/v1/servers/" + h.id + "/proxy-log"
+	eventually(t, "proxy log", func() bool {
+		log, _ := p.call(200, "GET", proxyLog+"?tail=1000", nil)["log"].(string)
+		if strings.Contains(log, h.proxyDir) {
+			t.Fatalf("proxy log has the proxy directory: %s", log)
+		}
+		return strings.Contains(log, "INFO tls.obtain: certificate obtained successfully identifier=blog.localhost")
+	})
+	if log := p.call(200, "GET", proxyLog+"?level=error", nil)["log"].(string); strings.Contains(log, " INFO ") {
+		t.Fatalf("errors only: %s", log)
+	}
+	p.call(http.StatusUnprocessableEntity, "GET", proxyLog+"?level=debug", nil)
+	ev, stop := p.events(proxyLog + "/stream?tail=5")
+	if first := waitEvent(t, ev, "log"); !strings.Contains(first.data, "Z INFO ") {
+		t.Fatalf("proxy log stream: %s", first.data)
+	}
+	stop()
 	if _, err := os.Stat(filepath.Join(h.sitesRoot, "escape.txt")); err == nil {
 		t.Fatal("zip entry escaped the site")
 	}

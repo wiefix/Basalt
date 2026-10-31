@@ -20,6 +20,8 @@ import {
 } from "../components/ui";
 import { EnrollInstructions } from "./Servers";
 import { ProjectSelect, useNewProject } from "../components/projects";
+import { LogView, StreamBadge, trimLog } from "../components/LogView";
+import { useEventStream } from "../components/stream";
 
 const UNINSTALL = "curl -fsSL https://github.com/wiefix/Basalt/releases/latest/download/install.sh | sudo sh -s -- uninstall";
 
@@ -230,6 +232,7 @@ export function ServerPage({ user }: { user: User }) {
           </div>
 
           {s.status === "online" && <CertificatesCard serverId={id} />}
+          {s.status === "online" && can(user, "admin") && <ProxyLogCard serverId={id} />}
           {s.status === "online" && can(user, "admin") && <SFTPBansCard serverId={id} />}
           {s.status === "online" && can(user, "admin") && <TrashCard server={s} />}
           <RoutesCard serverId={id} user={user} />
@@ -744,6 +747,82 @@ function CertificatesCard({ serverId }: { serverId: number }) {
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+// ProxyLogCard shows the proxy's own log: certificate issuance, errors,
+// configuration loads. Live following is opt-in so opening the page does
+// not hold a stream.
+function ProxyLogCard({ serverId }: { serverId: number }) {
+  const [level, setLevel] = useState("warn");
+  const [tail, setTail] = useState(200);
+  const [live, setLive] = useState(false);
+  const [text, setText] = useState("");
+  const [ended, setEnded] = useState<string | null>(null);
+  const snapshot = useQuery({
+    queryKey: ["proxy-log", serverId, tail, level],
+    queryFn: () => api.proxyLog(serverId, tail, level),
+    enabled: !live,
+    retry: false,
+  });
+  const state = useEventStream(live ? api.proxyLogStreamUrl(serverId, tail, level) : null, {
+    open: () => {
+      setText(""); // a (re)connected stream starts with the last lines again
+      setEnded(null);
+    },
+    log: (c: { text: string }) => setText((t) => trimLog(t + c.text)),
+    end: (d: { error?: string } | null) => setEnded(d?.error || "the stream ended"),
+  });
+  const empty = level ? "(no warnings or errors)" : "(empty)";
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div className="row">
+          <h2>Proxy log</h2>
+          {live && <StreamBadge state={state} ended={ended} />}
+        </div>
+        <div className="row">
+          <select className="input" style={{ width: "auto", height: 28 }} value={level} onChange={(e) => setLevel(e.target.value)}>
+            <option value="warn">warnings and errors</option>
+            <option value="error">errors only</option>
+            <option value="">everything</option>
+          </select>
+          <select className="input" style={{ width: "auto", height: 28 }} value={tail} onChange={(e) => setTail(Number(e.target.value))}>
+            {[100, 200, 1000, 5000].map((n) => (
+              <option key={n} value={n}>
+                last {n} lines
+              </option>
+            ))}
+          </select>
+          <label className="check small">
+            <input type="checkbox" checked={live} onChange={(e) => setLive(e.target.checked)} /> live
+          </label>
+          {!live && (
+            <button className="btn sm icon ghost" title="Refresh" onClick={() => snapshot.refetch()}>
+              <Icon name="refresh" size={14} />
+            </button>
+          )}
+        </div>
+      </div>
+      <div className="card-body">
+        <p className="muted small" style={{ marginTop: 0 }}>
+          What the proxy reports: certificate issuance and renewal, errors, configuration loads. Requests to each site and app
+          are on its Logs tab.
+        </p>
+        {live ? (
+          <>
+            {ended && <div className="alert err small" style={{ marginBottom: 12 }}>{ended}</div>}
+            <LogView text={text || (state === "open" ? empty : "Connecting…")} />
+          </>
+        ) : snapshot.isPending ? (
+          <Loading />
+        ) : snapshot.error ? (
+          <ErrorBox error={snapshot.error} />
+        ) : (
+          <LogView text={snapshot.data.log || empty} />
+        )}
+      </div>
     </div>
   );
 }

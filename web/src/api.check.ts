@@ -101,6 +101,7 @@ export const checks = [
   fits<Returns<A["applyUpdate"]>>()<G.PostUpdatesApplyResponse>(),
   fits<Returns<A["serverMetrics"]>>()<G.GetServersIdMetricsResponse>(),
   fits<Returns<A["serverCertificates"]>>()<G.GetServersIdCertificatesResponse>(),
+  fits<Returns<A["proxyLog"]>>()<G.GetServersIdProxyLogResponse>(),
   fits<Returns<A["setPublicIPs"]>>()<G.PutServersIdPublicIpsResponse>(),
   fits<Returns<A["pingServer"]>>()<G.PostServersIdPingResponse>(),
   fits<Returns<A["routes"]>>()<G.GetServersIdRoutesResponse>(),

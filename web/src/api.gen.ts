@@ -1962,6 +1962,10 @@ export type GetServersIdMetricsResponse = {
   metrics: MetricsView[];
 };
 
+export type GetServersIdProxyLogResponse = {
+  log: string;
+};
+
 export type GetServersIdRoutesResponse = {
   routes: RouteView[];
   sync: ProxySyncView;
