@@ -14,6 +14,12 @@ import (
 // cannot restrict who connects. The agent keeps the list on disk, so access
 // works while the panel is down. The list is complete: databases missing
 // from it stop listening.
+//
+// With TLS set, the agent also offers TLS on the ports, in each database's
+// own protocol (Protocol): PostgreSQL's SSLRequest or direct TLS, MySQL's
+// switch to TLS within the handshake, Redis's TLS from the first byte. The
+// agent ends the client's TLS itself, so the database containers need no
+// certificate; RequireTLS refuses clients that do not switch to TLS.
 const TypeDBExpose = "db_expose"
 
 // Limits on public database access.
@@ -27,7 +33,24 @@ const (
 
 type DBExposeApply struct {
 	Entries []DBExpose `json:"entries"`
+	// TLS is the certificate the agent presents to clients; without it
+	// connections are forwarded as they come.
+	TLS *DBExposeTLS `json:"tls,omitempty"`
 }
+
+// DBExposeTLS is a server certificate (chain first) and its key, PEM.
+type DBExposeTLS struct {
+	Cert string `json:"cert"`
+	Key  string `json:"key"`
+}
+
+// The protocols a public database speaks (DBExpose.Protocol): how the agent
+// offers TLS. Empty forwards connections as they come.
+const (
+	DBProtocolPostgres = "postgres"
+	DBProtocolMySQL    = "mysql" // MySQL and MariaDB
+	DBProtocolRedis    = "redis"
+)
 
 // DBExpose makes container port TargetPort of service Service of database
 // app AppID reachable on host port Port, from the addresses in Allow only.
@@ -37,6 +60,8 @@ type DBExpose struct {
 	TargetPort int      `json:"target_port"`
 	Port       int      `json:"port"`
 	Allow      []string `json:"allow"` // CIDR prefixes
+	Protocol   string   `json:"protocol,omitempty"`
+	RequireTLS bool     `json:"require_tls,omitempty"`
 }
 
 // DBExposeStatus is the outcome of one entry: Error is why the agent
@@ -98,6 +123,10 @@ func (e *DBExpose) Validate() error {
 		return errors.New("invalid database port")
 	case e.Port < MinDBExposePort || e.Port > 65535:
 		return fmt.Errorf("the public port must be between %d and 65535", MinDBExposePort)
+	case !slices.Contains([]string{"", DBProtocolPostgres, DBProtocolMySQL, DBProtocolRedis}, e.Protocol):
+		return fmt.Errorf("unknown database protocol %q", e.Protocol)
+	case e.RequireTLS && e.Protocol == "":
+		return errors.New("TLS needs the database's protocol")
 	}
 	_, err := ParseAllow(e.Allow)
 	return err
@@ -114,10 +143,16 @@ func (r *DBExposeApply) Validate() error {
 		if err := e.Validate(); err != nil {
 			return fmt.Errorf("database %d: %w", e.AppID, err)
 		}
+		if e.RequireTLS && r.TLS == nil {
+			return fmt.Errorf("database %d: TLS is required but there is no certificate", e.AppID)
+		}
 		if apps[e.AppID] || ports[e.Port] {
 			return fmt.Errorf("database %d or port %d is listed twice", e.AppID, e.Port)
 		}
 		apps[e.AppID], ports[e.Port] = true, true
+	}
+	if r.TLS != nil && (r.TLS.Cert == "" || r.TLS.Key == "") {
+		return errors.New("the TLS certificate or key is missing")
 	}
 	return nil
 }

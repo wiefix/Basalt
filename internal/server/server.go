@@ -590,6 +590,7 @@ func (s *Server) serve(ctx context.Context, ln net.Listener) error {
 	go s.WatchCertificates(ctx)
 	go s.WatchAuditLog(ctx)
 	go s.auditAnchorLoop(ctx)
+	go s.dbTLSLoop(ctx)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()

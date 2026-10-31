@@ -40,6 +40,8 @@ func TestDBExposeValidate(t *testing.T) {
 		"privileged":  func(e *DBExpose) { e.Port = 443 },
 		"port":        func(e *DBExpose) { e.Port = 70000 },
 		"empty allow": func(e *DBExpose) { e.Allow = nil },
+		"protocol":    func(e *DBExpose) { e.Protocol = "mongo" },
+		"tls raw":     func(e *DBExpose) { e.RequireTLS = true },
 	} {
 		e := ok
 		mod(&e)
@@ -58,5 +60,17 @@ func TestDBExposeValidate(t *testing.T) {
 	}
 	if err := (&DBExposeApply{Entries: []DBExpose{ok, ok}}).Validate(); err == nil {
 		t.Error("a database listed twice accepted")
+	}
+	tlsOnly := ok
+	tlsOnly.Protocol, tlsOnly.RequireTLS = DBProtocolPostgres, true
+	if err := (&DBExposeApply{Entries: []DBExpose{tlsOnly}}).Validate(); err == nil {
+		t.Error("TLS required without a certificate accepted")
+	}
+	cert := &DBExposeTLS{Cert: "c", Key: "k"}
+	if err := (&DBExposeApply{Entries: []DBExpose{tlsOnly}, TLS: cert}).Validate(); err != nil {
+		t.Error(err)
+	}
+	if err := (&DBExposeApply{TLS: &DBExposeTLS{Cert: "c"}}).Validate(); err == nil {
+		t.Error("a certificate without its key accepted")
 	}
 }

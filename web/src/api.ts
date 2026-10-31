@@ -460,6 +460,7 @@ export interface DatabaseConnection {
   url: string;
   env_var: string;
   credentials: { database?: string; user?: string; password: string; root_password?: string };
+  public_tls: boolean;
   public: DatabasePublicAccess | null;
 }
 
@@ -468,6 +469,8 @@ export interface DatabasePublicAccess {
   allow: string[];
   host: string;
   url: string;
+  require_tls: boolean;
+  ca_cert: string;
 }
 
 export interface BackupStorage {
@@ -1349,8 +1352,8 @@ export const api = {
   ) => post<{ app: App; sync: Sync; warnings: string[] }>("/api/v1/apps", b),
   databaseEngines: () => get<{ engines: Engine[] }>("/api/v1/database-engines"),
   databaseConnection: (id: number) => get<{ connection: DatabaseConnection }>(`/api/v1/apps/${id}/connection`),
-  setDatabasePublicAccess: (id: number, port: number, allow: string[]) =>
-    put<{ connection: DatabaseConnection; apply_error?: string }>(`/api/v1/apps/${id}/public-access`, { port, allow }),
+  setDatabasePublicAccess: (id: number, port: number, allow: string[], require_tls: boolean) =>
+    put<{ connection: DatabaseConnection; apply_error?: string }>(`/api/v1/apps/${id}/public-access`, { port, allow, require_tls }),
   databaseUpgradeInfo: (id: number) => get<DatabaseUpgradeInfo>(`/api/v1/apps/${id}/upgrade`),
   upgradeDatabase: (id: number, version: string, backup: boolean) =>
     post<{ upgrade: DatabaseUpgrade | null; deployment: Deployment | null }>(`/api/v1/apps/${id}/upgrade`, { version, backup }),

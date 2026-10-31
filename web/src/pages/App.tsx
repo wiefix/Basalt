@@ -11,6 +11,7 @@ import {
   type AppPlacement,
   type AppVolume,
   type DatabaseConnection,
+  type DatabasePublicAccess,
   type Deployment,
   type ServiceStatus,
   type User,
@@ -1810,9 +1811,12 @@ function PublicAccessCard({ app, conn }: { app: App; conn: DatabaseConnection })
   const [enabled, setEnabled] = useState(!!pub);
   const [port, setPort] = useState(String(pub?.port ?? conn.port));
   const [allow, setAllow] = useState((pub?.allow ?? []).join("\n"));
+  // New public access requires TLS where the database can take it.
+  const [requireTLS, setRequireTLS] = useState(pub ? pub.require_tls : conn.public_tls);
   const [applyError, setApplyError] = useState("");
   const save = useMutation({
-    mutationFn: (v: { port: number; allow: string[] }) => api.setDatabasePublicAccess(app.id, v.port, v.allow),
+    mutationFn: (v: { port: number; allow: string[]; requireTLS: boolean }) =>
+      api.setDatabasePublicAccess(app.id, v.port, v.allow, v.requireTLS),
     onSuccess: (r) => {
       qc.setQueryData(["db-connection", app.id], { connection: r.connection });
       setApplyError(r.apply_error ?? "");
@@ -1829,15 +1833,20 @@ function PublicAccessCard({ app, conn }: { app: App; conn: DatabaseConnection })
     e.preventDefault();
     if (!enabled) {
       if (pub && !(await confirm({ title: "Turn off public access?", body: <p>Connections from outside the server are closed.</p>, confirm: "Turn off" }))) return;
-      save.mutate({ port: 0, allow: [] });
+      save.mutate({ port: 0, allow: [], requireTLS: false });
       return;
     }
     if (open && !(await confirm({
       title: "Allow every address?",
-      body: <p>Anyone on the internet can try to sign in to the database, and the connection is not encrypted. Prefer the addresses of your own machines.</p>,
+      body: (
+        <p>
+          Anyone on the internet can try to sign in to the database{requireTLS ? "" : ", and clients may connect without encryption"}. Prefer
+          the addresses of your own machines.
+        </p>
+      ),
       confirm: "Allow every address",
     }))) return;
-    save.mutate({ port: Number(port), allow: list });
+    save.mutate({ port: Number(port), allow: list, requireTLS: conn.public_tls && requireTLS });
   };
   return (
     <form className="card card-body form" onSubmit={submit}>
@@ -1857,10 +1866,17 @@ function PublicAccessCard({ app, conn }: { app: App; conn: DatabaseConnection })
           <Field label="Allowed addresses" help="IP addresses or CIDR prefixes, one per line; 0.0.0.0/0 and ::/0 allow any address">
             <textarea className="input mono" rows={3} value={allow} onChange={(e) => setAllow(e.target.value)} placeholder="203.0.113.7" required />
           </Field>
-          <div className="alert warn small">
-            The connection between the client and the server is not encrypted{app.engine === "redis" ? "" : " by Basalt"}: allow only
-            addresses you trust, or reach the port through an SSH tunnel.
-          </div>
+          {conn.public_tls ? (
+            <label className="check">
+              <input type="checkbox" checked={requireTLS} onChange={(e) => setRequireTLS(e.target.checked)} /> Require TLS (refuse clients
+              that do not encrypt the connection)
+            </label>
+          ) : (
+            <div className="alert warn small">
+              MariaDB {app.version} has no TLS: the connection is not encrypted. Allow only addresses you trust, reach the port through an
+              SSH tunnel, or upgrade to MariaDB 11.4 or newer.
+            </div>
+          )}
         </>
       )}
       {pub &&
@@ -1873,6 +1889,7 @@ function PublicAccessCard({ app, conn }: { app: App; conn: DatabaseConnection })
             The server's public address is unknown: use it with port {pub.port}.
           </p>
         ))}
+      {pub && pub.ca_cert && <PublicTLSHelp app={app} conn={conn} pub={pub} />}
       {applyError && <div className="alert err small">{applyError}</div>}
       <div>
         <button className="btn" type="submit" disabled={save.isPending || (!enabled && !pub)}>
@@ -1880,6 +1897,47 @@ function PublicAccessCard({ app, conn }: { app: App; conn: DatabaseConnection })
         </button>
       </div>
     </form>
+  );
+}
+
+const caFile = "basalt-db-ca.pem";
+
+// PublicTLSHelp shows how clients check the server's certificate against
+// the panel's database CA.
+function PublicTLSHelp({ app, conn, pub }: { app: App; conn: DatabaseConnection; pub: DatabasePublicAccess }) {
+  const host = pub.host || "<server address>";
+  const c = conn.credentials;
+  const command =
+    app.engine === "postgres"
+      ? `psql "host=${host} port=${pub.port} dbname=${c.database} user=${c.user} sslmode=verify-full sslrootcert=${caFile}"`
+      : app.engine === "mysql"
+        ? `mysql -h ${host} -P ${pub.port} -u ${c.user} -p --ssl-mode=VERIFY_IDENTITY --ssl-ca=${caFile} ${c.database}`
+        : app.engine === "mariadb"
+          ? `mariadb -h ${host} -P ${pub.port} -u ${c.user} -p --ssl-ca=${caFile} --ssl-verify-server-cert ${c.database}`
+          : `redis-cli -h ${host} -p ${pub.port} --tls --cacert ${caFile} --askpass`;
+  const download = () => {
+    const url = URL.createObjectURL(new Blob([pub.ca_cert], { type: "application/x-pem-file" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = caFile;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <>
+      <p className="muted small" style={{ margin: 0 }}>
+        {pub.require_tls ? "Clients must use TLS." : "Clients can use TLS."} The server's certificate is issued by this panel's database CA
+        for the server's addresses: download the CA and have the client check the certificate against it.
+      </p>
+      <div>
+        <button className="btn" type="button" onClick={download}>
+          Download CA certificate
+        </button>
+      </div>
+      <Field label="Connect with TLS">
+        <CodeBox text={command} />
+      </Field>
+    </>
   );
 }
 

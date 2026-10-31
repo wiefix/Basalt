@@ -395,6 +395,7 @@ export interface ConnectionView {
   host: string;
   port: number;
   public: PublicAccessView | null;
+  public_tls: boolean;
   url: string;
 }
 
@@ -1130,12 +1131,15 @@ export interface ProxySyncView {
 export interface PublicAccessRequest {
   allow?: string[];
   port?: number;
+  require_tls?: boolean;
 }
 
 export interface PublicAccessView {
   allow: string[];
+  ca_cert: string;
   host: string;
   port: number;
+  require_tls: boolean;
   url: string;
 }
 

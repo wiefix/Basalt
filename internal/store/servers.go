@@ -363,3 +363,18 @@ func (db *DB) SetSettingIfAbsent(ctx context.Context, key, value string) error {
 	_, err := db.W.ExecContext(ctx, `INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)`, key, value)
 	return err
 }
+
+// DBTLS returns the certificate (DER) a server presents on its public
+// database ports and its key, sealed; both nil when none was issued.
+func (db *DB) DBTLS(ctx context.Context, serverID int64) (cert, sealedKey []byte, err error) {
+	err = db.R.QueryRowContext(ctx, `SELECT db_tls_cert, db_tls_key FROM servers WHERE id = ?`, serverID).Scan(&cert, &sealedKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil, ErrNotFound
+	}
+	return cert, sealedKey, err
+}
+
+// SetDBTLS stores a server's certificate for its public database ports.
+func (db *DB) SetDBTLS(ctx context.Context, serverID int64, cert, sealedKey []byte) error {
+	return db.execOne(ctx, `UPDATE servers SET db_tls_cert = ?, db_tls_key = ? WHERE id = ?`, cert, sealedKey, serverID)
+}

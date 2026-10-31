@@ -90,6 +90,23 @@ func (e *Engine) UpgradeTargets(from string) []string {
 // (agentproto.DBUpgrade) rather than the new version reading it in place.
 func (e *Engine) DumpUpgrade() bool { return e.ID == "postgres" }
 
+// Protocol is how the engine's clients start a connection
+// (agentproto.DBExpose.Protocol): MariaDB speaks MySQL's.
+func (e *Engine) Protocol() string {
+	if e.ID == "mariadb" {
+		return agentproto.DBProtocolMySQL
+	}
+	return e.ID
+}
+
+// TLS reports whether clients from outside the server can reach a
+// database of version over TLS (ended by the agent, agentproto.TypeDBExpose).
+// MySQL needs TLS in the container too, which the images set up with their
+// own certificates: MariaDB's from 11.4 only.
+func (e *Engine) TLS(version string) bool {
+	return e.ID != "mariadb" || version != "10.11"
+}
+
 // Image is the image reference of a version.
 func (e *Engine) Image(version string) string { return e.image + ":" + version + e.tag }
 

@@ -118,3 +118,17 @@ func TestUpgradeTargets(t *testing.T) {
 		t.Fatalf("mariadb upgrades its files at start: %v %v", svc.Env, err)
 	}
 }
+
+func TestProtocolAndTLS(t *testing.T) {
+	for _, e := range All() {
+		d := agentproto.DBExpose{AppID: 1, Service: "db", TargetPort: e.Port, Port: 15000, Allow: []string{"192.0.2.1"}, Protocol: e.Protocol()}
+		if err := d.Validate(); err != nil {
+			t.Errorf("%s: %v", e.ID, err)
+		}
+		for _, v := range e.Versions {
+			if want := e.ID != "mariadb" || v != "10.11"; e.TLS(v) != want {
+				t.Errorf("%s %s: TLS = %v", e.ID, v, !want)
+			}
+		}
+	}
+}

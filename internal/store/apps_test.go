@@ -245,17 +245,17 @@ func TestAppPublicAccess(t *testing.T) {
 	if a.PublicPort != 0 || a.PublicAllow == nil || len(a.PublicAllow) != 0 {
 		t.Fatalf("new database: %d %v", a.PublicPort, a.PublicAllow)
 	}
-	if err := db.SetAppPublicAccess(ctx, a.ID, 15432, []string{"192.0.2.0/24"}); err != nil {
+	if err := db.SetAppPublicAccess(ctx, a.ID, 15432, []string{"192.0.2.0/24"}, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetAppPublicAccess(ctx, b.ID, 15432, []string{"192.0.2.0/24"}); !errors.Is(err, ErrPublicPortTaken) {
+	if err := db.SetAppPublicAccess(ctx, b.ID, 15432, []string{"192.0.2.0/24"}, false); !errors.Is(err, ErrPublicPortTaken) {
 		t.Fatalf("same port on the same server: %v", err)
 	}
-	if err := db.SetAppPublicAccess(ctx, c.ID, 15432, []string{"::/0"}); err != nil {
+	if err := db.SetAppPublicAccess(ctx, c.ID, 15432, []string{"::/0"}, false); err != nil {
 		t.Fatalf("same port on another server: %v", err)
 	}
 	got, err := db.AppByID(ctx, a.ID)
-	if err != nil || got.PublicPort != 15432 || len(got.PublicAllow) != 1 || got.PublicAllow[0] != "192.0.2.0/24" {
+	if err != nil || got.PublicPort != 15432 || len(got.PublicAllow) != 1 || got.PublicAllow[0] != "192.0.2.0/24" || !got.PublicRequireTLS {
 		t.Fatalf("%v %+v", err, got)
 	}
 	list, err := db.PublicDatabases(ctx, srv.ID)
@@ -263,17 +263,28 @@ func TestAppPublicAccess(t *testing.T) {
 		t.Fatalf("public databases: %v %v", err, list)
 	}
 	// Private again: the port is free for another database.
-	if err := db.SetAppPublicAccess(ctx, a.ID, 0, []string{"192.0.2.0/24"}); err != nil {
+	if err := db.SetAppPublicAccess(ctx, a.ID, 0, []string{"192.0.2.0/24"}, true); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := db.AppByID(ctx, a.ID); got.PublicPort != 0 || len(got.PublicAllow) != 0 {
+	if got, _ := db.AppByID(ctx, a.ID); got.PublicPort != 0 || len(got.PublicAllow) != 0 || got.PublicRequireTLS {
 		t.Fatalf("private: %+v", got)
 	}
-	if err := db.SetAppPublicAccess(ctx, b.ID, 15432, []string{"192.0.2.1/32"}); err != nil {
+	if err := db.SetAppPublicAccess(ctx, b.ID, 15432, []string{"192.0.2.1/32"}, false); err != nil {
 		t.Fatal(err)
 	}
 	web, _ := db.CreateApp(ctx, srv.ID, "web", AppSettings{Image: "nginx:1.27", Port: 80}, []string{}, proxy.TLSAuto)
-	if err := db.SetAppPublicAccess(ctx, web.ID, 15433, []string{"192.0.2.1/32"}); !errors.Is(err, ErrNotFound) {
+	if err := db.SetAppPublicAccess(ctx, web.ID, 15433, []string{"192.0.2.1/32"}, false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("an app that is not a database: %v", err)
+	}
+
+	// The server's certificate for the public ports.
+	if cert, key, err := db.DBTLS(ctx, srv.ID); err != nil || cert != nil || key != nil {
+		t.Fatalf("no certificate yet: %v %v %v", cert, key, err)
+	}
+	if err := db.SetDBTLS(ctx, srv.ID, []byte("cert"), []byte("key")); err != nil {
+		t.Fatal(err)
+	}
+	if cert, key, err := db.DBTLS(ctx, srv.ID); err != nil || string(cert) != "cert" || string(key) != "key" {
+		t.Fatalf("certificate: %q %q %v", cert, key, err)
 	}
 }

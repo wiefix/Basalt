@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -223,6 +224,31 @@ func (p *PanelCertificates) GetCertificate(*tls.ClientHelloInfo) (*tls.Certifica
 		Leaf:        leaf,
 	}
 	return p.cert, nil
+}
+
+// IssueServer generates a key and a TLS server certificate for the given
+// addresses and names, valid for validity. Unlike the panel's own
+// certificates it is checked by ordinary clients (database clients verifying
+// a server against this CA), so the names are real ones.
+func (ca *CA) IssueServer(commonName string, ips []net.IP, names []string, now time.Time, validity time.Duration) (certDER []byte, key *ecdsa.PrivateKey, err error) {
+	if len(ips) == 0 && len(names) == 0 {
+		return nil, nil, errors.New("a server certificate needs an address or a name")
+	}
+	if key, err = NewKey(); err != nil {
+		return nil, nil, err
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: randomSerial(),
+		Subject:      pkix.Name{CommonName: commonName},
+		IPAddresses:  ips,
+		DNSNames:     names,
+		NotBefore:    now.Add(-clockSkewSlack),
+		NotAfter:     now.Add(validity),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	certDER, err = x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, &key.PublicKey, ca.key)
+	return certDER, key, err
 }
 
 // NewKey generates an agent private key.

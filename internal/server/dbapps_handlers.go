@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -103,6 +104,9 @@ type connectionView struct {
 	URL         string               `json:"url"`
 	EnvVar      string               `json:"env_var"`
 	Credentials dbengine.Credentials `json:"credentials"`
+	// PublicTLS reports whether clients outside the server can connect
+	// over TLS (not MariaDB 10.11).
+	PublicTLS bool `json:"public_tls"`
 	// Public is how clients outside the server connect; null when the
 	// database is reachable from linked apps only.
 	Public *publicAccessView `json:"public"`
@@ -115,6 +119,11 @@ type publicAccessView struct {
 	// connection URL with it.
 	Host string `json:"host"`
 	URL  string `json:"url"`
+	// RequireTLS reports whether clients must use TLS. CACert (PEM,
+	// with TLS) checks the server's certificate, which names its
+	// addresses.
+	RequireTLS bool   `json:"require_tls"`
+	CACert     string `json:"ca_cert"`
 }
 
 func (s *Server) connection(ctx context.Context, app *store.App) (connectionView, error) {
@@ -127,18 +136,43 @@ func (s *Server) connection(ctx context.Context, app *store.App) (connectionView
 		return connectionView{}, err
 	}
 	c := e.CredentialsFrom(env)
-	v := connectionView{Host: app.Name, Port: e.Port, URL: e.URL(app.Name, c), EnvVar: e.EnvVar, Credentials: c}
+	v := connectionView{Host: app.Name, Port: e.Port, URL: e.URL(app.Name, c), EnvVar: e.EnvVar, Credentials: c, PublicTLS: e.TLS(app.EngineVersion)}
 	if app.PublicPort > 0 {
-		pub := &publicAccessView{Port: app.PublicPort, Allow: app.PublicAllow}
+		pub := &publicAccessView{Port: app.PublicPort, Allow: app.PublicAllow, RequireTLS: app.PublicRequireTLS}
 		if srv, err := s.db.ServerByID(ctx, app.ServerID); err == nil {
 			pub.Host = serverHost(srv)
 		}
 		if pub.Host != "" {
 			pub.URL = e.URLPort(pub.Host, app.PublicPort, c)
+			if pub.RequireTLS {
+				pub.URL = tlsURL(pub.URL)
+			}
+		}
+		if v.PublicTLS {
+			if pub.CACert, err = s.dbCACert(ctx); err != nil {
+				return connectionView{}, err
+			}
 		}
 		v.Public = pub
 	}
 	return v, nil
+}
+
+// tlsURL asks for TLS in a connection URL, where URLs can: PostgreSQL's
+// sslmode (verify-full needs the CA's file, so the client's choice) and
+// Redis's rediss scheme. MySQL clients take it as an option instead.
+func tlsURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	switch u.Scheme {
+	case "postgres":
+		u.RawQuery = "sslmode=require"
+	case "redis":
+		u.Scheme = "rediss"
+	}
+	return u.String()
 }
 
 // serverHost is the address clients outside a server reach it at: its
@@ -169,6 +203,8 @@ type publicAccessRequest struct {
 	// Allow lists the addresses and CIDR prefixes that may connect
 	// (0.0.0.0/0 and ::/0 for any).
 	Allow []string `json:"allow"`
+	// RequireTLS refuses clients that do not switch to TLS.
+	RequireTLS bool `json:"require_tls"`
 }
 
 // reservedPublicPorts are Basalt's own ports, never given to a database.
@@ -209,8 +245,12 @@ func (s *Server) handleDatabasePublicAccess(w http.ResponseWriter, r *http.Reque
 		for _, p := range prefixes {
 			allow = append(allow, p.String())
 		}
+		if e, ok := dbengine.Get(app.Engine); req.RequireTLS && (!ok || !e.TLS(app.EngineVersion)) {
+			writeError(w, http.StatusUnprocessableEntity, "this database version has no TLS (MariaDB has it from 11.4: upgrade the database first)")
+			return
+		}
 	}
-	err := s.db.SetAppPublicAccess(r.Context(), app.ID, req.Port, allow)
+	err := s.db.SetAppPublicAccess(r.Context(), app.ID, req.Port, allow, req.RequireTLS)
 	switch {
 	case errors.Is(err, store.ErrPublicPortTaken):
 		writeError(w, http.StatusConflict, err.Error())
@@ -219,7 +259,8 @@ func (s *Server) handleDatabasePublicAccess(w http.ResponseWriter, r *http.Reque
 		s.internalError(w, r, "set public access", err)
 		return
 	}
-	s.audit(r, &p.user.ID, "database.public_access", map[string]any{"database_id": app.ID, "port": req.Port, "allow": allow})
+	s.audit(r, &p.user.ID, "database.public_access", map[string]any{"database_id": app.ID, "port": req.Port, "allow": allow,
+		"require_tls": req.RequireTLS && req.Port != 0})
 	resp := map[string]any{}
 	if errs, err := s.PushDBExpose(r.Context(), app.ServerID); err != nil {
 		var re *agentproto.RemoteError
@@ -254,12 +295,28 @@ func (s *Server) PushDBExpose(ctx context.Context, serverID int64) (map[int64]st
 		return nil, err // never send a partial list: the agent would close the others
 	}
 	req := agentproto.DBExposeApply{Entries: []agentproto.DBExpose{}}
+	if len(apps) > 0 {
+		srv, err := s.db.ServerByID(ctx, serverID)
+		if err != nil {
+			return nil, err
+		}
+		// Without a certificate the databases that require TLS stay closed,
+		// not open without it.
+		if req.TLS, err = s.serverDBTLS(ctx, srv); err != nil {
+			return nil, err
+		}
+	}
+	errs := map[int64]string{}
 	for _, a := range apps {
 		e, ok := dbengine.Get(a.Engine)
-		if !ok {
+		if a.PublicRequireTLS && req.TLS == nil {
+			errs[a.ID] = "TLS is required, but the server's address is not known yet for its certificate"
+		}
+		if !ok || errs[a.ID] != "" {
 			continue
 		}
-		req.Entries = append(req.Entries, agentproto.DBExpose{AppID: a.ID, Service: a.Name, TargetPort: e.Port, Port: a.PublicPort, Allow: a.PublicAllow})
+		req.Entries = append(req.Entries, agentproto.DBExpose{AppID: a.ID, Service: a.Name, TargetPort: e.Port, Port: a.PublicPort,
+			Allow: a.PublicAllow, Protocol: e.Protocol(), RequireTLS: a.PublicRequireTLS})
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -267,7 +324,6 @@ func (s *Server) PushDBExpose(ctx context.Context, serverID int64) (map[int64]st
 	if err := s.agents.Call(ctx, serverID, agentproto.TypeDBExpose, req, &resp); err != nil {
 		return nil, err
 	}
-	errs := map[int64]string{}
 	for _, st := range resp.Entries {
 		if st.Error != "" {
 			errs[st.AppID] = st.Error

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
@@ -50,6 +52,8 @@ type dbExposeManager struct {
 	listeners map[int64]*dbListener // by app
 	errs      map[int64]string      // why an entry does not listen
 	ctx       context.Context       // set by start; listeners stop with it
+
+	cert atomic.Pointer[tls.Certificate] // presented to clients; nil: no TLS
 }
 
 func newDBExposeManager(cfg Config, target dbTarget, log *slog.Logger) *dbExposeManager {
@@ -94,6 +98,9 @@ func (m *dbExposeManager) Apply(req agentproto.DBExposeApply) (agentproto.DBExpo
 	if err := req.Validate(); err != nil {
 		return agentproto.DBExposeResponse{}, err
 	}
+	if _, err := parseDBCert(req.TLS); err != nil {
+		return agentproto.DBExposeResponse{}, err
+	}
 	b, err := json.Marshal(req)
 	if err != nil {
 		return agentproto.DBExposeResponse{}, err
@@ -104,9 +111,27 @@ func (m *dbExposeManager) Apply(req agentproto.DBExposeApply) (agentproto.DBExpo
 	return m.apply(req), nil
 }
 
+// parseDBCert reads the certificate public databases present.
+func parseDBCert(t *agentproto.DBExposeTLS) (*tls.Certificate, error) {
+	if t == nil {
+		return nil, nil
+	}
+	c, err := tls.X509KeyPair([]byte(t.Cert), []byte(t.Key))
+	if err != nil {
+		return nil, fmt.Errorf("public database certificate: %w", err)
+	}
+	return &c, nil
+}
+
 func (m *dbExposeManager) apply(req agentproto.DBExposeApply) agentproto.DBExposeResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// New connections take the new certificate; open ones keep theirs.
+	cert, err := parseDBCert(req.TLS)
+	if err != nil { // only from a damaged state file: Apply checked it
+		m.log.Error("load public databases", "err", err)
+	}
+	m.cert.Store(cert)
 	want := map[int64]agentproto.DBExpose{}
 	for _, e := range req.Entries {
 		want[e.AppID] = e
@@ -149,7 +174,7 @@ func (m *dbExposeManager) listen(e agentproto.DBExpose, allow []netip.Prefix) (*
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
 	l := &dbListener{
-		log: m.log.With("app_id", e.AppID, "port", e.Port), ln: ln, target: m.target, ctx: ctx, cancel: cancel,
+		log: m.log.With("app_id", e.AppID, "port", e.Port), ln: ln, target: m.target, cert: &m.cert, ctx: ctx, cancel: cancel,
 		entry: e, allow: allow, conns: map[net.Conn]netip.Addr{}, perIP: map[netip.Addr]int{},
 	}
 	go l.serve()
@@ -161,6 +186,7 @@ type dbListener struct {
 	log    *slog.Logger
 	ln     net.Listener
 	target dbTarget
+	cert   *atomic.Pointer[tls.Certificate]
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -228,9 +254,17 @@ func (l *dbListener) handle(c net.Conn) {
 		return
 	}
 	defer l.release(c, ip)
-	up, err := l.dial()
+	l.mu.Lock()
+	e := l.entry
+	l.mu.Unlock()
+	cc, up, err := negotiate(e.Protocol, dbTLS{cert: l.cert.Load(), require: e.RequireTLS}, c, l.dial)
 	if err != nil {
-		l.log.Warn("public database: cannot reach the container", "err", err)
+		switch {
+		case errors.Is(err, errDial):
+			l.log.Warn("public database: cannot reach the container", "err", err)
+		case !errors.Is(err, errTLSRequired):
+			l.log.Debug("public database: connection start failed", "ip", ip, "err", err)
+		}
 		return
 	}
 	defer up.Close()
@@ -239,8 +273,8 @@ func (l *dbListener) handle(c net.Conn) {
 		io.Copy(dst, src)
 		done <- struct{}{}
 	}
-	go pipe(up, c)
-	go pipe(c, up)
+	go pipe(up, cc)
+	go pipe(cc, up)
 	// Either side closing ends the connection (database protocols do not
 	// half-close).
 	select {
@@ -278,8 +312,19 @@ func (l *dbListener) release(c net.Conn, ip netip.Addr) {
 	}
 }
 
+// errDial marks a failure to reach the database's container.
+var errDial = errors.New("cannot reach the container")
+
 // dial connects to the database's current container.
 func (l *dbListener) dial() (net.Conn, error) {
+	c, err := l.dialContainer()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errDial, err)
+	}
+	return c, nil
+}
+
+func (l *dbListener) dialContainer() (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(l.ctx, dbExposeDialTimeout)
 	defer cancel()
 	l.mu.Lock()

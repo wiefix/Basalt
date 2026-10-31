@@ -44,6 +44,8 @@ type App struct {
 	// outside it, from the addresses in PublicAllow (0: not public).
 	PublicPort  int
 	PublicAllow []string
+	// PublicRequireTLS refuses public clients that do not switch to TLS.
+	PublicRequireTLS bool
 
 	// Hostname is the mail server's host name (source "mail").
 	Hostname string
@@ -263,7 +265,7 @@ const appQuery = `SELECT a.id, a.server_id, a.project_id, a.name, a.source, a.im
 	a.compose, a.compose_summary, a.service, a.routes,
 	(SELECT COALESCE(json_group_array(json_array(x.service, x.domain)), '[]') FROM (SELECT service, domain FROM proxy_route_domains
 	 WHERE route_id = r.id AND service != '' ORDER BY service, domain) x), a.engine, a.engine_version, a.hostname, a.template, a.template_revision,
-	a.preview_domain, COALESCE(a.preview_of, 0), a.pr_number, a.forge_key_id, a.forge_hook_id, a.public_port, a.public_allow,
+	a.preview_domain, COALESCE(a.preview_of, 0), a.pr_number, a.forge_key_id, a.forge_hook_id, a.public_port, a.public_allow, a.public_require_tls,
 	(SELECT COALESCE(json_group_array(l.app_id), '[]') FROM (SELECT app_id FROM app_links WHERE database_id = a.id ORDER BY app_id) l),
 	(SELECT COALESCE(json_group_array(p.server_id), '[]') FROM (SELECT server_id FROM proxy_routes
 	 WHERE app_id = a.id AND server_id != a.server_id ORDER BY server_id) p),
@@ -281,7 +283,7 @@ func scanApps(rows *sql.Rows) ([]*App, error) {
 		if err := rows.Scan(&a.ID, &a.ServerID, &a.ProjectID, &a.Name, &a.Source, &a.Image, &a.Git.URL, &a.Git.Branch,
 			&a.Git.Dockerfile, &a.Git.Context, &a.Git.SourceID, &a.Git.Repo, &a.Git.Builder, &a.Git.ComposeFile, &buildEnv, &a.DeployKey, &a.DeployKeyPublic, &a.WebhookSecret, &a.AutoDeploy,
 			&a.ComposeSealed, &summary, &a.Service, &routes, &routeDomains, &a.Engine, &a.EngineVersion, &a.Hostname, &a.Template, &a.TemplateRevision,
-			&a.PreviewDomain, &a.PreviewOf, &a.PRNumber, &a.ForgeKeyID, &a.ForgeHookID, &a.PublicPort, &allow, &links, &replicas, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
+			&a.PreviewDomain, &a.PreviewOf, &a.PRNumber, &a.ForgeKeyID, &a.ForgeHookID, &a.PublicPort, &allow, &a.PublicRequireTLS, &links, &replicas, &a.Port, &a.EnvSealed, &vols, &a.MemoryMB, &a.CPUs, &a.ReadOnly, &created, &a.RouteID, &a.TLS, &domain); err != nil {
 			return nil, err
 		}
 		if n := len(out); n > 0 && out[n-1].ID == a.ID {
@@ -800,13 +802,15 @@ func (db *DB) SetAppEngineVersion(ctx context.Context, id int64, version, image 
 }
 
 // SetAppPublicAccess makes a database reachable from outside its server on
-// port, from the addresses in allow; port 0 makes it private again.
-func (db *DB) SetAppPublicAccess(ctx context.Context, id int64, port int, allow []string) error {
+// port, from the addresses in allow, with TLS only when requireTLS; port 0
+// makes it private again.
+func (db *DB) SetAppPublicAccess(ctx context.Context, id int64, port int, allow []string, requireTLS bool) error {
 	if allow == nil || port == 0 {
-		allow = []string{}
+		allow, requireTLS = []string{}, false
 	}
 	b, _ := json.Marshal(allow)
-	err := db.execOne(ctx, `UPDATE apps SET public_port = ?, public_allow = ? WHERE id = ? AND source = 'database'`, port, string(b), id)
+	err := db.execOne(ctx, `UPDATE apps SET public_port = ?, public_allow = ?, public_require_tls = ? WHERE id = ? AND source = 'database'`,
+		port, string(b), requireTLS, id)
 	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: apps.server_id, apps.public_port") {
 		return ErrPublicPortTaken
 	}

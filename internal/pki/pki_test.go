@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"net"
 	"testing"
 	"time"
 )
@@ -144,5 +145,33 @@ func TestStandbyIdentity(t *testing.T) {
 	}
 	if _, err := StandbyID(agCert); err == nil {
 		t.Fatal("an agent certificate passes for a standby's")
+	}
+}
+
+func TestIssueServer(t *testing.T) {
+	ca, _ := NewCA("db", now)
+	der, key, err := ca.IssueServer("server-3", []net.IP{net.ParseIP("203.0.113.5")}, nil, now, 365*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !key.PublicKey.Equal(cert.PublicKey) {
+		t.Fatal("key does not match the certificate")
+	}
+	opts := x509.VerifyOptions{Roots: ca.Pool(), CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	if _, err := cert.Verify(opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := cert.VerifyHostname("203.0.113.5"); err != nil {
+		t.Fatal(err)
+	}
+	if cert.VerifyHostname("203.0.113.6") == nil {
+		t.Fatal("verified for another address")
+	}
+	if _, _, err := ca.IssueServer("x", nil, nil, now, time.Hour); err == nil {
+		t.Fatal("issued a certificate without names")
 	}
 }

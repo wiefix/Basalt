@@ -2,6 +2,8 @@ package e2e
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net"
@@ -9,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -155,11 +159,41 @@ func TestDatabaseAppAPI(t *testing.T) {
 	if p.call(200, "GET", base+"/connection", nil)["connection"].(map[string]any)["public"] == nil {
 		t.Fatal("public access not in the connection")
 	}
+	// TLS is offered with the panel's database CA; required, the URL asks
+	// for it.
+	if pub["connection"].(map[string]any)["public_tls"] != true || pc["require_tls"] != false || !strings.Contains(pc["ca_cert"].(string), "BEGIN CERTIFICATE") {
+		t.Fatalf("public TLS = %v", pc)
+	}
+	pc = p.call(200, "PUT", base+"/public-access", map[string]any{"port": port, "allow": []string{"127.0.0.1"}, "require_tls": true})["connection"].(map[string]any)["public"].(map[string]any)
+	if pc["require_tls"] != true || !strings.HasSuffix(pc["url"].(string), "/pg?sslmode=require") {
+		t.Fatalf("TLS required = %v", pc)
+	}
+	// The agent takes the handshake with a certificate for its address.
+	tc, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc.SetDeadline(time.Now().Add(5 * time.Second))
+	tc.Write([]byte{0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f})
+	if b := make([]byte, 1); func() bool { _, err := io.ReadFull(tc, b); return err != nil || b[0] != 'S' }() {
+		t.Fatal("no TLS on the public port")
+	}
+	roots := x509.NewCertPool()
+	roots.AppendCertsFromPEM([]byte(pc["ca_cert"].(string)))
+	if err := tls.Client(tc, &tls.Config{RootCAs: roots, ServerName: "127.0.0.1"}).Handshake(); err != nil {
+		t.Fatalf("TLS handshake: %v", err)
+	}
+	tc.Close()
 	c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
 	if err != nil {
 		t.Fatalf("public port: %v", err)
 	}
 	c.Close()
+	// MariaDB 10.11 has no TLS to require.
+	old := p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{"server_id": sid, "name": "old", "source": "database",
+		"engine": "mariadb", "version": "10.11"})["app"].(map[string]any)
+	p.call(http.StatusUnprocessableEntity, "PUT", "/api/v1/apps/"+jsonID(old["id"])+"/public-access",
+		map[string]any{"port": freePort(t), "allow": []string{"127.0.0.1"}, "require_tls": true})
 	// The port is the server's: another database cannot take it.
 	p.call(http.StatusConflict, "PUT", "/api/v1/apps/"+jsonID(cache["id"])+"/public-access", map[string]any{"port": port, "allow": []string{"127.0.0.1"}})
 	priv := p.call(200, "PUT", base+"/public-access", map[string]any{"port": 0})
@@ -274,7 +308,9 @@ func TestDatabaseWithDocker(t *testing.T) {
 	url = newURL
 
 	// Public access forwards the port to the container for the allowed
-	// addresses: PostgreSQL answers an SSL request ("N": no TLS).
+	// addresses; the agent answers an SSL request ("S") and takes the
+	// handshake with its certificate, the container gets the startup
+	// message.
 	port := freePort(t)
 	pgAnswer := func() string {
 		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
@@ -293,12 +329,12 @@ func TestDatabaseWithDocker(t *testing.T) {
 	if r := p.call(200, "PUT", "/api/v1/apps/"+pg+"/public-access", map[string]any{"port": port, "allow": []string{"127.0.0.1"}}); r["apply_error"] != nil {
 		t.Fatalf("public access: %v", r["apply_error"])
 	}
-	if a := pgAnswer(); a != "N" {
+	if a := pgAnswer(); a != "S" {
 		t.Fatalf("postgres through the public port: %q", a)
 	}
 	// Not an allowed address: the connection is closed unanswered.
 	p.call(200, "PUT", "/api/v1/apps/"+pg+"/public-access", map[string]any{"port": port, "allow": []string{"192.0.2.0/24"}})
-	if a := pgAnswer(); a == "N" {
+	if a := pgAnswer(); a == "S" {
 		t.Fatal("postgres answers an address that is not allowed")
 	}
 	p.call(200, "PUT", "/api/v1/apps/"+pg+"/public-access", map[string]any{"port": port, "allow": []string{"127.0.0.1"}})
@@ -344,7 +380,7 @@ func TestDatabaseWithDocker(t *testing.T) {
 	if st := p.call(200, "GET", "/api/v1/apps/"+cache+"/status", nil)["status"].(map[string]any); st["state"] != "running" {
 		t.Fatalf("redis after the app was deleted: %v", st)
 	}
-	if a := pgAnswer(); a != "N" {
+	if a := pgAnswer(); a != "S" {
 		t.Fatalf("postgres through the public port after its redeployments: %q", a)
 	}
 	p.call(200, "DELETE", "/api/v1/apps/"+pg+"?volumes=1", nil)
@@ -425,6 +461,7 @@ func TestEveryEngineWithDocker(t *testing.T) {
 			if s := strings.TrimSpace(string(out)); err != nil || !strings.HasSuffix(s, "1") && s != "PONG" {
 				t.Fatalf("client: %v %s", err, s)
 			}
+			publicTLS(t, p, sock, base, engine, image, user, pw, db)
 			if engine != "redis" {
 				// A new password signs in; the old one no longer does.
 				nc := p.call(200, "POST", base+"/password", map[string]any{})["connection"].(map[string]any)
@@ -508,4 +545,77 @@ func dockerOut(t *testing.T, sock string, args ...string) string {
 		t.Logf("docker %v: %v %s", args, err, out)
 	}
 	return string(out)
+}
+
+// publicTLS opens a database to any address with TLS required and signs in
+// from outside the server with the client of its image, checking the
+// server's certificate against the panel's database CA; without TLS the
+// client is refused.
+func publicTLS(t *testing.T, p *panel, sock, base, engine, image, user, pw, db string) {
+	t.Helper()
+	port := freePort(t)
+	r := p.call(200, "PUT", base+"/public-access", map[string]any{"port": port, "allow": []string{"0.0.0.0/0", "::/0"}, "require_tls": true})
+	if r["apply_error"] != nil {
+		t.Fatalf("public access: %v", r["apply_error"])
+	}
+	t.Cleanup(func() { p.call(200, "PUT", base+"/public-access", map[string]any{"port": 0}) })
+	pub := r["connection"].(map[string]any)["public"].(map[string]any)
+	if r["connection"].(map[string]any)["public_tls"] != true || pub["require_tls"] != true || !strings.Contains(pub["ca_cert"].(string), "BEGIN CERTIFICATE") {
+		t.Fatalf("public = %v", pub)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ca.pem"), []byte(pub["ca_cert"].(string)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// On Linux the client shares the host's network and checks the name
+	// too (the certificate names 127.0.0.1); Docker Desktop reaches the
+	// host by a name the certificate cannot have.
+	network, host, verify := []string{"--network", "host"}, "127.0.0.1", true
+	if runtime.GOOS != "linux" {
+		network, host, verify = []string{"--add-host", "host.docker.internal:host-gateway"}, "host.docker.internal", false
+	}
+	P := strconv.Itoa(port)
+	var withTLS, plain []string
+	switch engine {
+	case "postgres":
+		mode := "verify-full"
+		if !verify {
+			mode = "verify-ca"
+		}
+		conn := fmt.Sprintf("host=%s port=%s user=%s dbname=%s password=%s", host, P, user, db, pw)
+		withTLS = []string{"psql", conn + " sslmode=" + mode + " sslrootcert=/ca/ca.pem", "-tAc", "SELECT 1"}
+		plain = []string{"psql", conn + " sslmode=disable", "-tAc", "SELECT 1"}
+	case "mysql":
+		mode := "VERIFY_IDENTITY"
+		if !verify {
+			mode = "VERIFY_CA"
+		}
+		args := []string{"mysql", "-h", host, "-P", P, "-u", user, "-p" + pw}
+		withTLS = append(slices.Clone(args), "--ssl-mode="+mode, "--ssl-ca=/ca/ca.pem", db, "-sNe", "SELECT 1")
+		plain = append(slices.Clone(args), "--ssl-mode=DISABLED", db, "-sNe", "SELECT 1")
+	case "mariadb":
+		// With a CA the client always checks the name too.
+		check := []string{"--ssl-ca=/ca/ca.pem", "--ssl-verify-server-cert"}
+		if !verify {
+			check = []string{"--ssl", "--skip-ssl-verify-server-cert"}
+		}
+		args := []string{"mariadb", "-h", host, "-P", P, "-u", user, "-p" + pw}
+		withTLS = append(append(slices.Clone(args), check...), db, "-sNe", "SELECT 1")
+		plain = append(slices.Clone(args), "--skip-ssl", db, "-sNe", "SELECT 1")
+	case "redis":
+		args := []string{"redis-cli", "-h", host, "-p", P, "-a", pw, "--no-auth-warning"}
+		withTLS = append(slices.Clone(args), "--tls", "--cacert", "/ca/ca.pem", "ping")
+		plain = append(slices.Clone(args), "ping")
+	}
+	client := func(args []string) (string, error) {
+		a := append([]string{"--host", "unix://" + sock, "run", "--rm", "-v", dir + ":/ca:ro"}, network...)
+		out, err := exec.Command("docker", append(append(a, image), args...)...).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	if out, err := client(withTLS); err != nil || !strings.HasSuffix(out, "1") && out != "PONG" {
+		t.Fatalf("client over TLS: %v %s", err, out)
+	}
+	if out, err := client(plain); err == nil && (strings.HasSuffix(out, "1") || out == "PONG") {
+		t.Fatalf("client without TLS signed in: %s", out)
+	}
 }

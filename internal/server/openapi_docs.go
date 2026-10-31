@@ -363,7 +363,7 @@ var apiDocs = map[string]apiDoc{
 	"POST /api/v1/webhooks/apps/{id}":  {summary: "Push (and, for GitLab and Gitea sources, merge or pull request) webhook from GitHub, GitLab or Gitea (authenticated by its signature)", resp: obj("result", "", "commit?", "")},
 	"GET /api/v1/database-engines":     {summary: "Database engines and versions", resp: obj("engines", []dbengine.Engine{})},
 	"GET /api/v1/apps/{id}/connection": {summary: "A database's connection details and credentials", resp: obj("connection", connectionView{})},
-	"PUT /api/v1/apps/{id}/public-access": {summary: "Make a database reachable from outside its server on a port, from the listed addresses only (port 0: linked apps only)",
+	"PUT /api/v1/apps/{id}/public-access": {summary: "Make a database reachable from outside its server on a port, from the listed addresses only, over TLS with the panel's database CA (optional or required; port 0: linked apps only)",
 		body: publicAccessRequest{}, resp: obj("connection", connectionView{}, "apply_error?", "")},
 	"GET /api/v1/apps/{id}/upgrade": {summary: "The major versions a database can be upgraded to, and an upgrade waiting for its backup", resp: dbUpgradeView{}},
 	"POST /api/v1/apps/{id}/upgrade": {summary: "Upgrade a database to a newer major version: a deployment of it (PostgreSQL's data is dumped into a new cluster), after a backup if asked; no rollback goes back to the older version",
