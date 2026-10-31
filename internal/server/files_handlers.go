@@ -61,8 +61,23 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request, p *prin
 	if !ok {
 		return
 	}
-	dir := r.URL.Query().Get("path")
-	resp, err := s.filesCall(r.Context(), site, agentproto.FilesRequest{Op: agentproto.FilesList, Path: dir}, fileOpTimeout)
+	qv := r.URL.Query()
+	dir := qv.Get("path")
+	limit := files.DefaultPage
+	if v := qv.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > files.MaxPage {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("limit must be between 1 and %d", files.MaxPage))
+			return
+		}
+		limit = n
+	}
+	cursor := qv.Get("cursor")
+	if len(cursor) > 4096 {
+		writeError(w, http.StatusBadRequest, "invalid cursor")
+		return
+	}
+	resp, err := s.filesCall(r.Context(), site, agentproto.FilesRequest{Op: agentproto.FilesList, Path: dir, Limit: limit, Cursor: cursor}, fileOpTimeout)
 	if err != nil {
 		writeAgentError(w, err)
 		return
@@ -72,7 +87,15 @@ func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request, p *prin
 	if entries == nil {
 		entries = []files.Entry{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"path": "/" + strings.TrimPrefix(clean, "."), "entries": entries})
+	total := resp.Total
+	if total < len(entries) {
+		total = len(entries) // an older agent returns the whole directory without a total
+	}
+	out := map[string]any{"path": "/" + strings.TrimPrefix(clean, "."), "entries": entries, "total": total}
+	if resp.Next != "" {
+		out["next"] = resp.Next
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleStatFile(w http.ResponseWriter, r *http.Request, p *principal) {

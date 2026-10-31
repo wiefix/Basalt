@@ -3,9 +3,11 @@ package files
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -240,6 +242,93 @@ func TestSymlinkStaysInSite(t *testing.T) {
 	} {
 		if err := s.Symlink(target, link); err == nil {
 			t.Errorf("link %s -> %q created", link, target)
+		}
+	}
+}
+
+func TestListPageLargeDirectory(t *testing.T) {
+	s, _ := setup(t)
+	dir := filepath.Join(s.root.Name(), "big")
+	os.Mkdir(dir, 0o755)
+	const n = 20000
+	for i := range n {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%05d.txt", i)), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Mkdir(filepath.Join(dir, "zz-dir"), 0o755)
+	os.WriteFile(filepath.Join(dir, uploadPrefix+"x"), nil, 0o644) // hidden, not counted
+
+	var names []string
+	pages := 0
+	for cursor := ""; ; pages++ {
+		pg, err := s.ListPage("/big", cursor, MaxPage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pg.Total != n+1 || len(pg.Entries) > MaxPage {
+			t.Fatalf("page %d: total %d, %d entries", pages, pg.Total, len(pg.Entries))
+		}
+		for _, e := range pg.Entries {
+			names = append(names, e.Name)
+		}
+		if pg.Next == "" {
+			break
+		}
+		cursor = pg.Next
+	}
+	if pages != n/MaxPage || len(names) != n+1 || names[0] != "zz-dir" || names[1] != "f00000.txt" || names[n] != fmt.Sprintf("f%05d.txt", n-1) {
+		t.Fatalf("%d pages, %d names: %v … %v", pages+1, len(names), names[:2], names[len(names)-1])
+	}
+	if !slices.IsSorted(names[1:]) {
+		t.Fatal("files not sorted")
+	}
+}
+
+func TestListPageCursor(t *testing.T) {
+	s, _ := setup(t)
+	dir := filepath.Join(s.root.Name(), "d")
+	os.Mkdir(dir, 0o755)
+	for _, n := range []string{"b", "a", "C", "e"} {
+		os.WriteFile(filepath.Join(dir, n), nil, 0o644)
+	}
+	os.Mkdir(filepath.Join(dir, "sub"), 0o755)
+	list := func(cursor string, limit int) ([]string, string) {
+		t.Helper()
+		pg, err := s.ListPage("/d", cursor, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, e := range pg.Entries {
+			names = append(names, e.Name)
+		}
+		return names, pg.Next
+	}
+	// Directories first, then names ignoring case.
+	got, next := list("", 3)
+	if !slices.Equal(got, []string{"sub", "a", "b"}) || next != "f/b" {
+		t.Fatalf("page 1 = %v, next %q", got, next)
+	}
+	// Changes between pages neither repeat nor skip entries after the cursor.
+	os.Remove(filepath.Join(dir, "b"))
+	os.Remove(filepath.Join(dir, "a"))
+	os.WriteFile(filepath.Join(dir, "0"), nil, 0o644)
+	os.WriteFile(filepath.Join(dir, "d"), nil, 0o644)
+	got, next = list(next, 2)
+	if !slices.Equal(got, []string{"C", "d"}) || next != "f/d" {
+		t.Fatalf("page 2 = %v, next %q", got, next)
+	}
+	if got, next = list(next, 3); !slices.Equal(got, []string{"e"}) || next != "" {
+		t.Fatalf("page 3 = %v, next %q", got, next)
+	}
+	// Names equal but for case (on case-sensitive file systems) keep one order.
+	if (dirKey{false, "b", "B"}).compare(dirKey{false, "b", "b"}) >= 0 {
+		t.Error("names equal ignoring case are not ordered")
+	}
+	for _, c := range []string{"x", "x/a", "d/", "/a"} {
+		if _, err := s.ListPage("/d", c, 3); err == nil {
+			t.Errorf("cursor %q accepted", c)
 		}
 	}
 }

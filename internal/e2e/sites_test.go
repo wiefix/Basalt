@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,31 @@ func TestSitesAndFileManager(t *testing.T) {
 		t.Fatalf("list = %v", list)
 	}
 	p.call(http.StatusConflict, "POST", base+"/mkdir", map[string]any{"path": "/public/css"})
+
+	// A large directory is listed a page at a time, following next.
+	for i := range 1200 {
+		os.WriteFile(filepath.Join(h.sitesRoot, sid, "tmp", fmt.Sprintf("f%04d", i)), nil, 0o644)
+	}
+	var seen []string
+	for cursor := ""; ; {
+		pg := p.call(200, "GET", base+q("/tmp")+"&limit=500&cursor="+url.QueryEscape(cursor), nil)
+		if pg["total"] != float64(1200) {
+			t.Fatalf("total = %v", pg["total"])
+		}
+		for _, e := range pg["entries"].([]any) {
+			seen = append(seen, e.(map[string]any)["name"].(string))
+		}
+		next, _ := pg["next"].(string)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(seen) != 1200 || seen[0] != "f0000" || seen[1199] != "f1199" || !slices.IsSorted(seen) {
+		t.Fatalf("paged %d entries: %v…", len(seen), seen[:min(len(seen), 3)])
+	}
+	p.call(http.StatusBadRequest, "GET", base+q("/tmp")+"&limit=5000", nil)
+	p.call(http.StatusUnprocessableEntity, "GET", base+q("/tmp")+"&cursor=bogus", nil)
 
 	// Upload a zip and extract it into the site.
 	var zbuf bytes.Buffer

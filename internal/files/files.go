@@ -20,8 +20,14 @@ import (
 const (
 	// MaxChunk bounds a single read or write over the agent channel.
 	MaxChunk = 1 << 20
-	// MaxEntries bounds a directory listing.
+	// MaxEntries bounds a directory listing taken whole (List).
 	MaxEntries = 10000
+	// MaxDirEntries bounds the directories ListPage pages through: all
+	// names are read and sorted to page them, so memory is the limit.
+	MaxDirEntries = 200000
+	// DefaultPage and MaxPage bound the entries of one ListPage.
+	DefaultPage = 500
+	MaxPage     = 2000
 
 	uploadPrefix = ".basalt-upload-"
 )
@@ -95,57 +101,140 @@ func Open(dir string) (*Site, error) {
 
 func (s *Site) Close() error { return s.root.Close() }
 
-// List returns the entries of a directory, directories first, then by name.
-// Upload temporaries are hidden.
+// List returns all entries of a small directory in ListPage's order;
+// more than MaxEntries is an error.
 func (s *Site) List(p string) ([]Entry, error) {
-	c, err := Clean(p)
+	pg, err := s.ListPage(p, "", MaxEntries)
 	if err != nil {
 		return nil, err
 	}
+	if pg.Total > MaxEntries {
+		return nil, fmt.Errorf("directory has more than %d entries", MaxEntries)
+	}
+	return pg.Entries, nil
+}
+
+// Page is one page of a directory listing. Next is the cursor of the
+// following page, empty on the last one.
+type Page struct {
+	Entries []Entry
+	Total   int
+	Next    string
+}
+
+// dirKey orders a listing: directories first, then by name ignoring case,
+// then by exact name, so the order is total and a cursor is unambiguous.
+type dirKey struct {
+	dir   bool
+	lower string
+	name  string
+}
+
+func (a dirKey) compare(b dirKey) int {
+	if a.dir != b.dir {
+		if a.dir {
+			return -1
+		}
+		return 1
+	}
+	if c := strings.Compare(a.lower, b.lower); c != 0 {
+		return c
+	}
+	return strings.Compare(a.name, b.name)
+}
+
+// cursor is "d/" or "f/" and the name: the sort key of the last entry
+// shown. Entries added or removed between pages do not shift the next one.
+func (k dirKey) cursor() string {
+	if k.dir {
+		return "d/" + k.name
+	}
+	return "f/" + k.name
+}
+
+func parseCursor(c string) (dirKey, error) {
+	kind, name, ok := strings.Cut(c, "/")
+	if !ok || (kind != "d" && kind != "f") || name == "" {
+		return dirKey{}, errors.New("invalid cursor")
+	}
+	return dirKey{dir: kind == "d", lower: strings.ToLower(name), name: name}, nil
+}
+
+// ListPage returns up to limit entries of a directory that follow cursor
+// ("" for the first page), directories first, then by name, and the
+// number of entries in it. Only the page's entries are stat'ed. Upload
+// temporaries are hidden.
+func (s *Site) ListPage(p, cursor string, limit int) (Page, error) {
+	if limit <= 0 {
+		limit = DefaultPage
+	}
+	limit = min(limit, MaxEntries)
+	var after *dirKey
+	if cursor != "" {
+		k, err := parseCursor(cursor)
+		if err != nil {
+			return Page{}, err
+		}
+		after = &k
+	}
+	c, err := Clean(p)
+	if err != nil {
+		return Page{}, err
+	}
 	d, err := s.root.Open(c)
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	defer d.Close()
 	fi, err := d.Stat()
 	if err != nil {
-		return nil, err
+		return Page{}, err
 	}
 	if !fi.IsDir() {
-		return nil, ErrNotDir
+		return Page{}, ErrNotDir
 	}
-	des, err := d.ReadDir(MaxEntries + 1)
+	des, err := d.ReadDir(MaxDirEntries + 1)
 	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+		return Page{}, err
 	}
-	if len(des) > MaxEntries {
-		return nil, fmt.Errorf("directory has more than %d entries", MaxEntries)
+	if len(des) > MaxDirEntries {
+		return Page{}, fmt.Errorf("directory has more than %d entries; use SFTP", MaxDirEntries)
 	}
-	out := make([]Entry, 0, len(des))
+	type item struct {
+		key dirKey
+		de  fs.DirEntry
+	}
+	items := make([]item, 0, len(des))
 	for _, de := range des {
 		if strings.HasPrefix(de.Name(), uploadPrefix) {
 			continue
 		}
-		fi, err := de.Info()
+		items = append(items, item{dirKey{de.IsDir(), strings.ToLower(de.Name()), de.Name()}, de})
+	}
+	slices.SortFunc(items, func(a, b item) int { return a.key.compare(b.key) })
+	i := 0
+	if after != nil {
+		i, _ = slices.BinarySearchFunc(items, *after, func(it item, k dirKey) int { return it.key.compare(k) })
+		if i < len(items) && items[i].key == *after {
+			i++
+		}
+	}
+	pg := Page{Entries: make([]Entry, 0, min(limit, len(items)-i)), Total: len(items)}
+	for ; i < len(items) && len(pg.Entries) < limit; i++ {
+		fi, err := items[i].de.Info()
 		if err != nil {
 			continue // removed meanwhile
 		}
-		e := entryFrom(de.Name(), fi)
+		e := entryFrom(items[i].key.name, fi)
 		if e.Type == "symlink" {
-			e.Target, _ = s.root.Readlink(path.Join(c, de.Name()))
+			e.Target, _ = s.root.Readlink(path.Join(c, e.Name))
 		}
-		out = append(out, e)
+		pg.Entries = append(pg.Entries, e)
 	}
-	slices.SortFunc(out, func(a, b Entry) int {
-		if (a.Type == "dir") != (b.Type == "dir") {
-			if a.Type == "dir" {
-				return -1
-			}
-			return 1
-		}
-		return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
-	})
-	return out, nil
+	if i < len(items) {
+		pg.Next = items[i-1].key.cursor()
+	}
+	return pg, nil
 }
 
 func (s *Site) Stat(p string) (Entry, error) {

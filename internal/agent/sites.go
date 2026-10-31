@@ -345,7 +345,9 @@ func (m *sitesManager) handleFiles(ctx context.Context, req agentproto.FilesRequ
 	resp := &agentproto.FilesResponse{}
 	switch req.Op {
 	case agentproto.FilesList:
-		resp.Entries, err = s.List(req.Path)
+		var pg files.Page
+		pg, err = s.ListPage(req.Path, req.Cursor, req.Limit)
+		resp.Entries, resp.Total, resp.Next = pg.Entries, pg.Total, pg.Next
 	case agentproto.FilesStat:
 		var e files.Entry
 		e, err = s.Stat(req.Path)
