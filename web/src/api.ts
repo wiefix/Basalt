@@ -150,6 +150,14 @@ export interface Site {
 
 // SitePlacement is a server serving a site; a replica's copy of the files
 // is refreshed from the primary every minute.
+// WordPress's admin account as made at install (the password is shown once).
+export interface WordPressAdmin {
+  user: string;
+  email: string;
+  password: string;
+  login_url: string;
+}
+
 export interface SitePlacement {
   server_id: number;
   primary: boolean;
@@ -1175,8 +1183,11 @@ export const api = {
   laravelProcesses: (id: number) => get<{ processes: LaravelProcess[] }>(`/api/v1/sites/${id}/laravel`),
   laravelLog: (id: number, lines = 200) => get<{ lines: LaravelLogLine[] }>(`/api/v1/sites/${id}/laravel/log?lines=${lines}`),
   restartLaravel: (id: number) => post<{ processes: LaravelProcess[] }>(`/api/v1/sites/${id}/laravel/restart`),
-  installSite: (id: number, app: "wordpress" | "laravel" | "symfony") =>
-    post<{ app: string; version: string; files: number; url?: string; database: Database }>(`/api/v1/sites/${id}/install`, { app }),
+  installSite: (id: number, app: "wordpress" | "laravel" | "symfony", wp?: { admin_user: string; admin_email?: string; title?: string }) =>
+    post<{ app: string; version: string; files: number; url?: string; database: Database; admin?: WordPressAdmin }>(
+      `/api/v1/sites/${id}/install`,
+      { app, ...wp },
+    ),
   siteAdminer: (id: number) => get<{ adminer: Adminer }>(`/api/v1/sites/${id}/adminer`),
   installAdminer: (id: number) => post<{ adminer: Adminer }>(`/api/v1/sites/${id}/adminer`),
   removeAdminer: (id: number) => del<{ adminer: Adminer }>(`/api/v1/sites/${id}/adminer`),

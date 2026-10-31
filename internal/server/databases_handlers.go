@@ -189,6 +189,21 @@ func (s *Server) handleDeleteDatabase(w http.ResponseWriter, r *http.Request, p 
 
 type siteInstallRequest struct {
 	App string `json:"app"` // wordpress, laravel, symfony
+	// WordPress: its admin account, made at install with a password the
+	// panel makes and shows once (admin_email: the user's own by default),
+	// and the site's title (the site's name by default).
+	AdminUser  string `json:"admin_user,omitempty"`
+	AdminEmail string `json:"admin_email,omitempty"`
+	Title      string `json:"title,omitempty"`
+}
+
+// wordpressAdmin is WordPress's admin account, as made at install: the
+// password is shown this once.
+type wordpressAdmin struct {
+	User     string `json:"user"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	LoginURL string `json:"login_url"`
 }
 
 // siteApps are the applications a site can get, with the suffix of their
@@ -226,6 +241,38 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 		writeError(w, http.StatusUnprocessableEntity, msg)
 		return
 	}
+	// The site's address: its first domain that is not a wildcard.
+	url := ""
+	for _, d := range site.Domains {
+		if !strings.HasPrefix(d, "*.") {
+			url = "https://" + d
+			break
+		}
+	}
+	var admin *wordpressAdmin
+	if req.App == agentproto.AppWordPress {
+		if req.AdminEmail == "" {
+			req.AdminEmail = p.user.Email
+		}
+		if req.Title == "" {
+			req.Title = site.Name
+		}
+		switch {
+		case url == "":
+			writeError(w, http.StatusUnprocessableEntity, "WordPress needs a domain that is not a wildcard (its address)")
+			return
+		case !agentproto.ValidWordPressUser(req.AdminUser):
+			writeError(w, http.StatusUnprocessableEntity, "admin_user: letters, digits, dots, dashes and underscores, up to 60")
+			return
+		case !agentproto.ValidEmail(req.AdminEmail):
+			writeError(w, http.StatusUnprocessableEntity, "admin_email: an email address is needed")
+			return
+		case !agentproto.ValidSiteTitle(req.Title):
+			writeError(w, http.StatusUnprocessableEntity, "title: one line, up to 200 bytes")
+			return
+		}
+		admin = &wordpressAdmin{User: req.AdminUser, Email: req.AdminEmail, Password: rand.Text(), LoginURL: url + "/wp-login.php"}
+	}
 	if v, _ := s.db.ServerMariaDB(r.Context(), site.ServerID); v == "" {
 		writeError(w, http.StatusUnprocessableEntity, app.name+" needs MariaDB, which is not installed on this server")
 		return
@@ -258,17 +305,17 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 		writeAgentError(w, err)
 		return
 	}
-	url := ""
-	if len(site.Domains) > 0 && !strings.HasPrefix(site.Domains[0], "*.") {
-		url = "https://" + site.Domains[0]
+	install := agentproto.SiteInstall{
+		SiteID: site.ID, App: req.App, DBName: d.Name, DBUser: d.Username, DBPassword: password,
+		PHPVersion: site.PHPVersion, URL: url,
+	}
+	if admin != nil {
+		install.Title, install.AdminUser, install.AdminEmail, install.AdminPassword = req.Title, admin.User, admin.Email, admin.Password
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
 	defer cancel()
 	var resp agentproto.SiteInstallResponse
-	err = s.agents.Stream(ctx, site.ServerID, agentproto.TypeSiteInstall, agentproto.SiteInstall{
-		SiteID: site.ID, App: req.App, DBName: d.Name, DBUser: d.Username, DBPassword: password,
-		PHPVersion: site.PHPVersion, URL: url,
-	}, &resp, func(json.RawMessage) error { return nil })
+	err = s.agents.Stream(ctx, site.ServerID, agentproto.TypeSiteInstall, install, &resp, func(json.RawMessage) error { return nil })
 	if err != nil {
 		// Nothing half-done stays: the new database goes again.
 		cleanup := context.WithoutCancel(r.Context())
@@ -278,7 +325,11 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 		writeAgentError(w, err)
 		return
 	}
-	s.audit(r, &p.user.ID, "site.app_installed", map[string]any{"site_id": site.ID, "app": req.App, "version": resp.Version, "database": d.Name})
+	ev := map[string]any{"site_id": site.ID, "app": req.App, "version": resp.Version, "database": d.Name}
+	if admin != nil {
+		ev["admin_user"] = admin.User
+	}
+	s.audit(r, &p.user.ID, "site.app_installed", ev)
 	if len(site.Replicas) > 0 {
 		// The copies reach the databases on the site's server (or no longer).
 		if err := s.ensureReplicas(r.Context(), site); err != nil {
@@ -287,8 +338,11 @@ func (s *Server) handleSiteInstall(w http.ResponseWriter, r *http.Request, p *pr
 		s.startDBReplication()
 	}
 	out := map[string]any{"app": req.App, "version": resp.Version, "files": resp.Files, "database": viewDatabase(d)}
-	if len(site.Domains) > 0 {
-		out["url"] = "https://" + site.Domains[0] + "/"
+	if url != "" {
+		out["url"] = url + "/"
+	}
+	if admin != nil {
+		out["admin"] = admin
 	}
 	writeJSON(w, http.StatusCreated, out)
 }

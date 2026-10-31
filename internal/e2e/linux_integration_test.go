@@ -5,13 +5,8 @@
 package e2e
 
 import (
-	"archive/tar"
-	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/sha1"
 	"crypto/tls"
-	"encoding/hex"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -19,7 +14,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/cookiejar"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"os/exec"
@@ -69,34 +63,11 @@ func TestLinuxIsolationAndPHP(t *testing.T) {
 		t.Fatal(err)
 	}
 	httpsPort := freePort(t)
-	// A WordPress-shaped archive whose front page connects to the database
-	// with the wp-config.php Basalt writes.
-	var wp bytes.Buffer
-	gz := gzip.NewWriter(&wp)
-	tw := tar.NewWriter(gz)
-	for name, body := range map[string]string{
-		"wordpress/index.php":       `<?php require __DIR__ . '/wp-config.php'; $m = new mysqli(DB_HOST, DB_USER, DB_PASSWORD, DB_NAME); echo $m->connect_errno ? "fail" : "wp-ok";`,
-		"wordpress/wp-settings.php": "<?php\n",
-	} {
-		tw.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(body))})
-		io.WriteString(tw, body)
-	}
-	tw.Close()
-	gz.Close()
-	wpSum := sha1.Sum(wp.Bytes())
-	wpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, ".sha1") {
-			io.WriteString(w, hex.EncodeToString(wpSum[:]))
-			return
-		}
-		w.Write(wp.Bytes())
-	}))
-	defer wpServer.Close()
 	a, err := agent.New(agent.Config{
 		DataDir: agentDir, ProxyDir: proxyDir, SitesRoot: sitesRoot,
 		HTTPPort: freePort(t), HTTPSPort: httpsPort, SFTPListen: "127.0.0.1:0",
 		Isolate: true, PHPRunDir: "/run/basalt-it/php", MySQLSocket: "/run/mysqld/mysqld.sock",
-		Restic: "restic", WordPressURL: wpServer.URL + "/latest.tar.gz",
+		Restic: "restic",
 	}, log)
 	if err != nil {
 		t.Fatal(err)
@@ -400,25 +371,77 @@ try {
 		t.Fatalf("download from the backup: %d %q", code, b)
 	}
 
-	// WordPress in one click: a new database, the files, a wp-config.php
-	// that connects as the site's database user.
+	// WordPress in one click, for real (wordpress.org, wp-cli): installed
+	// with its admin account before anyone can reach it, whose password
+	// logs in.
 	rw := p.call(http.StatusCreated, "POST", "/api/v1/sites", map[string]any{
 		"server_id": mustAtoi(sid), "name": "wp", "domains": []string{"wp.localhost"}, "tls": "internal", "php_version": phpVersion,
 	})
 	idW := jsonID(rw["site"].(map[string]any)["id"])
-	inst := p.call(http.StatusCreated, "POST", "/api/v1/sites/"+idW+"/install", map[string]any{"app": "wordpress"})
-	if inst["database"].(map[string]any)["name"] != "s"+idW+"_wp" {
+	p.call(http.StatusUnprocessableEntity, "POST", "/api/v1/sites/"+idW+"/install", map[string]any{"app": "wordpress"}) // no admin_user
+	inst := p.call(http.StatusCreated, "POST", "/api/v1/sites/"+idW+"/install", map[string]any{
+		"app": "wordpress", "admin_user": "editor", "admin_email": "editor@example.com", "title": "Basalt's blog",
+	})
+	admin, _ := inst["admin"].(map[string]any)
+	if inst["database"].(map[string]any)["name"] != "s"+idW+"_wp" || admin == nil || admin["user"] != "editor" ||
+		admin["login_url"] != "https://wp.localhost/wp-login.php" || len(admin["password"].(string)) < 20 {
 		t.Fatalf("install = %v", inst)
 	}
-	eventually(t, "WordPress connects to its database", func() bool {
-		_, body := get("wp.localhost", "/")
-		return body == "wp-ok"
-	})
+	t.Logf("WordPress %v, %v files", inst["version"], inst["files"])
+	if code, body := get("wp.localhost", "/"); code != 200 || !strings.Contains(body, "Basalt&#039;s blog") {
+		t.Fatalf("WordPress front page: %d %.300s", code, body)
+	}
+	if _, body := get("wp.localhost", "/wp-admin/install.php"); !strings.Contains(body, "already installed") {
+		t.Fatalf("WordPress's installer is open: %.300s", body)
+	}
+	if n := mysql("SELECT COUNT(*) FROM s" + idW + "_wp.wp_users WHERE user_login = 'editor' AND user_email = 'editor@example.com'"); n != "1" {
+		t.Fatalf("admin accounts: %s", n)
+	}
+	wpLogin := func(password string) bool {
+		hc := &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // proxy's internal CA
+				DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+					return (&net.Dialer{}).DialContext(ctx, network, "127.0.0.1:"+strconv.Itoa(httpsPort))
+				},
+			},
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
+		form := url.Values{"log": {"editor"}, "pwd": {password}, "testcookie": {"1"}}
+		req, _ := http.NewRequest("POST", "https://wp.localhost/wp-login.php", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.AddCookie(&http.Cookie{Name: "wordpress_test_cookie", Value: "WP%20Cookie%20check"})
+		resp, err := hc.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		for _, c := range resp.Cookies() {
+			if strings.HasPrefix(c.Name, "wordpress_logged_in_") && c.Value != "" {
+				return true
+			}
+		}
+		return false
+	}
+	if wpLogin("not-the-password") || !wpLogin(admin["password"].(string)) {
+		t.Fatal("the admin password the panel showed does not log in")
+	}
+	if code, _ := get("wp.localhost", "/hello-world/"); code != 200 {
+		t.Fatalf("pretty link: %d", code)
+	}
 	if fi, err := os.Stat(filepath.Join(sitesRoot, idW, "public", "wp-config.php")); err != nil || fi.Mode().Perm() != 0o600 ||
 		strconv.Itoa(int(fi.Sys().(*syscall.Stat_t).Uid)) != mustUID(t, "basalt-s"+idW) {
 		t.Fatalf("wp-config.php: %v %v", fi, err)
 	}
-	p.call(http.StatusUnprocessableEntity, "POST", "/api/v1/sites/"+idW+"/install", map[string]any{"app": "wordpress"})
+	if fi, err := os.Stat(filepath.Join(sitesRoot, idW, "public", "wp-includes", "version.php")); err != nil ||
+		strconv.Itoa(int(fi.Sys().(*syscall.Stat_t).Uid)) != mustUID(t, "basalt-s"+idW) {
+		t.Fatalf("WordPress's files are not the site user's: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(sitesRoot, idW, ".basalt-install")); !os.IsNotExist(err) {
+		t.Fatal("the install folder stayed")
+	}
+	p.call(http.StatusUnprocessableEntity, "POST", "/api/v1/sites/"+idW+"/install", map[string]any{"app": "wordpress", "admin_user": "editor"})
 	if dbs := p.call(200, "GET", "/api/v1/sites/"+idW+"/databases", nil)["databases"].([]any); len(dbs) != 1 {
 		t.Fatalf("a failed install left a database: %v", dbs)
 	}

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/wiefix/basalt/internal/dns"
 	"github.com/wiefix/basalt/internal/docker"
@@ -539,6 +541,32 @@ type SiteInstall struct {
 	// and the framework's commands) and the site's address (APP_URL).
 	PHPVersion string `json:"php_version,omitempty"`
 	URL        string `json:"url,omitempty"`
+	// WordPress: the site's title and its admin account, made at install
+	// (the site is never open to whoever comes first). The password is
+	// made by the panel, which shows it once.
+	Title         string `json:"title,omitempty"`
+	AdminUser     string `json:"admin_user,omitempty"`
+	AdminEmail    string `json:"admin_email,omitempty"`
+	AdminPassword string `json:"admin_password,omitempty"`
+}
+
+// ValidWordPressUser is a WordPress login Basalt accepts.
+var ValidWordPressUser = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,59}$`).MatchString
+
+// ValidEmail is a plain email address (no display name, no spaces).
+var ValidEmail = regexp.MustCompile(`^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9]([A-Za-z0-9.-]{0,252}[A-Za-z0-9])?\.[A-Za-z]{2,63}$`).MatchString
+
+// ValidSiteTitle is a title of one line, without control characters.
+func ValidSiteTitle(s string) bool {
+	if s == "" || len(s) > 200 || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 type SiteInstallResponse struct {

@@ -1259,7 +1259,10 @@ export interface SiteDomainsRequest {
 }
 
 export interface SiteInstallRequest {
+  admin_email?: string;
+  admin_user?: string;
   app?: string;
+  title?: string;
 }
 
 export interface SitePHPRequest {
@@ -1546,6 +1549,13 @@ export interface WitnessView {
   addr: string;
   name: string;
   server_id: number;
+}
+
+export interface WordpressAdmin {
+  email: string;
+  login_url: string;
+  password: string;
+  user: string;
 }
 
 // Responses and bodies of the routes.
@@ -2403,6 +2413,7 @@ export type PostSitesIdFilesOpResponse = {
 export type PostSitesIdFilesOpBody = FileOpRequest;
 
 export type PostSitesIdInstallResponse = {
+  admin?: WordpressAdmin;
   app: string;
   database: DatabaseView;
   files: number;

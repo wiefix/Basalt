@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router";
-import { api, type User } from "../api";
-import { ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useToast } from "../components/ui";
+import { api, type User, type WordPressAdmin } from "../api";
+import { CodeBox, ErrorBox, Field, Icon, Loading, Modal, errorMessage, formatBytes, formatDate, useToast } from "../components/ui";
 import { ProjectBadge, ProjectFilter, ProjectSelect, ServerLink, useCanCreate, useNewProject, useProjectFilter } from "../components/projects";
 
 export function SitesPage({ user }: { user: User }) {
@@ -108,6 +108,10 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
   const [domains, setDomains] = useState("");
   const [tls, setTls] = useState("auto");
   const [php, setPhp] = useState("");
+  const [adminUser, setAdminUser] = useState("");
+  const [adminEmail, setAdminEmail] = useState("");
+  // WordPress's admin account, shown once after the install.
+  const [installed, setInstalled] = useState<{ siteId: number; admin: WordPressAdmin } | null>(null);
   const [projectId, setProjectId] = useNewProject();
   const server = enrolled.find((s) => s.id === Number(serverId || enrolled[0]?.id));
   const phpVersions = server?.isolated ? server.php_versions : [];
@@ -116,6 +120,7 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
   const create = useMutation({
     mutationFn: async () => {
       const app = php === "wordpress" || php === "laravel" || php === "symfony" ? php : null;
+      let admin: WordPressAdmin | undefined;
       const r = await api.createSite({
         server_id: Number(serverId || enrolled[0]?.id),
         name: name.trim(),
@@ -125,27 +130,67 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
         project_id: projectId,
       });
       if (app) {
-        const name = app === "wordpress" ? "WordPress" : app === "laravel" ? "Laravel" : "Symfony";
+        const appName = app === "wordpress" ? "WordPress" : app === "laravel" ? "Laravel" : "Symfony";
         try {
-          const w = await api.installSite(r.site.id, app);
-          toast(
-            app === "wordpress"
-              ? `WordPress ${w.version} installed: open the site now to choose its admin account`
-              : app === "laravel"
+          const w = await api.installSite(
+            r.site.id,
+            app,
+            app === "wordpress" ? { admin_user: adminUser.trim(), admin_email: adminEmail.trim() || undefined, title: name.trim() } : undefined,
+          );
+          admin = w.admin;
+          if (app !== "wordpress") {
+            toast(
+              app === "laravel"
                 ? `Laravel ${w.version} installed, with its tables in database ${w.database.name}`
                 : `Symfony ${w.version} installed; DATABASE_URL in .env.local points at database ${w.database.name}`,
-          );
+            );
+          }
         } catch (e) {
-          toast(`The site was created, but ${name} was not installed: ${errorMessage(e)}`, true);
+          toast(`The site was created, but ${appName} was not installed: ${errorMessage(e)}`, true);
         }
       }
-      return r;
+      return { ...r, admin };
     },
     onSuccess: (r) => {
       qc.invalidateQueries({ queryKey: ["sites"] });
+      if (r.admin) {
+        setInstalled({ siteId: r.site.id, admin: r.admin });
+        return;
+      }
       navigate(`/sites/${r.site.id}`);
     },
   });
+
+  if (installed) {
+    const { admin } = installed;
+    return (
+      <Modal
+        title="WordPress installed"
+        onClose={() => navigate(`/sites/${installed.siteId}`)}
+        footer={
+          <button className="btn primary" onClick={() => navigate(`/sites/${installed.siteId}`)}>
+            Done
+          </button>
+        }
+      >
+        <div className="stack">
+          <div className="alert warn small">Copy the password now: it is not stored and will not be shown again.</div>
+          <Field label="Log in at">
+            <CodeBox text={admin.login_url} />
+          </Field>
+          <Field label="Username">
+            <CodeBox text={admin.user} />
+          </Field>
+          <Field label="Password">
+            <CodeBox text={admin.password} />
+          </Field>
+          <div className="help">
+            The admin's email is {admin.email}. Change the password in WordPress (Users → Profile) whenever you like.
+          </div>
+        </div>
+      </Modal>
+    );
+  }
 
   return (
     <Modal
@@ -222,10 +267,25 @@ function NewSiteModal({ onClose }: { onClose: () => void }) {
             </select>
           </Field>
           {php === "wordpress" && (
-            <div className="alert warn small">
-              WordPress is downloaded from wordpress.org with a new database. Open the site right after: whoever opens it
-              first chooses the admin account.
-            </div>
+            <>
+              <div className="alert small">
+                WordPress is downloaded from wordpress.org and installed with a new database and its admin account; you get the
+                account's password once, right after.
+              </div>
+              <Field label="Admin username" help="WordPress's first account. Avoid “admin”: bots try it first.">
+                <input
+                  className="input"
+                  value={adminUser}
+                  onChange={(e) => setAdminUser(e.target.value)}
+                  pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,59}"
+                  title="Letters, digits, dots, dashes and underscores"
+                  required
+                />
+              </Field>
+              <Field label="Admin email" help="Leave empty for your own account's email.">
+                <input className="input" type="email" value={adminEmail} onChange={(e) => setAdminEmail(e.target.value)} />
+              </Field>
+            </>
           )}
           {php === "laravel" && (
             <div className="alert small">

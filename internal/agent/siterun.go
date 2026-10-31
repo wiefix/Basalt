@@ -16,11 +16,12 @@ import (
 const maxRunOutput = 2000
 
 // runAsSite runs a program as the site's system user (with isolation; as
-// the agent otherwise) in dir, with nothing but env, in a session of its
-// own that goes whole when ctx ends.
-func (m *sitesManager) runAsSite(ctx context.Context, id int64, dir string, env []string, name string, args ...string) error {
+// the agent otherwise) in dir, with nothing but env and stdin, in a session
+// of its own that goes whole when ctx ends.
+func (m *sitesManager) runAsSite(ctx context.Context, id int64, dir string, env []string, stdin, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir, cmd.Env = dir, env
+	cmd.Stdin = strings.NewReader(stdin)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if m.isolate {
 		uid, gid, err := sysuser.LookupUser(sysuser.SiteUser(id))

@@ -159,7 +159,7 @@ var apiDocs = map[string]apiDoc{
 	"GET /api/v1/sites/{id}/laravel/log":      {summary: "The last lines a Laravel site's scheduler and queue workers wrote (?lines=, 1–1000, default 200), oldest first", resp: obj("lines", []php.LaravelLogLine{})},
 	"POST /api/v1/sites/{id}/laravel/restart": {summary: "Restart a Laravel site's scheduler and queue workers (after new code is deployed); workers finish their job first", resp: obj("processes", []php.LaravelProcess{})},
 	"POST /api/v1/sites/{id}/install": {summary: "Install WordPress, Laravel or Symfony into a PHP site's empty public folder, with a new database", body: siteInstallRequest{},
-		resp: obj("app", "", "version", "", "files", 0, "database", databaseView{}, "url?", "")},
+		resp: obj("app", "", "version", "", "files", 0, "database", databaseView{}, "url?", "", "admin?", wordpressAdmin{})},
 	"GET /api/v1/sites/{id}/adminer":    {summary: "Whether Adminer is installed in a site, and its address", resp: obj("adminer", adminerView{})},
 	"POST /api/v1/sites/{id}/adminer":   {summary: "Install Adminer in a PHP site (again: at a new address), for the server's MariaDB only", resp: obj("adminer", adminerView{})},
 	"DELETE /api/v1/sites/{id}/adminer": {summary: "Remove Adminer from a site", resp: obj("adminer", adminerView{})},

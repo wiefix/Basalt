@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -58,12 +59,35 @@ func (a *Agent) siteInstall(ctx context.Context, req agentproto.SiteInstall) (ag
 		return a.installComposerApp(ctx, req, site, len(entries) > 0, symfonyApp)
 	}
 
-	// Download and check the archive before any of it reaches the site.
+	return a.installWordPress(ctx, req, site, len(entries) > 0)
+}
+
+// installWordPress unpacks WordPress (checked against its published
+// checksum) in a folder of the site, writes its wp-config.php and has
+// wp-cli, as the site's user, make its tables and admin account. Only then
+// do its files move into public/: nobody ever finds WordPress's installer
+// open. A failure leaves the site as it was.
+func (a *Agent) installWordPress(ctx context.Context, req agentproto.SiteInstall, site *files.Site, placeholder bool) (agentproto.SiteInstallResponse, error) {
+	if a.sitePHP == nil && !slices.Contains(a.sites.PHPVersions(), req.PHPVersion) {
+		return agentproto.SiteInstallResponse{}, fmt.Errorf("PHP %q is not installed on this server", req.PHPVersion)
+	}
+	if !appURLRE.MatchString(req.URL) {
+		return agentproto.SiteInstallResponse{}, errors.New("invalid site address")
+	}
+	if !agentproto.ValidSiteTitle(req.Title) || !agentproto.ValidWordPressUser(req.AdminUser) || !agentproto.ValidEmail(req.AdminEmail) ||
+		len(req.AdminPassword) < 12 || len(req.AdminPassword) > 128 || strings.ContainsAny(req.AdminPassword, "\x00\r\n") {
+		return agentproto.SiteInstallResponse{}, errors.New("invalid WordPress admin account or title")
+	}
+	// Download and check everything before any of it reaches the site.
 	archive, err := a.downloadVerified(ctx, a.wordpressURLOr())
 	if err != nil {
 		return agentproto.SiteInstallResponse{}, err
 	}
 	defer os.Remove(archive)
+	wpCLI, err := a.downloadPinned(ctx, a.pinned(wpCLIPhar, a.wpCLI))
+	if err != nil {
+		return agentproto.SiteInstallResponse{}, fmt.Errorf("download wp-cli: %w", err)
+	}
 	f, err := os.Open(archive)
 	if err != nil {
 		return agentproto.SiteInstallResponse{}, err
@@ -73,12 +97,25 @@ func (a *Agent) siteInstall(ctx context.Context, req agentproto.SiteInstall) (ag
 	if err != nil {
 		return agentproto.SiteInstallResponse{}, fmt.Errorf("read the WordPress archive: %w", err)
 	}
-	if len(entries) > 0 {
-		if err := site.Delete("/public/index.html"); err != nil {
-			return agentproto.SiteInstallResponse{}, err
-		}
+	dir, err := a.sites.dir(req.SiteID)
+	if err != nil {
+		return agentproto.SiteInstallResponse{}, err
 	}
-	res, err := site.ExtractTarStrip(gz, "/public", "wordpress/", appLimits)
+	stage, err := newStage(site)
+	if err != nil {
+		return agentproto.SiteInstallResponse{}, err
+	}
+	done := false
+	defer func() {
+		if !done {
+			site.Delete(stage)
+		}
+	}()
+	wp := stage + "/wordpress"
+	if err := site.Mkdir(wp); err != nil {
+		return agentproto.SiteInstallResponse{}, err
+	}
+	res, err := site.ExtractTarStrip(gz, wp, "wordpress/", appLimits)
 	if err != nil {
 		return agentproto.SiteInstallResponse{}, fmt.Errorf("unpack WordPress: %w", err)
 	}
@@ -89,13 +126,59 @@ func (a *Agent) siteInstall(ctx context.Context, req agentproto.SiteInstall) (ag
 	if err != nil {
 		return agentproto.SiteInstallResponse{}, err
 	}
-	if err := site.WriteFile("/public/wp-config.php", cfg); err != nil {
+	if err := site.WriteFile(wp+"/wp-config.php", cfg); err != nil {
 		return agentproto.SiteInstallResponse{}, err
 	}
 	// Only PHP (the site's user) reads the database password.
-	if err := site.Chmod("/public/wp-config.php", 0o600); err != nil {
+	if err := site.Chmod(wp+"/wp-config.php", 0o600); err != nil {
 		return agentproto.SiteInstallResponse{}, err
 	}
+	if err := copyIntoSite(site, stage+"/wp-cli.phar", wpCLI); err != nil {
+		return agentproto.SiteInstallResponse{}, err
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, laravelTimeout)
+	defer cancel()
+	hostStage := filepath.Join(dir, installStage)
+	env := []string{
+		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"HOME=" + filepath.Join(dir, "tmp"),
+		"TMPDIR=" + filepath.Join(dir, "tmp"),
+		"WP_CLI_CACHE_DIR=" + filepath.Join(hostStage, "cache"),
+		"LANG=C.UTF-8",
+	}
+	wpRun := func(stdin string, args ...string) error {
+		return a.runSitePHP(ctx, req.SiteID, req.PHPVersion, hostStage, env,
+			append([]string{"-d", "open_basedir=" + dir + "/:/dev/null", "-d", "memory_limit=512M",
+				filepath.Join(hostStage, "wp-cli.phar"), "--path=" + filepath.Join(hostStage, "wordpress")}, args...), stdin)
+	}
+	// The password goes on standard input: a command line is anyone's to
+	// read on the server.
+	if err := wpRun(req.AdminPassword+"\n", "core", "install", "--url="+req.URL, "--title="+req.Title,
+		"--admin_user="+req.AdminUser, "--admin_email="+req.AdminEmail, "--skip-email", "--prompt=admin_password"); err != nil {
+		return agentproto.SiteInstallResponse{}, fmt.Errorf("wp core install: %w", err)
+	}
+	// Pretty links: the proxy sends any path that is not a file to index.php.
+	if err := wpRun("", "rewrite", "structure", "/%postname%/"); err != nil {
+		return agentproto.SiteInstallResponse{}, fmt.Errorf("wp rewrite structure: %w", err)
+	}
+
+	top, err := site.List(wp)
+	if err != nil {
+		return agentproto.SiteInstallResponse{}, err
+	}
+	if placeholder {
+		if err := site.Delete("/public/index.html"); err != nil {
+			return agentproto.SiteInstallResponse{}, err
+		}
+	}
+	for _, e := range top {
+		if err := site.Rename(wp+"/"+e.Name, "/public/"+e.Name); err != nil {
+			return agentproto.SiteInstallResponse{}, err
+		}
+	}
+	done = true
+	site.Delete(stage)
 	version := ""
 	if b, _, err := site.Read("/public/wp-includes/version.php", 0, 4096); err == nil {
 		version = phpStringVar(string(b), "$wp_version")

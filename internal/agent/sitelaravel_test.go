@@ -44,7 +44,7 @@ func testSiteAgent(t *testing.T, siteID int64) (*Agent, string) {
 // fakeComposer acts out composer create-project and artisan; fail makes
 // the named step fail.
 func fakeComposer(t *testing.T, calls *[]string, fail string) sitePHPRunner {
-	return func(ctx context.Context, siteID int64, version, dir string, env, args []string) error {
+	return func(ctx context.Context, siteID int64, version, dir string, env, args []string, _ string) error {
 		if version != "8.4" || !strings.HasPrefix(args[1], "open_basedir=") || !slices.Contains(env, "COMPOSER_NO_INTERACTION=1") {
 			t.Errorf("php %s %v %v", version, args, env)
 		}
@@ -122,7 +122,7 @@ func TestSiteInstallLaravel(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(site, "artisan")); !os.IsNotExist(err) {
 		t.Fatal("files moved despite the taken name")
 	}
-	if _, err := os.Stat(filepath.Join(site, laravelStage)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(site, installStage)); !os.IsNotExist(err) {
 		t.Fatal("stage left")
 	}
 	os.Remove(filepath.Join(site, "vendor"))
@@ -143,7 +143,7 @@ func TestSiteInstallLaravel(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(site, "storage/app/public/.gitignore")); err != nil {
 		t.Errorf("public disk through the link: %v", err)
 	}
-	for _, p := range []string{"public/index.html", "public/public", laravelStage} {
+	for _, p := range []string{"public/index.html", "public/public", installStage} {
 		if _, err := os.Stat(filepath.Join(site, p)); !os.IsNotExist(err) {
 			t.Errorf("%s exists", p)
 		}
@@ -255,7 +255,7 @@ func TestSiteInstallSymfony(t *testing.T) {
 	a.composer = pinnedServer(t, "composer-test.phar", []byte("<?php // composer"), "")
 	var calls []string
 	flex := true
-	a.sitePHP = func(ctx context.Context, siteID int64, version, dir string, env, args []string) error {
+	a.sitePHP = func(ctx context.Context, siteID int64, version, dir string, env, args []string, _ string) error {
 		args = args[4:]
 		calls = append(calls, strings.Join(args[1:min(len(args), 3)], " "))
 		if args[1] == "create-project" {

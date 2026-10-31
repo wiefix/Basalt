@@ -36,6 +36,11 @@ var (
 		URL:    "https://getcomposer.org/download/2.10.3/composer.phar",
 		SHA256: "7a2d379d5b8ffdaa028580ef26494c36d2feef4b178d3dd1473a4dbc5e17c8d6",
 	}
+	wpCLIPhar = pinnedFile{
+		Name:   "wp-cli-2.12.0.phar",
+		URL:    "https://github.com/wp-cli/wp-cli/releases/download/v2.12.0/wp-cli-2.12.0.phar",
+		SHA256: "ce34ddd838f7351d6759068d09793f26755463b4a4610a5a5c0a97b68220d85c",
+	}
 	adminerPHP = pinnedFile{
 		Name:   "adminer-6.1.2-mysql-en.php",
 		URL:    "https://github.com/vrana/adminer/releases/download/v6.1.2/adminer-6.1.2-mysql-en.php",
@@ -46,20 +51,20 @@ var (
 const (
 	maxPinned      = 20 << 20
 	laravelTimeout = 12 * time.Minute
-	// laravelStage is the folder, in the site's own folder, Laravel is
-	// put together in before its files take their places.
-	laravelStage = ".basalt-install"
+	// installStage is the folder, in the site's own folder, an
+	// application is put together in before its files take their places.
+	installStage = ".basalt-install"
 )
 
 // sitePHPRunner runs the site's PHP CLI (php<version> args...) as the
-// site's user in dir.
-type sitePHPRunner func(ctx context.Context, siteID int64, version, dir string, env, args []string) error
+// site's user in dir, with stdin as its standard input.
+type sitePHPRunner func(ctx context.Context, siteID int64, version, dir string, env, args []string, stdin string) error
 
-func (a *Agent) runSitePHP(ctx context.Context, siteID int64, version, dir string, env, args []string) error {
+func (a *Agent) runSitePHP(ctx context.Context, siteID int64, version, dir string, env, args []string, stdin string) error {
 	if a.sitePHP != nil {
-		return a.sitePHP(ctx, siteID, version, dir, env, args)
+		return a.sitePHP(ctx, siteID, version, dir, env, args, stdin)
 	}
-	return a.sites.runAsSite(ctx, siteID, dir, env, "/usr/bin/php"+version, args...)
+	return a.sites.runAsSite(ctx, siteID, dir, env, stdin, "/usr/bin/php"+version, args...)
 }
 
 var appURLRE = regexp.MustCompile(`^https?://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$`)
@@ -102,13 +107,6 @@ func (a *Agent) installComposerApp(ctx context.Context, req agentproto.SiteInsta
 	if !appURLRE.MatchString(req.URL) {
 		return agentproto.SiteInstallResponse{}, errors.New("invalid site address")
 	}
-	// The project's top-level names must be free (logs/ and tmp/ are the
-	// site's; a stage left by an agent that stopped midway goes).
-	if _, err := site.Stat("/" + laravelStage); err == nil {
-		if err := site.Delete("/" + laravelStage); err != nil {
-			return agentproto.SiteInstallResponse{}, err
-		}
-	}
 	phar, err := a.downloadPinned(ctx, a.pinned(composerPhar, a.composer))
 	if err != nil {
 		return agentproto.SiteInstallResponse{}, fmt.Errorf("download Composer: %w", err)
@@ -117,8 +115,8 @@ func (a *Agent) installComposerApp(ctx context.Context, req agentproto.SiteInsta
 	if err != nil {
 		return agentproto.SiteInstallResponse{}, err
 	}
-	stage := "/" + laravelStage
-	if err := site.Mkdir(stage); err != nil {
+	stage, err := newStage(site)
+	if err != nil {
 		return agentproto.SiteInstallResponse{}, err
 	}
 	done := false
@@ -133,7 +131,7 @@ func (a *Agent) installComposerApp(ctx context.Context, req agentproto.SiteInsta
 
 	ctx, cancel := context.WithTimeout(ctx, laravelTimeout)
 	defer cancel()
-	hostStage := filepath.Join(dir, laravelStage)
+	hostStage := filepath.Join(dir, installStage)
 	env := []string{
 		"PATH=/usr/local/bin:/usr/bin:/bin",
 		"HOME=" + filepath.Join(dir, "tmp"),
@@ -147,7 +145,7 @@ func (a *Agent) installComposerApp(ctx context.Context, req agentproto.SiteInsta
 	// with /dev/null, which Composer reads.
 	php := func(wd string, args ...string) error {
 		return a.runSitePHP(ctx, req.SiteID, req.PHPVersion, wd, env,
-			append([]string{"-d", "open_basedir=" + dir + "/:/dev/null", "-d", "memory_limit=1G"}, args...))
+			append([]string{"-d", "open_basedir=" + dir + "/:/dev/null", "-d", "memory_limit=1G"}, args...), "")
 	}
 	args := []string{filepath.Join(hostStage, "composer.phar"), "create-project", "--no-dev", "--no-progress", "--prefer-dist", "--no-interaction"}
 	if !c.scripts {
@@ -162,8 +160,8 @@ func (a *Agent) installComposerApp(ctx context.Context, req agentproto.SiteInsta
 	}
 
 	count := 0
-	if err := site.Walk(func(p string, _ bool) bool { return !strings.HasPrefix(p+"/", laravelStage+"/") }, func(e files.WalkEntry) error {
-		if strings.HasPrefix(e.Path, laravelStage+"/app/") && !e.Dir {
+	if err := site.Walk(func(p string, _ bool) bool { return !strings.HasPrefix(p+"/", installStage+"/") }, func(e files.WalkEntry) error {
+		if strings.HasPrefix(e.Path, installStage+"/app/") && !e.Dir {
 			count++
 		}
 		return nil
@@ -180,6 +178,18 @@ func (a *Agent) installComposerApp(ctx context.Context, req agentproto.SiteInsta
 		version = phpStringVar(string(b), "const VERSION")
 	}
 	return agentproto.SiteInstallResponse{Version: version, Files: count}, nil
+}
+
+// newStage makes the folder an application is put together in (one left
+// by an agent that stopped midway goes first).
+func newStage(site *files.Site) (string, error) {
+	stage := "/" + installStage
+	if _, err := site.Stat(stage); err == nil {
+		if err := site.Delete(stage); err != nil {
+			return "", err
+		}
+	}
+	return stage, site.Mkdir(stage)
 }
 
 // setupLaravel writes Laravel's .env (MariaDB, a fresh key) and creates

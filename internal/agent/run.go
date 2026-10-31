@@ -153,8 +153,8 @@ type Agent struct {
 	updater         *updater
 	wordpressURL    string
 	// Tests replace the pinned downloads and the site's PHP CLI.
-	composer, adminer pinnedFile
-	sitePHP           sitePHPRunner
+	composer, adminer, wpCLI pinnedFile
+	sitePHP                  sitePHPRunner
 }
 
 func New(cfg Config, log *slog.Logger) (*Agent, error) {
