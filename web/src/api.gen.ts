@@ -394,6 +394,7 @@ export interface ConnectionView {
   env_var: string;
   host: string;
   port: number;
+  public: PublicAccessView | null;
   url: string;
 }
 
@@ -1124,6 +1125,18 @@ export interface ProxySyncView {
   error?: string;
   in_sync: boolean;
   revision: number;
+}
+
+export interface PublicAccessRequest {
+  allow?: string[];
+  port?: number;
+}
+
+export interface PublicAccessView {
+  allow: string[];
+  host: string;
+  port: number;
+  url: string;
 }
 
 export interface PublicIPsRequest {
@@ -2565,6 +2578,13 @@ export type PutAppsIdPreviewsBody = PreviewsRequest;
 export type PutAppsIdProjectResponse = void;
 
 export type PutAppsIdProjectBody = MoveRequest;
+
+export type PutAppsIdPublicAccessResponse = {
+  apply_error?: string;
+  connection: ConnectionView;
+};
+
+export type PutAppsIdPublicAccessBody = PublicAccessRequest;
 
 export type PutAppsIdRoutesResponse = {
   app: AppView;

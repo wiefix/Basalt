@@ -10,6 +10,7 @@ import {
   type App,
   type AppPlacement,
   type AppVolume,
+  type DatabaseConnection,
   type Deployment,
   type ServiceStatus,
   type User,
@@ -1792,7 +1793,93 @@ function ConnectionTab({ app }: { app: App }) {
           </button>
         </div>
       </div>
+      <PublicAccessCard app={app} conn={c} />
     </div>
+  );
+}
+
+const anyAddress = ["0.0.0.0/0", "::/0"];
+
+// PublicAccessCard makes a database reachable from outside its server:
+// the server's agent forwards a port, for the listed addresses only.
+function PublicAccessCard({ app, conn }: { app: App; conn: DatabaseConnection }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const pub = conn.public;
+  const [enabled, setEnabled] = useState(!!pub);
+  const [port, setPort] = useState(String(pub?.port ?? conn.port));
+  const [allow, setAllow] = useState((pub?.allow ?? []).join("\n"));
+  const [applyError, setApplyError] = useState("");
+  const save = useMutation({
+    mutationFn: (v: { port: number; allow: string[] }) => api.setDatabasePublicAccess(app.id, v.port, v.allow),
+    onSuccess: (r) => {
+      qc.setQueryData(["db-connection", app.id], { connection: r.connection });
+      setApplyError(r.apply_error ?? "");
+      toast(r.connection.public ? "Public access saved" : "The database is reachable from linked apps only");
+    },
+    onError: (e) => toast(errorMessage(e), true),
+  });
+  const list = allow
+    .split(/[\s,]+/)
+    .map((v) => v.trim())
+    .filter(Boolean);
+  const open = list.some((v) => anyAddress.includes(v));
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!enabled) {
+      if (pub && !(await confirm({ title: "Turn off public access?", body: <p>Connections from outside the server are closed.</p>, confirm: "Turn off" }))) return;
+      save.mutate({ port: 0, allow: [] });
+      return;
+    }
+    if (open && !(await confirm({
+      title: "Allow every address?",
+      body: <p>Anyone on the internet can try to sign in to the database, and the connection is not encrypted. Prefer the addresses of your own machines.</p>,
+      confirm: "Allow every address",
+    }))) return;
+    save.mutate({ port: Number(port), allow: list });
+  };
+  return (
+    <form className="card card-body form" onSubmit={submit}>
+      <h2>Public access</h2>
+      <p className="muted" style={{ margin: 0 }}>
+        Reach the database from outside its server, e.g. from a database client on your computer. The server forwards the port to the
+        database for the listed addresses only.
+      </p>
+      <label className="check">
+        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Reachable from outside the server
+      </label>
+      {enabled && (
+        <>
+          <Field label="Port on the server">
+            <input className="input mono" type="number" min={1024} max={65535} value={port} onChange={(e) => setPort(e.target.value)} required />
+          </Field>
+          <Field label="Allowed addresses" help="IP addresses or CIDR prefixes, one per line; 0.0.0.0/0 and ::/0 allow any address">
+            <textarea className="input mono" rows={3} value={allow} onChange={(e) => setAllow(e.target.value)} placeholder="203.0.113.7" required />
+          </Field>
+          <div className="alert warn small">
+            The connection between the client and the server is not encrypted{app.engine === "redis" ? "" : " by Basalt"}: allow only
+            addresses you trust, or reach the port through an SSH tunnel.
+          </div>
+        </>
+      )}
+      {pub &&
+        (pub.url ? (
+          <Field label="Public URL">
+            <CodeBox text={pub.url} />
+          </Field>
+        ) : (
+          <p className="faint small" style={{ margin: 0 }}>
+            The server's public address is unknown: use it with port {pub.port}.
+          </p>
+        ))}
+      {applyError && <div className="alert err small">{applyError}</div>}
+      <div>
+        <button className="btn" type="submit" disabled={save.isPending || (!enabled && !pub)}>
+          {save.isPending ? "Saving…" : "Save"}
+        </button>
+      </div>
+    </form>
   );
 }
 

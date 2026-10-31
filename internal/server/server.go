@@ -514,6 +514,7 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("PUT /api/v1/apps/{id}/previews", s.requireProject(store.RoleAdmin, s.handleSetPreviews))
 	rt.Handle("GET /api/v1/database-engines", s.requireRole(store.RoleUser, s.handleListEngines))
 	rt.Handle("GET /api/v1/apps/{id}/connection", s.requireProject(store.RoleAdmin, s.handleDatabaseConnection))
+	rt.Handle("PUT /api/v1/apps/{id}/public-access", s.requireProject(store.RoleAdmin, s.handleDatabasePublicAccess))
 	rt.Handle("GET /api/v1/apps/{id}/upgrade", s.requireProject(store.RoleViewer, s.handleDatabaseUpgradeInfo))
 	rt.Handle("POST /api/v1/apps/{id}/upgrade", s.requireProject(store.RoleAdmin, s.handleDatabaseUpgrade))
 	rt.Handle("POST /api/v1/apps/{id}/links", s.requireProject(store.RoleAdmin, s.handleLinkApp))

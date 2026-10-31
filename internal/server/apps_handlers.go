@@ -1080,6 +1080,11 @@ func (s *Server) deleteApp(ctx context.Context, app *store.App, volumes bool) ([
 	for _, id := range servers {
 		s.PushProxy(ctx, id)
 	}
+	if app.PublicPort > 0 {
+		if _, err := s.PushDBExpose(ctx, app.ServerID); err != nil {
+			s.log.Warn("push public databases", "server_id", app.ServerID, "err", err)
+		}
+	}
 	var cleanup []string
 	for _, id := range servers {
 		if err := s.removeAppFrom(ctx, id, app.ID, volumes, imagesToPrune(images, 0)); err != nil {

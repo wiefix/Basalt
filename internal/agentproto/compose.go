@@ -60,6 +60,9 @@ type ServiceSpec struct {
 	// RoutePort is the HTTP port of another service with domains of its
 	// own (proxy.ServiceRoute).
 	RoutePort int `json:"route_port,omitempty"`
+	// TCPPort is the port of a database the agent may forward connections
+	// from outside the host to (TypeDBExpose).
+	TCPPort int `json:"tcp_port,omitempty"`
 	// Job marks a service that runs to completion (others depend on it
 	// with condition "completed"); it runs again on every deployment.
 	Job bool `json:"job,omitempty"`
@@ -277,7 +280,7 @@ func (s *ServiceSpec) Validate(volumes map[string]bool) error {
 		return fail("invalid stop_grace_period")
 	case s.StopSignal != "" && !signalRE.MatchString(s.StopSignal):
 		return fail("invalid stop_signal")
-	case s.Port < 0 || s.Port > 65535 || s.RoutePort < 0 || s.RoutePort > 65535:
+	case s.Port < 0 || s.Port > 65535 || s.RoutePort < 0 || s.RoutePort > 65535 || s.TCPPort < 0 || s.TCPPort > 65535:
 		return fail("invalid port")
 	case s.Port > 0 && s.RoutePort > 0:
 		return fail("published twice")

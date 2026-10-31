@@ -94,7 +94,13 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 	active := map[string]string{}         // container ID -> service, after this deployment
 	switched := false                     // a service with domains has a new container
 	for _, svc := range order {
-		hash := serviceHash(spec.AppID, svc, imageIDs[svc.Name])
+		hashed := svc
+		if !m.publish {
+			// It changes the container only where ports are published
+			// (dialling container addresses works without).
+			hashed.TCPPort = 0
+		}
+		hash := serviceHash(spec.AppID, hashed, imageIDs[svc.Name])
 		olds := byService[svc.Name]
 		if i := slices.IndexFunc(olds, func(c docker.ContainerSummary) bool {
 			return c.State == "running" && c.Labels[labelConfig] == hash
@@ -415,10 +421,19 @@ func (m *appsManager) serviceConfig(spec agentproto.AppSpec, svc agentproto.Serv
 		t := svc.StopGrace
 		cfg.StopTimeout = &t
 	}
-	if port := max(svc.Port, svc.RoutePort); m.publish && port > 0 {
-		p := strconv.Itoa(port) + "/tcp"
-		cfg.ExposedPorts = map[string]struct{}{p: {}}
-		hc.PortBindings = map[string][]docker.PortBinding{p: {{HostIP: "127.0.0.1"}}}
+	if m.publish {
+		for _, port := range []int{max(svc.Port, svc.RoutePort), svc.TCPPort} {
+			if port == 0 {
+				continue
+			}
+			p := strconv.Itoa(port) + "/tcp"
+			if cfg.ExposedPorts == nil {
+				cfg.ExposedPorts = map[string]struct{}{}
+				hc.PortBindings = map[string][]docker.PortBinding{}
+			}
+			cfg.ExposedPorts[p] = struct{}{}
+			hc.PortBindings[p] = []docker.PortBinding{{HostIP: "127.0.0.1"}}
+		}
 	}
 	// The mail server's ports, on every address of the host. A container
 	// with host ports always has volumes, so the old one is stopped first.

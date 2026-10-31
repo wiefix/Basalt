@@ -563,6 +563,32 @@ func (m *appsManager) upstreamOf(info *docker.ContainerInfo, appID int64, port i
 	return ""
 }
 
+// serviceAddr returns where port of the running container of an app's
+// service is reached from the host (a public database, dbExposeManager).
+func (m *appsManager) serviceAddr(ctx context.Context, appID int64, service string, port int) (string, error) {
+	dc, err := m.client()
+	if err != nil {
+		return "", err
+	}
+	list, err := m.containers(ctx, dc, appID)
+	if err != nil {
+		return "", err
+	}
+	for _, c := range list {
+		if c.Labels[labelService] != service || c.State != "running" {
+			continue
+		}
+		info, err := dc.ContainerInspect(ctx, c.ID)
+		if err != nil {
+			continue // removed meanwhile
+		}
+		if addr := m.upstreamOf(info, appID, port); addr != "" {
+			return addr, nil
+		}
+	}
+	return "", fmt.Errorf("app %d: service %s is not running", appID, service)
+}
+
 // containers returns the app's containers, newest deployment first.
 func (m *appsManager) containers(ctx context.Context, dc *docker.Client, appID int64) ([]docker.ContainerSummary, error) {
 	labels := map[string]string{labelApp: ""}

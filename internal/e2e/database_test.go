@@ -3,10 +3,13 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -122,7 +125,54 @@ func TestDatabaseAppAPI(t *testing.T) {
 	}
 	v.call(http.StatusForbidden, "GET", base+"/connection", nil)
 	v.call(http.StatusForbidden, "POST", base+"/links", map[string]any{"app_id": wid})
+	v.call(http.StatusForbidden, "PUT", base+"/public-access", map[string]any{"port": 15432, "allow": []string{"127.0.0.1"}})
 	p.call(http.StatusNotFound, "GET", "/api/v1/apps/"+jsonID(web["id"])+"/connection", nil)
+
+	// Public access: the agent listens on the port for the allowed
+	// addresses; without Docker nothing answers behind it.
+	port := freePort(t)
+	for _, bad := range []map[string]any{
+		{"port": 80, "allow": []string{"127.0.0.1"}},
+		{"port": 8443, "allow": []string{"127.0.0.1"}},
+		{"port": 70000, "allow": []string{"127.0.0.1"}},
+		{"port": port, "allow": []string{}},
+		{"port": port, "allow": []string{"example.com"}},
+	} {
+		p.call(http.StatusUnprocessableEntity, "PUT", base+"/public-access", bad)
+	}
+	p.call(http.StatusNotFound, "PUT", "/api/v1/apps/"+jsonID(web["id"])+"/public-access", map[string]any{"port": port, "allow": []string{"127.0.0.1"}})
+	pub := p.call(200, "PUT", base+"/public-access", map[string]any{"port": port, "allow": []string{"127.0.0.1", "10.1.2.3/8", "10.0.0.0/8"}})
+	if pub["apply_error"] != nil {
+		t.Fatalf("apply: %v", pub["apply_error"])
+	}
+	pc := pub["connection"].(map[string]any)["public"].(map[string]any)
+	// The host is a public address of this machine, else the agent's.
+	host, _ := pc["host"].(string)
+	if pc["port"] != float64(port) || jsonString(pc["allow"]) != `["127.0.0.1/32","10.0.0.0/8"]` || host == "" ||
+		pc["url"] != fmt.Sprintf("postgres://pg:%s@%s/pg", pw, net.JoinHostPort(host, strconv.Itoa(port))) {
+		t.Fatalf("public = %v", pc)
+	}
+	if p.call(200, "GET", base+"/connection", nil)["connection"].(map[string]any)["public"] == nil {
+		t.Fatal("public access not in the connection")
+	}
+	c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("public port: %v", err)
+	}
+	c.Close()
+	// The port is the server's: another database cannot take it.
+	p.call(http.StatusConflict, "PUT", "/api/v1/apps/"+jsonID(cache["id"])+"/public-access", map[string]any{"port": port, "allow": []string{"127.0.0.1"}})
+	priv := p.call(200, "PUT", base+"/public-access", map[string]any{"port": 0})
+	if priv["connection"].(map[string]any)["public"] != nil {
+		t.Fatalf("private = %v", priv)
+	}
+	eventually(t, "the public port to close", func() bool {
+		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), time.Second)
+		if err == nil {
+			c.Close()
+		}
+		return err != nil
+	})
 }
 
 // TestDatabaseWithDocker runs PostgreSQL and Redis on the local Docker
@@ -223,6 +273,36 @@ func TestDatabaseWithDocker(t *testing.T) {
 	}
 	url = newURL
 
+	// Public access forwards the port to the container for the allowed
+	// addresses: PostgreSQL answers an SSL request ("N": no TLS).
+	port := freePort(t)
+	pgAnswer := func() string {
+		c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+		if err != nil {
+			return err.Error()
+		}
+		defer c.Close()
+		c.SetDeadline(time.Now().Add(5 * time.Second))
+		c.Write([]byte{0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f})
+		b := make([]byte, 1)
+		if _, err := io.ReadFull(c, b); err != nil {
+			return err.Error()
+		}
+		return string(b)
+	}
+	if r := p.call(200, "PUT", "/api/v1/apps/"+pg+"/public-access", map[string]any{"port": port, "allow": []string{"127.0.0.1"}}); r["apply_error"] != nil {
+		t.Fatalf("public access: %v", r["apply_error"])
+	}
+	if a := pgAnswer(); a != "N" {
+		t.Fatalf("postgres through the public port: %q", a)
+	}
+	// Not an allowed address: the connection is closed unanswered.
+	p.call(200, "PUT", "/api/v1/apps/"+pg+"/public-access", map[string]any{"port": port, "allow": []string{"192.0.2.0/24"}})
+	if a := pgAnswer(); a == "N" {
+		t.Fatal("postgres answers an address that is not allowed")
+	}
+	p.call(200, "PUT", "/api/v1/apps/"+pg+"/public-access", map[string]any{"port": port, "allow": []string{"127.0.0.1"}})
+
 	// Unlinked: no longer reachable.
 	p.call(200, "DELETE", "/api/v1/apps/"+pg+"/links/"+web, nil)
 	if _, err := run(appNet(web), "postgres:18-alpine", "pg_isready", "-h", "pg", "-t", "2"); err == nil {
@@ -264,7 +344,18 @@ func TestDatabaseWithDocker(t *testing.T) {
 	if st := p.call(200, "GET", "/api/v1/apps/"+cache+"/status", nil)["status"].(map[string]any); st["state"] != "running" {
 		t.Fatalf("redis after the app was deleted: %v", st)
 	}
+	if a := pgAnswer(); a != "N" {
+		t.Fatalf("postgres through the public port after its redeployments: %q", a)
+	}
 	p.call(200, "DELETE", "/api/v1/apps/"+pg+"?volumes=1", nil)
+	// Deleted: its public port is free again.
+	eventually(t, "the public port to close", func() bool {
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err == nil {
+			ln.Close()
+		}
+		return err == nil
+	})
 	p.call(200, "DELETE", "/api/v1/apps/"+cache+"?volumes=1", nil)
 	if vols, _ := dc.VolumeList(context.Background(), appLabels(pg)); len(vols) != 0 {
 		t.Fatalf("volumes left: %v", vols)

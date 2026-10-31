@@ -154,8 +154,12 @@ func (e *Engine) CredentialsFrom(env map[string]string) Credentials {
 }
 
 // URL is the connection URL for a client reaching the database at host.
-func (e *Engine) URL(host string, c Credentials) string {
-	u := url.URL{Host: net.JoinHostPort(host, strconv.Itoa(e.Port))}
+func (e *Engine) URL(host string, c Credentials) string { return e.URLPort(host, e.Port, c) }
+
+// URLPort is the connection URL for a client reaching the database at
+// host and port (from outside its server).
+func (e *Engine) URLPort(host string, port int, c Credentials) string {
+	u := url.URL{Host: net.JoinHostPort(host, strconv.Itoa(port))}
 	switch e.ID {
 	case "postgres":
 		u.Scheme, u.User, u.Path = "postgres", url.UserPassword(c.User, c.Password), "/"+c.Database
@@ -188,7 +192,7 @@ func (e *Engine) Service(name, version string, env map[string]string, l Limits) 
 	}
 	svc := agentproto.ServiceSpec{
 		Name: name, Image: e.Image(version), Env: e.Env(c), Restart: "unless-stopped",
-		MemoryMB: l.MemoryMB, CPUs: l.CPUs,
+		MemoryMB: l.MemoryMB, CPUs: l.CPUs, TCPPort: e.Port,
 		// Databases flush and close their files on stop; give them time.
 		StopGrace: 60,
 		Health: &docker.HealthConfig{Interval: 10 * time.Second, Timeout: 5 * time.Second, Retries: 5,

@@ -136,6 +136,7 @@ type Agent struct {
 	docker      string
 
 	health      *healthManager
+	dbExpose    *dbExposeManager
 	link        panelLink
 	watch       *siteWatcher
 	mailCheck   *mailcheck.Checker
@@ -192,6 +193,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		dns:             newDNSManager(cfg, log.With("subsystem", "dns")),
 		acme:            newACMERelay(cfg, log.With("subsystem", "acme")),
 		health:          newHealthManager(log.With("subsystem", "health")),
+		dbExpose:        newDBExposeManager(cfg, apps.serviceAddr, log.With("subsystem", "dbexpose")),
 		watch:           newSiteWatcher(log.With("subsystem", "sitewatch"), sites.root),
 		mailCheck:       &mailcheck.Checker{Resolvers: cfg.Resolvers, SMTPProbes: cfg.MailCheckProbes},
 		apps:            apps,
@@ -243,6 +245,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	a.clearSeeds()
 	go a.acme.run(ctx)
 	go a.apps.run(ctx)
+	a.dbExpose.start(ctx)
 	defer a.health.stop()
 	a.watch.start()
 	defer a.watch.close()
@@ -652,6 +655,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		}
 		resp, err := a.sites.LaravelProcesses(ctx, req)
 		return resp, publicError(err)
+	case agentproto.TypeDBExpose:
+		var req agentproto.DBExposeApply
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return a.dbExpose.Apply(req)
 	case agentproto.TypeDBPassword:
 		var req agentproto.ContainerDBPassword
 		if err := json.Unmarshal(payload, &req); err != nil {

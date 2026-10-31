@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -102,9 +103,21 @@ type connectionView struct {
 	URL         string               `json:"url"`
 	EnvVar      string               `json:"env_var"`
 	Credentials dbengine.Credentials `json:"credentials"`
+	// Public is how clients outside the server connect; null when the
+	// database is reachable from linked apps only.
+	Public *publicAccessView `json:"public"`
 }
 
-func (s *Server) connection(app *store.App) (connectionView, error) {
+type publicAccessView struct {
+	Port  int      `json:"port"`
+	Allow []string `json:"allow"`
+	// Host is the server's public address ("" when unknown) and URL the
+	// connection URL with it.
+	Host string `json:"host"`
+	URL  string `json:"url"`
+}
+
+func (s *Server) connection(ctx context.Context, app *store.App) (connectionView, error) {
 	e, ok := dbengine.Get(app.Engine)
 	if !ok {
 		return connectionView{}, errors.New("unknown database engine")
@@ -114,7 +127,153 @@ func (s *Server) connection(app *store.App) (connectionView, error) {
 		return connectionView{}, err
 	}
 	c := e.CredentialsFrom(env)
-	return connectionView{Host: app.Name, Port: e.Port, URL: e.URL(app.Name, c), EnvVar: e.EnvVar, Credentials: c}, nil
+	v := connectionView{Host: app.Name, Port: e.Port, URL: e.URL(app.Name, c), EnvVar: e.EnvVar, Credentials: c}
+	if app.PublicPort > 0 {
+		pub := &publicAccessView{Port: app.PublicPort, Allow: app.PublicAllow}
+		if srv, err := s.db.ServerByID(ctx, app.ServerID); err == nil {
+			pub.Host = serverHost(srv)
+		}
+		if pub.Host != "" {
+			pub.URL = e.URLPort(pub.Host, app.PublicPort, c)
+		}
+		v.Public = pub
+	}
+	return v, nil
+}
+
+// serverHost is the address clients outside a server reach it at: its
+// public address (IPv4 first), else the one its agent connects from.
+func serverHost(srv *store.Server) string {
+	addrs := srv.DNSAddrs()
+	slices.SortStableFunc(addrs, func(a, b netip.Addr) int {
+		if a.Is4() == b.Is4() {
+			return 0
+		}
+		if a.Is4() {
+			return -1
+		}
+		return 1
+	})
+	if len(addrs) > 0 {
+		return addrs[0].String()
+	}
+	if a, err := netip.ParseAddr(srv.LastIP); err == nil {
+		return a.Unmap().String()
+	}
+	return ""
+}
+
+type publicAccessRequest struct {
+	// Port on the server; 0 makes the database private again.
+	Port int `json:"port"`
+	// Allow lists the addresses and CIDR prefixes that may connect
+	// (0.0.0.0/0 and ::/0 for any).
+	Allow []string `json:"allow"`
+}
+
+// reservedPublicPorts are Basalt's own ports, never given to a database.
+var reservedPublicPorts = []int{2222, 8080, 8443}
+
+// handleDatabasePublicAccess makes a database reachable from outside its
+// server: its agent listens on the port and forwards connections from the
+// allowed addresses to the container.
+func (s *Server) handleDatabasePublicAccess(w http.ResponseWriter, r *http.Request, p *principal) {
+	app, ok := s.databaseApp(w, r)
+	if !ok {
+		return
+	}
+	var req publicAccessRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	var allow []string
+	if req.Port != 0 {
+		srv, err := s.db.ServerByID(r.Context(), app.ServerID)
+		if err != nil {
+			s.internalError(w, r, "load server", err)
+			return
+		}
+		if req.Port < agentproto.MinDBExposePort || req.Port > 65535 {
+			writeError(w, http.StatusUnprocessableEntity, "the port must be between 1024 and 65535")
+			return
+		}
+		if slices.Contains(reservedPublicPorts, req.Port) || req.Port == srv.HTTPSPort || req.Port == srv.PeerPort {
+			writeError(w, http.StatusUnprocessableEntity, "Basalt uses this port on the server")
+			return
+		}
+		prefixes, err := agentproto.ParseAllow(req.Allow)
+		if err != nil {
+			writeError(w, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		for _, p := range prefixes {
+			allow = append(allow, p.String())
+		}
+	}
+	err := s.db.SetAppPublicAccess(r.Context(), app.ID, req.Port, allow)
+	switch {
+	case errors.Is(err, store.ErrPublicPortTaken):
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	case err != nil:
+		s.internalError(w, r, "set public access", err)
+		return
+	}
+	s.audit(r, &p.user.ID, "database.public_access", map[string]any{"database_id": app.ID, "port": req.Port, "allow": allow})
+	resp := map[string]any{}
+	if errs, err := s.PushDBExpose(r.Context(), app.ServerID); err != nil {
+		var re *agentproto.RemoteError
+		if errors.As(err, &re) {
+			err = errors.New(re.Msg)
+		}
+		resp["apply_error"] = err.Error()
+	} else if msg := errs[app.ID]; msg != "" {
+		resp["apply_error"] = msg
+	}
+	if app, err = s.db.AppByID(r.Context(), app.ID); err != nil {
+		s.internalError(w, r, "load app", err)
+		return
+	}
+	conn, err := s.connection(r.Context(), app)
+	if err != nil {
+		s.internalError(w, r, "database connection", err)
+		return
+	}
+	resp["connection"] = conn
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// PushDBExpose gives a server's agent the complete list of its public
+// databases; it returns why entries could not listen, by app.
+func (s *Server) PushDBExpose(ctx context.Context, serverID int64) (map[int64]string, error) {
+	if !s.agents.Connected(serverID) {
+		return nil, errors.New("the server is offline; the change applies when it connects")
+	}
+	apps, err := s.db.PublicDatabases(ctx, serverID)
+	if err != nil {
+		return nil, err // never send a partial list: the agent would close the others
+	}
+	req := agentproto.DBExposeApply{Entries: []agentproto.DBExpose{}}
+	for _, a := range apps {
+		e, ok := dbengine.Get(a.Engine)
+		if !ok {
+			continue
+		}
+		req.Entries = append(req.Entries, agentproto.DBExpose{AppID: a.ID, Service: a.Name, TargetPort: e.Port, Port: a.PublicPort, Allow: a.PublicAllow})
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	var resp agentproto.DBExposeResponse
+	if err := s.agents.Call(ctx, serverID, agentproto.TypeDBExpose, req, &resp); err != nil {
+		return nil, err
+	}
+	errs := map[int64]string{}
+	for _, st := range resp.Entries {
+		if st.Error != "" {
+			errs[st.AppID] = st.Error
+		}
+	}
+	return errs, nil
 }
 
 // handleDatabaseConnection returns how linked apps connect: admins only,
@@ -124,7 +283,7 @@ func (s *Server) handleDatabaseConnection(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	c, err := s.connection(app)
+	c, err := s.connection(r.Context(), app)
 	if err != nil {
 		s.internalError(w, r, "database connection", err)
 		return
@@ -184,7 +343,7 @@ func (s *Server) handleLinkApp(w http.ResponseWriter, r *http.Request, p *princi
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		if conn, err = s.connection(dbApp); err != nil {
+		if conn, err = s.connection(r.Context(), dbApp); err != nil {
 			s.internalError(w, r, "database connection", err)
 			return
 		}
@@ -362,7 +521,7 @@ func (s *Server) handleDatabasePassword(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 	s.audit(r, &p.user.ID, "database.password_changed", map[string]any{"database_id": app.ID, "apps_updated": updated})
-	conn, err := s.connection(app)
+	conn, err := s.connection(r.Context(), app)
 	if err != nil {
 		s.internalError(w, r, "database connection", err)
 		return

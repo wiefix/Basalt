@@ -228,3 +228,52 @@ func TestAppReplicas(t *testing.T) {
 		t.Fatalf("checks left after delete: %+v", checks)
 	}
 }
+
+func TestAppPublicAccess(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTemp(t)
+	srv, _ := db.CreateServer(ctx, "s1", []byte("t1"), time.Now().Add(time.Hour))
+	srv2, _ := db.CreateServer(ctx, "s2", []byte("t2"), time.Now().Add(time.Hour))
+	pg := func(server int64, name string) *App {
+		a, err := db.CreateApp(ctx, server, name, AppSettings{Source: SourceDatabase, Engine: "postgres", EngineVersion: "18", Image: "postgres:18-alpine"}, []string{}, proxy.TLSAuto)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	a, b, c := pg(srv.ID, "a"), pg(srv.ID, "b"), pg(srv2.ID, "c")
+	if a.PublicPort != 0 || a.PublicAllow == nil || len(a.PublicAllow) != 0 {
+		t.Fatalf("new database: %d %v", a.PublicPort, a.PublicAllow)
+	}
+	if err := db.SetAppPublicAccess(ctx, a.ID, 15432, []string{"192.0.2.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetAppPublicAccess(ctx, b.ID, 15432, []string{"192.0.2.0/24"}); !errors.Is(err, ErrPublicPortTaken) {
+		t.Fatalf("same port on the same server: %v", err)
+	}
+	if err := db.SetAppPublicAccess(ctx, c.ID, 15432, []string{"::/0"}); err != nil {
+		t.Fatalf("same port on another server: %v", err)
+	}
+	got, err := db.AppByID(ctx, a.ID)
+	if err != nil || got.PublicPort != 15432 || len(got.PublicAllow) != 1 || got.PublicAllow[0] != "192.0.2.0/24" {
+		t.Fatalf("%v %+v", err, got)
+	}
+	list, err := db.PublicDatabases(ctx, srv.ID)
+	if err != nil || len(list) != 1 || list[0].ID != a.ID {
+		t.Fatalf("public databases: %v %v", err, list)
+	}
+	// Private again: the port is free for another database.
+	if err := db.SetAppPublicAccess(ctx, a.ID, 0, []string{"192.0.2.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := db.AppByID(ctx, a.ID); got.PublicPort != 0 || len(got.PublicAllow) != 0 {
+		t.Fatalf("private: %+v", got)
+	}
+	if err := db.SetAppPublicAccess(ctx, b.ID, 15432, []string{"192.0.2.1/32"}); err != nil {
+		t.Fatal(err)
+	}
+	web, _ := db.CreateApp(ctx, srv.ID, "web", AppSettings{Image: "nginx:1.27", Port: 80}, []string{}, proxy.TLSAuto)
+	if err := db.SetAppPublicAccess(ctx, web.ID, 15433, []string{"192.0.2.1/32"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an app that is not a database: %v", err)
+	}
+}

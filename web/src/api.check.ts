@@ -201,6 +201,7 @@ export const checks = [
   fits<Returns<A["upgradeDatabase"]>>()<G.PostAppsIdUpgradeResponse>(),
   fits<Returns<A["databaseConnection"]>>()<G.GetAppsIdConnectionResponse>(),
   fits<Returns<A["databasePassword"]>>()<G.PostAppsIdPasswordResponse>(),
+  fits<Returns<A["setDatabasePublicAccess"]>>()<G.PutAppsIdPublicAccessResponse>(),
   fits<Returns<A["linkApp"]>>()<G.PostAppsIdLinksResponse>(),
   fits<Returns<A["unlinkApp"]>>()<G.DeleteAppsIdLinksAppResponse>(),
   fits<Returns<A["appCompose"]>>()<G.GetAppsIdComposeResponse>(),
