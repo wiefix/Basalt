@@ -151,33 +151,39 @@ func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string, 
 		}
 	}
 
+	// The site's folder is in the root-owned sites folder; what is inside
+	// belongs to the site's user, who could swap a folder for a symlink
+	// meanwhile: it is reached through os.Root and changed through the
+	// open folder, never by path.
+	if err := os.Mkdir(d, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
+	}
+	r, err := os.OpenRoot(d)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
 	layout := []struct {
-		path string
+		name string
 		mode fs.FileMode
 		gid  int
 	}{
-		{d, 0o750 | fs.ModeSetgid, wwwGID},
-		{filepath.Join(d, "public"), 0o750 | fs.ModeSetgid, wwwGID},
-		{filepath.Join(d, "logs"), 0o750 | fs.ModeSetgid, wwwGID},
-		{filepath.Join(d, "tmp"), 0o700, gid},
+		{".", 0o750 | fs.ModeSetgid, wwwGID},
+		{"public", 0o750 | fs.ModeSetgid, wwwGID},
+		{"logs", 0o750 | fs.ModeSetgid, wwwGID},
+		{"tmp", 0o700, gid},
 	}
 	for _, l := range layout {
-		if err := os.Mkdir(l.path, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
-			return err
+		if l.name != "." {
+			if err := r.Mkdir(l.name, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+				return err
+			}
 		}
 		if !m.isolate {
 			continue
 		}
-		// Lchown/Chmod on paths we just created or validated as directories
-		// under the root-owned sites directory.
-		if fi, err := os.Lstat(l.path); err != nil || !fi.IsDir() {
-			return fmt.Errorf("%s is not a directory", l.path)
-		}
-		if err := os.Lchown(l.path, uid, l.gid); err != nil {
-			return err
-		}
-		if err := os.Chmod(l.path, l.mode); err != nil {
-			return err
+		if err := ownDir(r, l.name, uid, l.gid, l.mode); err != nil {
+			return fmt.Errorf("%s: %w", filepath.Join(d, l.name), err)
 		}
 	}
 
@@ -277,6 +283,28 @@ func (m *sitesManager) Delete(ctx context.Context, id int64) error {
 		return sysuser.DeleteUser(ctx, sysuser.SiteUser(id))
 	}
 	return nil
+}
+
+// ownDir gives the folder name in r its owner and mode, through the open
+// folder: a symlink put there instead cannot redirect the change (one
+// swapped in after the check leads, at most, to another folder of the
+// site).
+func ownDir(r *os.Root, name string, uid, gid int, mode fs.FileMode) error {
+	if fi, err := r.Lstat(name); err != nil || !fi.IsDir() {
+		return errors.New("not a directory")
+	}
+	f, err := r.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.IsDir() {
+		return errors.New("not a directory")
+	}
+	if err := f.Chown(uid, gid); err != nil {
+		return err
+	}
+	return f.Chmod(mode)
 }
 
 // open gives file access to a site. With isolation, everything created is

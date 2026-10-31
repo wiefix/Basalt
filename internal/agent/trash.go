@@ -95,7 +95,7 @@ func (m *sitesManager) cleanTrash(now time.Time) {
 // restoreTrash makes the trash entry name the folder of site id (a new
 // site, whose folder does not exist yet). The deleted site's user is gone:
 // its files go to the new site's user (the www group stays), without
-// following symlinks.
+// following symlinks (through os.Root: the walk stays inside the folder).
 func (m *sitesManager) restoreTrash(ctx context.Context, name string, id int64) error {
 	if _, _, ok := parseTrashName(name); !ok || id <= 0 {
 		return errors.New("invalid trash entry")
@@ -127,7 +127,12 @@ func (m *sitesManager) restoreTrash(ctx context.Context, name string, id int64) 
 	if !m.isolate {
 		return nil
 	}
-	return filepath.WalkDir(dst, func(p string, d fs.DirEntry, err error) error {
+	r, err := os.OpenRoot(dst)
+	if err != nil {
+		return publicError(err)
+	}
+	defer r.Close()
+	return fs.WalkDir(r.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -142,6 +147,6 @@ func (m *sitesManager) restoreTrash(ctx context.Context, name string, id int64) 
 		if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Gid) == www {
 			g = www
 		}
-		return os.Lchown(p, uid, g)
+		return r.Lchown(p, uid, g)
 	})
 }
