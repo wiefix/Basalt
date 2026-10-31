@@ -460,7 +460,6 @@ export interface DatabaseConnection {
   url: string;
   env_var: string;
   credentials: { database?: string; user?: string; password: string; root_password?: string };
-  public_tls: boolean;
   public: DatabasePublicAccess | null;
 }
 
@@ -1489,7 +1488,14 @@ export function upload(
   });
 }
 
-export const engineNames: Record<string, string> = { postgres: "PostgreSQL", mysql: "MySQL", mariadb: "MariaDB", redis: "Redis" };
+export const engineNames: Record<string, string> = {
+  postgres: "PostgreSQL",
+  mysql: "MySQL",
+  mariadb: "MariaDB",
+  mongodb: "MongoDB",
+  redis: "Redis",
+  valkey: "Valkey",
+};
 
 // appPath is the page of an app or database.
 export const appPath = (a: Pick<App, "id" | "source">) => `/${a.source === "database" ? "databases" : "apps"}/${a.id}`;

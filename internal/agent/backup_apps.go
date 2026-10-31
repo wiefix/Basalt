@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -26,12 +27,31 @@ const (
 	mysqlLoad   = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot --default-character-set=utf8mb4 --binary-mode "$0"`
 	mariadbDump = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb-dump -uroot --single-transaction --quick --routines --events --triggers --hex-blob --default-character-set=utf8mb4 "$0"`
 	mariadbLoad = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot --default-character-set=utf8mb4 --binary-mode "$0"`
+	// MongoDB's tools read the password from a file (mktemp: 0600), not
+	// the command line; an archive of the one database, restored over it.
+	mongoDump = `f=$(mktemp) && printf 'password: %s\n' "$MONGO_INITDB_ROOT_PASSWORD" >"$f" && ` +
+		`mongodump --quiet --archive --config "$f" --username "$MONGO_INITDB_ROOT_USERNAME" --authenticationDatabase admin --db "$0"; ` +
+		`s=$?; rm -f "$f"; exit $s`
+	mongoLoad = `f=$(mktemp) && printf 'password: %s\n' "$MONGO_INITDB_ROOT_PASSWORD" >"$f" && ` +
+		`mongorestore --quiet --archive --drop --config "$f" --username "$MONGO_INITDB_ROOT_USERNAME" --authenticationDatabase admin --nsInclude "$0.*"; ` +
+		`s=$?; rm -f "$f"; exit $s`
 )
 
 var errNoRunning = errors.New("the database is not running; deploy it first")
 
 func volumeFile(name string) string { return "volume-" + name + ".tar" }
 func dumpFileOf(db string) string   { return "dump-" + db + ".sql" }
+
+// mongoDumpFileOf is the file of a MongoDB dump (an archive of mongodump).
+func mongoDumpFileOf(db string) string { return "dump-" + db + ".archive" }
+
+// dumpFileFor is the file of a database dump of engine.
+func dumpFileFor(engine, db string) string {
+	if engine == "mongodb" {
+		return mongoDumpFileOf(db)
+	}
+	return dumpFileOf(db)
+}
 
 func (b *backupManager) dockerCLI() (string, error) {
 	if b.apps == nil || b.apps.dc == nil {
@@ -99,8 +119,10 @@ func (b *backupManager) appBackupOptions(ctx context.Context, it agentproto.Back
 			inner = []string{"sh", "-c", mysqlDump, it.Database}
 		case "mariadb":
 			inner = []string{"sh", "-c", mariadbDump, it.Database}
+		case "mongodb":
+			inner = []string{"sh", "-c", mongoDump, it.Database}
 		}
-		return b.dockerArgs(bin, append([]string{"exec", c.ID}, inner...)...), dumpFileOf(it.Database), nil
+		return b.dockerArgs(bin, append([]string{"exec", c.ID}, inner...)...), dumpFileFor(it.Engine, it.Database), nil
 	}
 	return nil, "", fmt.Errorf("unknown item %q", it.Kind)
 }
@@ -160,9 +182,11 @@ func (b *backupManager) restoreAppItem(ctx context.Context, r *restic.Runner, re
 			inner = []string{"sh", "-c", mysqlLoad, it.Item.Database}
 		case "mariadb":
 			inner = []string{"sh", "-c", mariadbLoad, it.Item.Database}
+		case "mongodb":
+			inner = []string{"sh", "-c", mongoLoad, it.Item.Database}
 		}
 		cmd := command(ctx, b.dockerArgs(bin, append([]string{"exec", "-i", c.ID}, inner...)...))
-		return pipeSnapshot(ctx, r, repo, it.Snapshot, "/"+dumpFileOf(it.Item.Database), cmd)
+		return pipeSnapshot(ctx, r, repo, it.Snapshot, "/"+dumpFileFor(it.Item.Engine, it.Item.Database), cmd)
 	}
 	return fmt.Errorf("unknown item %q", it.Item.Kind)
 }
@@ -226,10 +250,18 @@ func pipeSnapshot(ctx context.Context, r *restic.Runner, repo restic.Repo, snaps
 
 // Changing a database user's password inside its container: the SQL goes
 // in on standard input, MySQL and MariaDB connect as root with the root
-// password from the container's own environment.
+// password from the container's own environment. MongoDB's user is its
+// root: mongosh signs in with the password of the container's environment
+// and takes the user and new password from its own (mongoUser,
+// mongoPassword: passed by name to docker exec, so not on a command line).
 const (
-	mysqlRoot   = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot`
-	mariadbRoot = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot`
+	mysqlRoot        = `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" exec mysql -uroot`
+	mariadbRoot      = `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot`
+	mongoUser        = "BASALT_DB_USER"
+	mongoPassword    = "BASALT_DB_PASSWORD"
+	mongoSetPassword = `const a = db.getSiblingDB("admin"); ` +
+		`a.auth(process.env.MONGO_INITDB_ROOT_USERNAME, process.env.MONGO_INITDB_ROOT_PASSWORD); ` +
+		`a.changeUserPassword(process.env.` + mongoUser + `, process.env.` + mongoPassword + `)`
 )
 
 func (b *backupManager) setDBPassword(ctx context.Context, req agentproto.ContainerDBPassword) error {
@@ -249,7 +281,8 @@ func (b *backupManager) setDBPassword(ctx context.Context, req agentproto.Contai
 	}
 	// Names and the password match fixed alphabets (Validate): nothing in
 	// the SQL needs escaping.
-	var inner []string
+	argv := []string{"exec", "-i"}
+	var inner, env []string
 	var sql string
 	switch req.Engine {
 	case "postgres":
@@ -261,8 +294,13 @@ func (b *backupManager) setDBPassword(ctx context.Context, req agentproto.Contai
 			inner = []string{"sh", "-c", mariadbRoot}
 		}
 		sql = fmt.Sprintf("ALTER USER '%s'@'%%' IDENTIFIED BY '%s';\nFLUSH PRIVILEGES;\n", req.User, req.Password)
+	case "mongodb":
+		argv = append(argv, "-e", mongoUser, "-e", mongoPassword)
+		inner = []string{"mongosh", "--quiet", "--norc", "--eval", mongoSetPassword}
+		env = []string{mongoUser + "=" + req.User, mongoPassword + "=" + req.Password}
 	}
-	cmd := command(ctx, b.dockerArgs(bin, append([]string{"exec", "-i", c.ID}, inner...)...))
+	cmd := command(ctx, b.dockerArgs(bin, append(append(argv, c.ID), inner...)...))
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdin = strings.NewReader(sql)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		msg := strings.TrimSpace(string(out))

@@ -395,7 +395,6 @@ export interface ConnectionView {
   host: string;
   port: number;
   public: PublicAccessView | null;
-  public_tls: boolean;
   url: string;
 }
 

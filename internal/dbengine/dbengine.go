@@ -34,7 +34,8 @@ type Engine struct {
 	Port     int      `json:"port"`
 	// EnvVar is the variable apps conventionally read the URL from.
 	EnvVar string `json:"env_var"`
-	// SQL engines have a database and user; Redis only a password.
+	// SQL engines have a database and user, as has MongoDB (KeyValue
+	// tells it apart from Redis and Valkey, which have only a password).
 	SQL bool `json:"sql"`
 
 	image string // repository on Docker Hub
@@ -48,8 +49,12 @@ var engines = []*Engine{
 		EnvVar: "DATABASE_URL", SQL: true, image: "mysql"},
 	{ID: "mariadb", Name: "MariaDB", Versions: []string{"11.8", "11.4", "10.11"}, Port: 3306,
 		EnvVar: "DATABASE_URL", SQL: true, image: "mariadb"},
+	{ID: "mongodb", Name: "MongoDB", Versions: []string{"9.0", "8.0"}, Port: 27017,
+		EnvVar: "MONGODB_URI", image: "mongo"},
 	{ID: "redis", Name: "Redis", Versions: []string{"8", "7.4"}, Port: 6379,
 		EnvVar: "REDIS_URL", image: "redis", tag: "-alpine"},
+	{ID: "valkey", Name: "Valkey", Versions: []string{"9", "8"}, Port: 6379,
+		EnvVar: "REDIS_URL", image: "valkey/valkey", tag: "-alpine"},
 }
 
 // All returns the engines offered.
@@ -70,9 +75,11 @@ func (e *Engine) ValidVersion(v string) bool { return slices.Contains(e.Versions
 // UpgradeTargets are the versions a database of version from can move to
 // (none to an older one: data a newer version has written stays there).
 // PostgreSQL goes to the newest version directly (its data is dumped and
-// loaded into a new cluster, DumpUpgrade); MariaDB one release at a time
-// (it upgrades its files in place at start, MARIADB_AUTO_UPGRADE); the
-// others to any newer version (they read older files).
+// loaded into a new cluster, DumpUpgrade); MariaDB and MongoDB one release
+// at a time (MariaDB upgrades its files in place at start,
+// MARIADB_AUTO_UPGRADE; MongoDB starts on the files of the release before
+// once they are set to its features, FeatureCompat); the others to any
+// newer version (they read older files).
 func (e *Engine) UpgradeTargets(from string) []string {
 	i := slices.Index(e.Versions, from)
 	switch {
@@ -80,7 +87,7 @@ func (e *Engine) UpgradeTargets(from string) []string {
 		return nil
 	case e.ID == "postgres":
 		return e.Versions[:1]
-	case e.ID == "mariadb":
+	case e.ID == "mariadb" || e.ID == "mongodb":
 		return e.Versions[i-1 : i]
 	}
 	return slices.Clone(e.Versions[:i])
@@ -90,22 +97,38 @@ func (e *Engine) UpgradeTargets(from string) []string {
 // (agentproto.DBUpgrade) rather than the new version reading it in place.
 func (e *Engine) DumpUpgrade() bool { return e.ID == "postgres" }
 
+// FeatureCompat is the feature compatibility version a MongoDB database of
+// version is set to after each deployment (agentproto.AppSpec.MongoFCV):
+// a major release starts only on files set to the release before it.
+// "" for the other engines.
+func (e *Engine) FeatureCompat(version string) string {
+	if e.ID != "mongodb" {
+		return ""
+	}
+	return version
+}
+
 // Protocol is how the engine's clients start a connection
-// (agentproto.DBExpose.Protocol): MariaDB speaks MySQL's.
+// (agentproto.DBExpose.Protocol): MariaDB speaks MySQL's, Valkey Redis's.
 func (e *Engine) Protocol() string {
-	if e.ID == "mariadb" {
+	switch e.ID {
+	case "mariadb":
 		return agentproto.DBProtocolMySQL
+	case "valkey":
+		return agentproto.DBProtocolRedis
 	}
 	return e.ID
 }
 
-// TLS reports whether clients from outside the server can reach a
-// database of version over TLS (ended by the agent, agentproto.TypeDBExpose).
-// MySQL needs TLS in the container too, which the images set up with their
-// own certificates: MariaDB's from 11.4 only.
-func (e *Engine) TLS(version string) bool {
-	return e.ID != "mariadb" || version != "10.11"
-}
+// KeyValue reports whether the engine is Redis or Valkey: a password
+// only, and data files backed up as they are (no dumps).
+func (e *Engine) KeyValue() bool { return e.Protocol() == agentproto.DBProtocolRedis }
+
+// PasswordRedeploys reports whether a new password needs a new container:
+// Redis and Valkey take it on their command line, and MongoDB's tools in
+// the container (dumps, password changes) sign in with the password of its
+// environment. The SQL engines' containers go on with it changed in place.
+func (e *Engine) PasswordRedeploys() bool { return !e.SQL }
 
 // Image is the image reference of a version.
 func (e *Engine) Image(version string) string { return e.image + ":" + version + e.tag }
@@ -125,7 +148,7 @@ type Credentials struct {
 // NewCredentials generates credentials for a database named name.
 func (e *Engine) NewCredentials(name string) Credentials {
 	c := Credentials{Password: rand.Text()}
-	if e.SQL {
+	if !e.KeyValue() {
 		// Database and user are named after the database, as identifiers.
 		c.Database = strings.ReplaceAll(name, "-", "_")
 		c.User = c.Database
@@ -151,6 +174,13 @@ func (e *Engine) Env(c Credentials) map[string]string {
 	case "mariadb":
 		return map[string]string{"MARIADB_DATABASE": c.Database, "MARIADB_USER": c.User, "MARIADB_PASSWORD": c.Password,
 			"MARIADB_ROOT_PASSWORD": c.RootPassword}
+	case "mongodb":
+		// The user is the instance's root: the instance is the database's
+		// alone. MONGO_INITDB_DATABASE only keeps the database's name.
+		return map[string]string{"MONGO_INITDB_DATABASE": c.Database, "MONGO_INITDB_ROOT_USERNAME": c.User,
+			"MONGO_INITDB_ROOT_PASSWORD": c.Password}
+	case "valkey":
+		return map[string]string{"VALKEY_PASSWORD": c.Password}
 	}
 	return map[string]string{"REDIS_PASSWORD": c.Password}
 }
@@ -166,6 +196,11 @@ func (e *Engine) CredentialsFrom(env map[string]string) Credentials {
 	case "mariadb":
 		return Credentials{Database: env["MARIADB_DATABASE"], User: env["MARIADB_USER"], Password: env["MARIADB_PASSWORD"],
 			RootPassword: env["MARIADB_ROOT_PASSWORD"]}
+	case "mongodb":
+		return Credentials{Database: env["MONGO_INITDB_DATABASE"], User: env["MONGO_INITDB_ROOT_USERNAME"],
+			Password: env["MONGO_INITDB_ROOT_PASSWORD"]}
+	case "valkey":
+		return Credentials{Password: env["VALKEY_PASSWORD"]}
 	}
 	return Credentials{Password: env["REDIS_PASSWORD"]}
 }
@@ -182,11 +217,24 @@ func (e *Engine) URLPort(host string, port int, c Credentials) string {
 		u.Scheme, u.User, u.Path = "postgres", url.UserPassword(c.User, c.Password), "/"+c.Database
 	case "mysql", "mariadb":
 		u.Scheme, u.User, u.Path = "mysql", url.UserPassword(c.User, c.Password), "/"+c.Database
+	case "mongodb":
+		// The user is defined in the admin database.
+		u.Scheme, u.User, u.Path, u.RawQuery = "mongodb", url.UserPassword(c.User, c.Password), "/"+c.Database, "authSource=admin"
+	case "valkey":
+		// Valkey 9.1 refuses an empty user name, which clients send for
+		// redis://:password@; "default" is the user requirepass sets.
+		u.Scheme, u.User = "redis", url.UserPassword("default", c.Password)
 	default:
 		u.Scheme, u.User = "redis", url.UserPassword("", c.Password)
 	}
 	return u.String()
 }
+
+// mongoHealth pings the server at the container's own (IPv4) address:
+// while the image initialises the database, a temporary server listens on
+// 127.0.0.1 only, and must not count as ready.
+const mongoHealth = `h=$(hostname -I | tr ' ' '\n' | grep -m1 '\.') && ` +
+	`mongosh --quiet --norc --host "$h" --eval 'quit(db.adminCommand({ping: 1}).ok ? 0 : 1)'`
 
 // Limits on a database container.
 type Limits struct {
@@ -204,7 +252,7 @@ func (e *Engine) Service(name, version string, env map[string]string, l Limits) 
 		return agentproto.ServiceSpec{}, fmt.Errorf("%s %s is not offered", e.Name, version)
 	}
 	c := e.CredentialsFrom(env)
-	if c.Password == "" || e.SQL && (c.Database == "" || c.User == "") {
+	if c.Password == "" || !e.KeyValue() && (c.Database == "" || c.User == "") {
 		return agentproto.ServiceSpec{}, fmt.Errorf("the database's credentials are missing")
 	}
 	svc := agentproto.ServiceSpec{
@@ -243,6 +291,14 @@ func (e *Engine) Service(name, version string, env map[string]string, l Limits) 
 		svc.Command = []string{"redis-server", "--appendonly", "yes", "--requirepass", c.Password}
 		svc.Env = map[string]string{"REDISCLI_AUTH": c.Password} // for the health check
 		svc.Health.Test = []string{"CMD-SHELL", "redis-cli ping | grep -q PONG"}
+	case "valkey":
+		path = "/data"
+		svc.Command = []string{"valkey-server", "--appendonly", "yes", "--requirepass", c.Password}
+		svc.Env = map[string]string{"REDISCLI_AUTH": c.Password} // for the health check (Valkey 8 reads no other)
+		svc.Health.Test = []string{"CMD-SHELL", "valkey-cli ping | grep -q PONG"}
+	case "mongodb":
+		path = "/data/db"
+		svc.Health.Test = []string{"CMD-SHELL", mongoHealth}
 	}
 	svc.Mounts = []agentproto.ServiceMount{{Volume: Volume, Path: path}}
 	return svc, nil

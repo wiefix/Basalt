@@ -324,6 +324,10 @@ type AppSpec struct {
 	Attach []int64 `json:"attach,omitempty"`
 	// DBUpgrade: this deployment moves a database to a newer major version.
 	DBUpgrade *DBUpgrade `json:"db_upgrade,omitempty"`
+	// MongoFCV sets the feature compatibility version of the MongoDB
+	// database (the only service) after the deployment: its next major
+	// release starts only on files set to this one.
+	MongoFCV string `json:"mongo_fcv,omitempty"`
 	// Mail marks the mail server, the one app allowed to publish ports on
 	// the host (ServiceSpec.HostPorts).
 	Mail bool `json:"mail,omitempty"`
@@ -676,7 +680,7 @@ const TypeDBPassword = "db_password"
 type ContainerDBPassword struct {
 	AppID    int64  `json:"app_id"`
 	Service  string `json:"service"`
-	Engine   string `json:"engine"` // postgres, mysql, mariadb
+	Engine   string `json:"engine"` // postgres, mysql, mariadb, mongodb
 	Database string `json:"database"`
 	User     string `json:"user"`
 	Password string `json:"password"`
@@ -689,7 +693,7 @@ func (r *ContainerDBPassword) Validate() error {
 	case r.AppID <= 0 || !ServiceNameRE.MatchString(r.Service):
 		return errors.New("invalid database app")
 	case !dumpEngines[r.Engine]:
-		return errors.New("only PostgreSQL, MySQL and MariaDB passwords are changed this way")
+		return errors.New("only PostgreSQL, MySQL, MariaDB and MongoDB passwords are changed this way")
 	case !sqlNameRE.MatchString(r.User) || !sqlNameRE.MatchString(r.Database):
 		return errors.New("invalid database or user name")
 	case !dbPasswordRE.MatchString(r.Password):

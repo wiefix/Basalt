@@ -19,14 +19,17 @@ func TestServicesPassAgentValidation(t *testing.T) {
 				t.Fatalf("%s %s: %v", e.ID, v, err)
 			}
 			spec := agentproto.AppSpec{AppID: 7, DeploymentID: 1, Services: []agentproto.ServiceSpec{svc},
-				ComposeVolumes: []string{Volume}, Attach: []int64{3, 4}}
+				ComposeVolumes: []string{Volume}, Attach: []int64{3, 4}, MongoFCV: e.FeatureCompat(v)}
 			if err := spec.Validate(); err != nil {
 				t.Fatalf("%s %s: %v", e.ID, v, err)
+			}
+			if spec.MongoFCV = "9.0; db.dropDatabase()"; spec.Validate() == nil {
+				t.Fatalf("%s %s: invalid feature compatibility version accepted", e.ID, v)
 			}
 			if svc.Health == nil || len(svc.Health.Test) == 0 || len(svc.Mounts) != 1 || svc.Restart != "unless-stopped" {
 				t.Fatalf("%s %s: incomplete service %+v", e.ID, v, svc)
 			}
-			if !strings.HasPrefix(svc.Image, e.ID+":"+v) {
+			if !strings.HasPrefix(svc.Image, e.image+":"+v) {
 				t.Fatalf("%s %s: image %s", e.ID, v, svc.Image)
 			}
 		}
@@ -50,7 +53,7 @@ func TestCredentials(t *testing.T) {
 		if got := e.CredentialsFrom(e.Env(c)); got != c {
 			t.Fatalf("%s: round trip %+v != %+v", e.ID, got, c)
 		}
-		if len(c.Password) < 26 || e.SQL && (c.Database != "my_shop_database_with_a_rather_long_name" || len(c.User) > 32) {
+		if len(c.Password) < 26 || !e.KeyValue() && (c.Database != "my_shop_database_with_a_rather_long_name" || len(c.User) > 32) {
 			t.Fatalf("%s: credentials %+v", e.ID, c)
 		}
 		if (e.ID == "mysql" || e.ID == "mariadb") != (c.RootPassword != "") {
@@ -63,11 +66,25 @@ func TestCredentials(t *testing.T) {
 		if pw, _ := u.User.Password(); pw != c.Password {
 			t.Fatalf("%s: url password %q", e.ID, pw)
 		}
+		if !e.KeyValue() && (u.User.Username() != c.User || u.Path != "/"+c.Database) {
+			t.Fatalf("%s: url user or database %v", e.ID, u)
+		}
 	}
 	// Missing credentials are an error, not an unprotected database.
-	e, _ := Get("redis")
-	if _, err := e.Service("cache", "8", map[string]string{}, Limits{}); err == nil {
-		t.Fatal("redis without a password accepted")
+	for _, id := range []string{"redis", "valkey", "mongodb"} {
+		e, _ := Get(id)
+		if _, err := e.Service("cache", e.Versions[0], map[string]string{}, Limits{}); err == nil {
+			t.Fatalf("%s without a password accepted", id)
+		}
+	}
+	// MongoDB's user is defined in the admin database.
+	mg, _ := Get("mongodb")
+	if u := mg.URL("docs", Credentials{Database: "docs", User: "docs", Password: "pw"}); u != "mongodb://docs:pw@docs:27017/docs?authSource=admin" {
+		t.Fatalf("mongodb url %s", u)
+	}
+	vk, _ := Get("valkey")
+	if u := vk.URL("cache", Credentials{Password: "pw"}); u != "redis://default:pw@cache:6379" {
+		t.Fatalf("valkey url %s", u)
 	}
 }
 
@@ -82,7 +99,7 @@ func TestRejected(t *testing.T) {
 	if _, err := e.Service("pg", "9.6", env, Limits{}); err == nil {
 		t.Error("unoffered version accepted")
 	}
-	if _, ok := Get("mongodb"); ok {
+	if _, ok := Get("mongo"); ok {
 		t.Error("unknown engine found")
 	}
 }
@@ -100,6 +117,10 @@ func TestUpgradeTargets(t *testing.T) {
 		{"mariadb", "11.8", nil},
 		{"redis", "7.4", []string{"8"}},
 		{"redis", "8", nil},
+		{"valkey", "8", []string{"9"}},
+		{"valkey", "9", nil},
+		{"mongodb", "8.0", []string{"9.0"}}, // one release at a time
+		{"mongodb", "9.0", nil},
 		{"mysql", "8.4", nil},
 		{"postgres", "9.6", nil},
 	} {
@@ -119,16 +140,43 @@ func TestUpgradeTargets(t *testing.T) {
 	}
 }
 
-func TestProtocolAndTLS(t *testing.T) {
+func TestProtocol(t *testing.T) {
 	for _, e := range All() {
-		d := agentproto.DBExpose{AppID: 1, Service: "db", TargetPort: e.Port, Port: 15000, Allow: []string{"192.0.2.1"}, Protocol: e.Protocol()}
+		d := agentproto.DBExpose{AppID: 1, Service: "db", TargetPort: e.Port, Port: 15000, Allow: []string{"192.0.2.1"},
+			Protocol: e.Protocol(), RequireTLS: true}
 		if err := d.Validate(); err != nil {
 			t.Errorf("%s: %v", e.ID, err)
 		}
+	}
+	for id, want := range map[string]string{"mariadb": "mysql", "valkey": "redis", "mongodb": "mongodb", "postgres": "postgres"} {
+		if e, _ := Get(id); e.Protocol() != want {
+			t.Errorf("%s speaks %s", id, e.Protocol())
+		}
+	}
+}
+
+func TestKeyValueAndPassword(t *testing.T) {
+	for _, e := range All() {
+		kv := e.ID == "redis" || e.ID == "valkey"
+		if e.KeyValue() != kv || e.PasswordRedeploys() != (kv || e.ID == "mongodb") {
+			t.Errorf("%s: KeyValue %v, PasswordRedeploys %v", e.ID, e.KeyValue(), e.PasswordRedeploys())
+		}
 		for _, v := range e.Versions {
-			if want := e.ID != "mariadb" || v != "10.11"; e.TLS(v) != want {
-				t.Errorf("%s %s: TLS = %v", e.ID, v, !want)
+			if fcv := e.FeatureCompat(v); (e.ID == "mongodb") != (fcv == v) {
+				t.Errorf("%s %s: feature compatibility %q", e.ID, v, fcv)
 			}
 		}
+	}
+	// The health check must not take the server MongoDB's image runs while
+	// it initialises (on 127.0.0.1) for the real one.
+	mg, _ := Get("mongodb")
+	svc, err := mg.Service("docs", "9.0", mg.Env(mg.NewCredentials("docs")), Limits{})
+	if err != nil || svc.Mounts[0].Path != "/data/db" || !strings.Contains(svc.Health.Test[1], "hostname -I") {
+		t.Fatalf("mongodb service %+v %v", svc, err)
+	}
+	vk, _ := Get("valkey")
+	svc, err = vk.Service("cache", "9", vk.Env(vk.NewCredentials("cache")), Limits{})
+	if err != nil || svc.Command[0] != "valkey-server" || svc.Env["REDISCLI_AUTH"] == "" || len(svc.Env) != 1 {
+		t.Fatalf("valkey service %+v %v", svc, err)
 	}
 }

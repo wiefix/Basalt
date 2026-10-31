@@ -33,7 +33,7 @@ func TestDatabaseAppAPI(t *testing.T) {
 		body["server_id"] = sid
 		return p.call(want, "POST", "/api/v1/apps", body)
 	}
-	if e := p.call(200, "GET", "/api/v1/database-engines", nil)["engines"].([]any); len(e) != 4 {
+	if e := p.call(200, "GET", "/api/v1/database-engines", nil)["engines"].([]any); len(e) != 6 {
 		t.Fatalf("engines = %v", e)
 	}
 	for _, bad := range []map[string]any{
@@ -161,7 +161,7 @@ func TestDatabaseAppAPI(t *testing.T) {
 	}
 	// TLS is offered with the panel's database CA; required, the URL asks
 	// for it.
-	if pub["connection"].(map[string]any)["public_tls"] != true || pc["require_tls"] != false || !strings.Contains(pc["ca_cert"].(string), "BEGIN CERTIFICATE") {
+	if pc["require_tls"] != false || !strings.Contains(pc["ca_cert"].(string), "BEGIN CERTIFICATE") {
 		t.Fatalf("public TLS = %v", pc)
 	}
 	pc = p.call(200, "PUT", base+"/public-access", map[string]any{"port": port, "allow": []string{"127.0.0.1"}, "require_tls": true})["connection"].(map[string]any)["public"].(map[string]any)
@@ -189,11 +189,28 @@ func TestDatabaseAppAPI(t *testing.T) {
 		t.Fatalf("public port: %v", err)
 	}
 	c.Close()
-	// MariaDB 10.11 has no TLS to require.
+	// MariaDB 10.11 (no TLS in its container) can require it too: the agent
+	// ends it alone. MongoDB's URL asks for TLS with an option.
 	old := p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{"server_id": sid, "name": "old", "source": "database",
 		"engine": "mariadb", "version": "10.11"})["app"].(map[string]any)
-	p.call(http.StatusUnprocessableEntity, "PUT", "/api/v1/apps/"+jsonID(old["id"])+"/public-access",
-		map[string]any{"port": freePort(t), "allow": []string{"127.0.0.1"}, "require_tls": true})
+	op := p.call(200, "PUT", "/api/v1/apps/"+jsonID(old["id"])+"/public-access",
+		map[string]any{"port": freePort(t), "allow": []string{"127.0.0.1"}, "require_tls": true})["connection"].(map[string]any)["public"].(map[string]any)
+	if op["require_tls"] != true {
+		t.Fatalf("mariadb 10.11 public = %v", op)
+	}
+	p.call(200, "PUT", "/api/v1/apps/"+jsonID(old["id"])+"/public-access", map[string]any{"port": 0})
+	mg := p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{"server_id": sid, "name": "docs", "source": "database",
+		"engine": "mongodb"})["app"].(map[string]any)
+	if mg["version"] != "9.0" || mg["image"] != "mongo:9.0" {
+		t.Fatalf("mongodb = %v", mg)
+	}
+	mp := p.call(200, "PUT", "/api/v1/apps/"+jsonID(mg["id"])+"/public-access",
+		map[string]any{"port": freePort(t), "allow": []string{"127.0.0.1"}, "require_tls": true})["connection"].(map[string]any)
+	if u, _ := mp["public"].(map[string]any)["url"].(string); !strings.HasPrefix(mp["url"].(string), "mongodb://docs:") ||
+		!strings.HasSuffix(mp["url"].(string), "@docs:27017/docs?authSource=admin") || !strings.HasSuffix(u, "/docs?authSource=admin&tls=true") {
+		t.Fatalf("mongodb connection = %v", mp)
+	}
+	p.call(200, "PUT", "/api/v1/apps/"+jsonID(mg["id"])+"/public-access", map[string]any{"port": 0})
 	// The port is the server's: another database cannot take it.
 	p.call(http.StatusConflict, "PUT", "/api/v1/apps/"+jsonID(cache["id"])+"/public-access", map[string]any{"port": port, "allow": []string{"127.0.0.1"}})
 	priv := p.call(200, "PUT", base+"/public-access", map[string]any{"port": 0})
@@ -398,8 +415,9 @@ func TestDatabaseWithDocker(t *testing.T) {
 	}
 }
 
-// TestEveryEngineWithDocker deploys the default version of every engine and
-// signs in with the client of its image. Opt-in and slow (large images):
+// TestEveryEngineWithDocker deploys the default version of every engine
+// (and MariaDB 10.11, whose container has no TLS) and signs in with the
+// client of its image. Opt-in and slow (large images):
 // run it when changing engines or versions.
 func TestEveryEngineWithDocker(t *testing.T) {
 	if os.Getenv("BASALT_DB_ENGINE_TESTS") != "1" {
@@ -423,11 +441,22 @@ func TestEveryEngineWithDocker(t *testing.T) {
 		storage = p.call(http.StatusCreated, "POST", "/api/v1/backup-storages", map[string]any{
 			"name": "local", "kind": "local", "path": filepath.Join(t.TempDir(), "backups")})["storage"].(map[string]any)["id"]
 	}
+	type engineCase struct{ engine, version string }
+	var cases []engineCase
 	for _, e := range p.call(200, "GET", "/api/v1/database-engines", nil)["engines"].([]any) {
-		engine := e.(map[string]any)["id"].(string)
-		t.Run(engine, func(t *testing.T) {
+		cases = append(cases, engineCase{e.(map[string]any)["id"].(string), ""})
+	}
+	cases = append(cases, engineCase{"mariadb", "10.11"})
+	for _, ec := range cases {
+		engine := ec.engine
+		name := engine + "-db"
+		if ec.version != "" {
+			name = engine + "-" + strings.ReplaceAll(ec.version, ".", "-")
+		}
+		kv := engine == "redis" || engine == "valkey"
+		t.Run(name, func(t *testing.T) {
 			app := p.call(http.StatusCreated, "POST", "/api/v1/apps", map[string]any{
-				"server_id": mustAtoi(h.id), "name": engine + "-db", "source": "database", "engine": engine,
+				"server_id": mustAtoi(h.id), "name": name, "source": "database", "engine": engine, "version": ec.version,
 			})["app"].(map[string]any)
 			id, image := jsonID(app["id"]), app["image"].(string)
 			base := "/api/v1/apps/" + id
@@ -443,7 +472,7 @@ func TestEveryEngineWithDocker(t *testing.T) {
 			c := p.call(200, "GET", base+"/connection", nil)["connection"].(map[string]any)
 			cr := c["credentials"].(map[string]any)
 			host, pw := c["host"].(string), cr["password"].(string)
-			user, _ := cr["user"].(string) // none for Redis
+			user, _ := cr["user"].(string) // none for Redis and Valkey
 			db, _ := cr["database"].(string)
 			var args []string
 			switch engine {
@@ -453,8 +482,10 @@ func TestEveryEngineWithDocker(t *testing.T) {
 				args = []string{"mysql", "-h", host, "-u", user, "-p" + pw, db, "-sNe", "SELECT 1"}
 			case "mariadb":
 				args = []string{"mariadb", "-h", host, "-u", user, "-p" + pw, db, "-sNe", "SELECT 1"}
-			case "redis":
-				args = []string{"redis-cli", "-u", c["url"].(string), "--no-auth-warning", "ping"}
+			case "mongodb":
+				args = []string{"mongosh", c["url"].(string), "--quiet", "--norc", "--eval", "db.runCommand({ping: 1}).ok"}
+			case "redis", "valkey":
+				args = []string{engine + "-cli", "-u", c["url"].(string), "--no-auth-warning", "ping"}
 			}
 			out, err := exec.Command("docker", append([]string{"--host", "unix://" + sock, "run", "--rm",
 				"--network", appNet(web), image}, args...)...).CombinedOutput()
@@ -462,9 +493,16 @@ func TestEveryEngineWithDocker(t *testing.T) {
 				t.Fatalf("client: %v %s", err, s)
 			}
 			publicTLS(t, p, sock, base, engine, image, user, pw, db)
-			if engine != "redis" {
+			if !kv {
 				// A new password signs in; the old one no longer does.
 				nc := p.call(200, "POST", base+"/password", map[string]any{})["connection"].(map[string]any)
+				if engine == "mongodb" {
+					// Redeployed with it: the tools in the container sign in with it.
+					dep := p.call(200, "GET", base+"/deployments", nil)["deployments"].([]any)[0].(map[string]any)
+					if d, log := followDeployment(t, p, base, jsonID(dep["id"])); d["status"] != "succeeded" {
+						t.Fatalf("deployment with the new password: %v\n%s", d, log)
+					}
+				}
 				npw := nc["credentials"].(map[string]any)["password"].(string)
 				sign := func(pass, url string) error {
 					var a []string
@@ -475,6 +513,8 @@ func TestEveryEngineWithDocker(t *testing.T) {
 						a = []string{"mysql", "-h", host, "-u", user, "-p" + pass, db, "-sNe", "SELECT 1"}
 					case "mariadb":
 						a = []string{"mariadb", "-h", host, "-u", user, "-p" + pass, db, "-sNe", "SELECT 1"}
+					case "mongodb":
+						a = []string{"mongosh", url, "--quiet", "--norc", "--eval", "db.runCommand({ping: 1}).ok"}
 					}
 					out, err := exec.Command("docker", append([]string{"--host", "unix://" + sock, "run", "--rm",
 						"--network", appNet(web), image}, a...)...).CombinedOutput()
@@ -506,30 +546,41 @@ func TestEveryEngineWithDocker(t *testing.T) {
 					args = []string{"sh", "-c", `MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot -N "$0" -e "$1"`, db, q}
 				case "mariadb":
 					args = []string{"sh", "-c", `MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot -N "$0" -e "$1"`, db, q}
-				case "redis":
-					args = append([]string{"redis-cli"}, strings.Fields(q)...)
+				case "mongodb":
+					args = []string{"mongosh", "--quiet", "--norc", "-u", user, "-p", pw, "--authenticationDatabase", "admin", db, "--eval", q}
+				case "redis", "valkey":
+					args = append([]string{engine + "-cli"}, strings.Fields(q)...)
 				}
 				return strings.TrimSpace(dockerOut(t, sock, append([]string{"exec", ctr}, args...)...))
 			}
-			if engine == "redis" {
+			switch {
+			case kv:
 				query("SET k kept")
 				time.Sleep(1500 * time.Millisecond) // appendfsync everysec
-			} else {
+			case engine == "mongodb":
+				query(`db.t.insertOne({v: "kept"})`)
+			default:
 				query("CREATE TABLE t (v VARCHAR(10)); INSERT INTO t VALUES ('kept')")
 			}
 			p.call(200, "PUT", base+"/backup-policy", map[string]any{"storage_id": storage, "schedule": "manual", "keep_last": 2})
 			appBackupRound(t, p, id, func() {
-				if engine == "redis" {
+				switch {
+				case kv:
 					query("SET k damaged")
-				} else {
+				case engine == "mongodb":
+					query(`db.t.updateOne({}, {$set: {v: "damaged"}})`)
+				default:
 					query("UPDATE t SET v = 'damaged'")
 				}
 			})
 			got := ""
 			eventually(t, "restored value", func() bool {
-				if engine == "redis" {
+				switch {
+				case kv:
 					got = query("GET k")
-				} else {
+				case engine == "mongodb":
+					got = query(`print(db.t.findOne().v)`)
+				default:
 					got = query("SELECT v FROM t")
 				}
 				return got == "kept"
@@ -560,7 +611,7 @@ func publicTLS(t *testing.T, p *panel, sock, base, engine, image, user, pw, db s
 	}
 	t.Cleanup(func() { p.call(200, "PUT", base+"/public-access", map[string]any{"port": 0}) })
 	pub := r["connection"].(map[string]any)["public"].(map[string]any)
-	if r["connection"].(map[string]any)["public_tls"] != true || pub["require_tls"] != true || !strings.Contains(pub["ca_cert"].(string), "BEGIN CERTIFICATE") {
+	if pub["require_tls"] != true || !strings.Contains(pub["ca_cert"].(string), "BEGIN CERTIFICATE") {
 		t.Fatalf("public = %v", pub)
 	}
 	dir := t.TempDir()
@@ -602,8 +653,16 @@ func publicTLS(t *testing.T, p *panel, sock, base, engine, image, user, pw, db s
 		args := []string{"mariadb", "-h", host, "-P", P, "-u", user, "-p" + pw}
 		withTLS = append(append(slices.Clone(args), check...), db, "-sNe", "SELECT 1")
 		plain = append(slices.Clone(args), "--skip-ssl", db, "-sNe", "SELECT 1")
-	case "redis":
-		args := []string{"redis-cli", "-h", host, "-p", P, "-a", pw, "--no-auth-warning"}
+	case "mongodb":
+		args := []string{"mongosh", fmt.Sprintf("mongodb://%s:%s/%s?authSource=admin", host, P, db), "-u", user, "-p", pw,
+			"--quiet", "--norc", "--eval", "db.runCommand({ping: 1}).ok"}
+		withTLS = append(slices.Clone(args), "--tls", "--tlsCAFile", "/ca/ca.pem")
+		if !verify {
+			withTLS = append(withTLS, "--tlsAllowInvalidHostnames")
+		}
+		plain = args
+	case "redis", "valkey":
+		args := []string{engine + "-cli", "-h", host, "-p", P, "-a", pw, "--no-auth-warning"}
 		withTLS = append(slices.Clone(args), "--tls", "--cacert", "/ca/ca.pem", "ping")
 		plain = append(slices.Clone(args), "ping")
 	}

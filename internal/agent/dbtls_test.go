@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/binary"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -272,11 +273,115 @@ func TestDBTLSMySQL(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A container without TLS: none offered.
-	port, _ = exposeTLS(t, agentproto.DBProtocolMySQL, false, mysqlServer(t, false))
-	c = dialDB(t, port)
-	g, _ = readMySQLPacket(c)
-	if ssl, ok := mysqlGreetingSSL(g); !ok || ssl {
-		t.Fatal("TLS offered for a container without it")
+}
+
+// mysqlPlainServer stands in for a container without TLS (MariaDB 10.11):
+// it checks that the handshake response comes as packet 1 without
+// CLIENT_SSL, asks the client to switch its authentication method, takes
+// the answer as packet 3, says OK and echoes.
+func mysqlPlainServer(t *testing.T, errs chan<- error) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		c.Write(mysqlGreeting(false))
+		p, err := readMySQLPacket(c)
+		switch {
+		case err != nil:
+		case p[3] != 1 || binary.LittleEndian.Uint32(p[4:])&mysqlClientSSL != 0:
+			err = fmt.Errorf("handshake response %v", p[:8])
+		default:
+			c.Write(mysqlPacket(2, append([]byte{0xfe}, "mysql_native_password\x00scramble\x00"...)))
+			if p, err = readMySQLPacket(c); err == nil && (p[3] != 3 || string(p[4:]) != "answer") {
+				err = fmt.Errorf("auth switch response %v", p)
+			}
+			c.Write(mysqlPacket(4, []byte{0, 0, 0, 2, 0, 0, 0}))
+		}
+		errs <- err
+		io.Copy(c, c)
+	}()
+	return ln.Addr().String()
+}
+
+// A container without TLS: the agent offers it and ends it alone,
+// renumbering the authentication's packets.
+func TestDBTLSMariaDBWithoutTLS(t *testing.T) {
+	errs := make(chan error, 1)
+	port, pool := exposeTLS(t, agentproto.DBProtocolMySQL, true, mysqlPlainServer(t, errs))
+	c := dialDB(t, port)
+	g, err := readMySQLPacket(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ssl, ok := mysqlGreetingSSL(g); !ok || !ssl {
+		t.Fatal("the greeting does not offer TLS")
+	}
+	c.Write(mysqlPacket(1, append(binary.LittleEndian.AppendUint32(nil, 0x0200|mysqlClientSSL), make([]byte, 28)...)))
+	tc := clientTLS(t, c, pool)
+	tc.Write(mysqlPacket(2, append(binary.LittleEndian.AppendUint32(nil, 0x0200|mysqlClientSSL), "user\x00........"...)))
+	if p, err := readMySQLPacket(tc); err != nil || p[3] != 3 || p[4] != 0xfe {
+		t.Fatalf("auth switch: %v %v", p, err)
+	}
+	tc.Write(mysqlPacket(4, []byte("answer")))
+	if p, err := readMySQLPacket(tc); err != nil || p[3] != 5 || p[4] != 0 {
+		t.Fatalf("OK: %v %v", p, err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	if err := echoesOn(tc); err != nil {
+		t.Fatalf("commands: %v", err)
+	}
+}
+
+// mongoHello is a message of opcode op with request ID 42.
+func mongoHello(op uint32) []byte {
+	b := make([]byte, 16, 40)
+	binary.LittleEndian.PutUint32(b[4:], 42)
+	binary.LittleEndian.PutUint32(b[12:], op)
+	b = append(b, make([]byte, 24)...)
+	binary.LittleEndian.PutUint32(b, uint32(len(b)))
+	return b
+}
+
+func TestDBTLSMongo(t *testing.T) {
+	port, pool := exposeTLS(t, agentproto.DBProtocolMongo, false, echoServer(t))
+	if err := echoesOn(clientTLS(t, dialDB(t, port), pool)); err != nil {
+		t.Fatalf("over TLS: %v", err)
+	}
+	if err := echoes(port); err != nil {
+		t.Fatalf("plain: %v", err)
+	}
+	port, pool = exposeTLS(t, agentproto.DBProtocolMongo, true, echoServer(t))
+	if err := echoesOn(clientTLS(t, dialDB(t, port), pool)); err != nil {
+		t.Fatalf("over TLS, required: %v", err)
+	}
+	// Required: a hello without TLS gets an error reply of its kind.
+	for op, reply := range map[uint32]uint32{mongoOpMsg: mongoOpMsg, mongoOpQuery: mongoOpReply} {
+		c := dialDB(t, port)
+		c.Write(mongoHello(op))
+		b, _ := io.ReadAll(c)
+		if len(b) < 16 || int(binary.LittleEndian.Uint32(b)) != len(b) || binary.LittleEndian.Uint32(b[8:]) != 42 ||
+			binary.LittleEndian.Uint32(b[12:]) != reply || !bytes.Contains(b, []byte("TLS connections only")) {
+			t.Fatalf("hello %d without TLS answered %q", op, b)
+		}
+	}
+}
+
+func TestBSONError(t *testing.T) {
+	b := bsonError("no")
+	want := []byte{0x1d, 0, 0, 0, 0x01, 'o', 'k', 0, 0, 0, 0, 0, 0, 0, 0, 0,
+		0x02, 'e', 'r', 'r', 'm', 's', 'g', 0, 3, 0, 0, 0, 'n', 'o', 0, 0}
+	want[0] = byte(len(want))
+	if !bytes.Equal(b, want) {
+		t.Fatalf("%v\nwant %v", b, want)
 	}
 }

@@ -160,7 +160,7 @@ const (
 )
 
 // Engines a db_dump item can dump.
-var dumpEngines = map[string]bool{"postgres": true, "mysql": true, "mariadb": true}
+var dumpEngines = map[string]bool{"postgres": true, "mysql": true, "mariadb": true, "mongodb": true}
 
 // BackupItem is one part of a resource; each becomes a snapshot.
 type BackupItem struct {
@@ -169,7 +169,7 @@ type BackupItem struct {
 	AppID    int64  `json:"app_id,omitempty"`
 	Volume   string `json:"volume,omitempty"`   // volume: the app's name for it
 	Service  string `json:"service,omitempty"`  // db_dump: the service running the database
-	Engine   string `json:"engine,omitempty"`   // db_dump: postgres, mysql or mariadb
+	Engine   string `json:"engine,omitempty"`   // db_dump: postgres, mysql, mariadb or mongodb
 	Database string `json:"database,omitempty"` // mariadb, db_dump
 	User     string `json:"user,omitempty"`     // db_dump (PostgreSQL connects as it)
 }

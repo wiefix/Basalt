@@ -17,7 +17,10 @@ type DBUpgrade struct {
 	To      string      `json:"to"` // the new major version
 }
 
-var majorRE = regexp.MustCompile(`^[1-9][0-9]$`)
+var (
+	majorRE = regexp.MustCompile(`^[1-9][0-9]$`)
+	fcvRE   = regexp.MustCompile(`^[1-9][0-9]?\.[0-9]$`) // MongoDB's, "9.0"
+)
 
 func (u *DBUpgrade) validate(s *AppSpec, vols map[string]bool) error {
 	i := -1

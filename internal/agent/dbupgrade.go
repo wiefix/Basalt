@@ -243,3 +243,40 @@ func (m *appsManager) dropOldPostgres(ctx context.Context, dc *docker.Client, sp
 	}
 	lg.printf("Removed the old version's data from the volume")
 }
+
+// mongoFCV sets MongoDB's feature compatibility version to $BASALT_FCV,
+// signed in as the root user of the container's environment.
+const mongoFCV = `const a = db.getSiblingDB("admin"); ` +
+	`a.auth(process.env.MONGO_INITDB_ROOT_USERNAME, process.env.MONGO_INITDB_ROOT_PASSWORD); ` +
+	`const r = a.runCommand({setFeatureCompatibilityVersion: process.env.BASALT_FCV, confirm: true}); ` +
+	`if (!r.ok) { print(r.errmsg); quit(1) }`
+
+// setMongoFCV sets a MongoDB database's feature compatibility version to
+// its release once it runs (nothing changes when it is set already), so
+// the next major release can start on its files. A failure is a warning:
+// the next deployment tries again, and until then a newer release refuses
+// to start, leaving the files as they are (the deployment rolls back).
+func (m *appsManager) setMongoFCV(ctx context.Context, dc *docker.Client, spec agentproto.AppSpec, lg *deployLog) {
+	err := func() error {
+		bin, err := exec.LookPath("docker")
+		if err != nil {
+			return errors.New("the docker command is not installed")
+		}
+		c, err := m.current(ctx, dc, spec.AppID, spec.Services[0].Name)
+		if err != nil {
+			return err
+		}
+		if c == nil {
+			return errors.New("the database is not running")
+		}
+		out, err := command(ctx, []string{bin, "--host", "unix://" + m.socket, "exec", "-e", "BASALT_FCV=" + spec.MongoFCV, c.ID,
+			"mongosh", "--quiet", "--norc", "--eval", mongoFCV}).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}()
+	if err != nil {
+		lg.printf("Warning: MongoDB's feature compatibility version was not set to %s (needed before the next major upgrade): %v", spec.MongoFCV, err)
+	}
+}

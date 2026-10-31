@@ -211,13 +211,16 @@ func (b *backupManager) exportDump(ctx context.Context, r *restic.Runner, repo r
 	}
 	part := req.PartOf()
 	db, site := strings.CutPrefix(part, agentproto.PartMariaDB)
-	file := dumpFile(db)
+	file, ext := dumpFile(db), ".sql"
 	if !site {
 		db = strings.TrimPrefix(part, agentproto.PartDump)
 		file = dumpFileOf(db)
+		if snap.Paths[0] == "/"+mongoDumpFileOf(db) { // MongoDB's
+			file, ext = mongoDumpFileOf(db), ".archive"
+		}
 	}
 	return b.export(func(w io.Writer) (string, error) {
-		return fmt.Sprintf("%s-%s.sql", db, snap.ID[:8]), r.Dump(ctx, repo, snap.ID, "/"+file, w)
+		return fmt.Sprintf("%s-%s%s", db, snap.ID[:8], ext), r.Dump(ctx, repo, snap.ID, "/"+file, w)
 	})
 }
 

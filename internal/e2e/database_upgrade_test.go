@@ -14,8 +14,8 @@ import (
 // TestDatabaseUpgradeWithDocker moves a PostgreSQL database to a newer
 // major version (its data dumped into a new cluster in the same volume)
 // and checks that every database and role came along, the old data is
-// gone and no rollback goes back. With BASALT_DB_ENGINE_TESTS, MariaDB and
-// Redis too (they read their old files).
+// gone and no rollback goes back. With BASALT_DB_ENGINE_TESTS, MariaDB,
+// Redis, Valkey and MongoDB too (they read their old files).
 func TestDatabaseUpgradeWithDocker(t *testing.T) {
 	if os.Getenv("BASALT_DOCKER_TESTS") != "1" {
 		t.Skip("set BASALT_DOCKER_TESTS=1 to run against the local Docker daemon")
@@ -167,5 +167,36 @@ func TestDatabaseUpgradeWithDocker(t *testing.T) {
 	}
 	if v := redis("GET", "k"); v != "kept" {
 		t.Fatalf("redis after the upgrade: %q", v)
+	}
+
+	vk := create(map[string]any{"name": "vk", "source": "database", "engine": "valkey", "version": "8"})
+	deploy(vk)
+	valkey := func(args ...string) string { return exec_(vk, append([]string{"valkey-cli"}, args...)...) }
+	valkey("SET", "k", "kept")
+	valkey("SAVE")
+	if d, log := upgrade(vk, "9"); d["status"] != "succeeded" {
+		t.Fatalf("valkey upgrade: %v\n%s", d, log)
+	}
+	if v := valkey("GET", "k"); v != "kept" || !strings.Contains(valkey("INFO", "server"), "valkey_version:9.") {
+		t.Fatalf("valkey after the upgrade: %q", v)
+	}
+
+	// MongoDB starts on the files of the release before once they are set
+	// to its features: each deployment sets them to its own release.
+	mg := create(map[string]any{"name": "mg", "source": "database", "engine": "mongodb", "version": "8.0"})
+	deploy(mg)
+	mongo := func(js string) string {
+		return exec_(mg, "sh", "-c", `exec mongosh --quiet --norc -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" --authenticationDatabase admin mg --eval "$0"`, js)
+	}
+	fcv := `print(db.adminCommand({getParameter: 1, featureCompatibilityVersion: 1}).featureCompatibilityVersion.version)`
+	if v := mongo(fcv); v != "8.0" {
+		t.Fatalf("mongodb 8.0 feature compatibility %q", v)
+	}
+	mongo(`db.t.insertOne({v: "kept"})`)
+	if d, log := upgrade(mg, "9.0"); d["status"] != "succeeded" {
+		t.Fatalf("mongodb upgrade: %v\n%s", d, log)
+	}
+	if v := mongo(`print(db.version().split(".")[0] + " " + db.t.findOne().v)`); v != "9 kept" || mongo(fcv) != "9.0" {
+		t.Fatalf("mongodb after the upgrade: %q, feature compatibility %q", v, mongo(fcv))
 	}
 }

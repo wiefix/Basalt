@@ -203,6 +203,9 @@ func (m *appsManager) deployCompose(ctx context.Context, dc *docker.Client, spec
 	if spec.DBUpgrade != nil {
 		m.dropOldPostgres(ctx, dc, spec, lg)
 	}
+	if spec.MongoFCV != "" {
+		m.setMongoFCV(ctx, dc, spec, lg)
+	}
 	m.refresh(ctx)
 	return digests, nil
 }

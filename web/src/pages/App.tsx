@@ -5,6 +5,7 @@ import {
   api,
   appPath,
   can,
+  engineNames,
   isCompose,
   sourceLabel,
   type App,
@@ -1747,9 +1748,11 @@ function ConnectionTab({ app }: { app: App }) {
       title: "Give the database a new password?",
       body: (
         <p>
-          {app.engine === "redis"
-            ? "Redis restarts with it (a few seconds). "
-            : "It changes at once; connections already open stay. "}
+          {app.engine === "redis" || app.engine === "valkey"
+            ? `${engineNames[app.engine]} restarts with it (a few seconds). `
+            : app.engine === "mongodb"
+              ? "It changes at once, then MongoDB restarts (a few seconds). "
+              : "It changes at once; connections already open stay. "}
           Linked apps whose environment holds the connection URL get the new one and are redeployed. Anything else using the
           old password stops connecting.
         </p>
@@ -1811,8 +1814,8 @@ function PublicAccessCard({ app, conn }: { app: App; conn: DatabaseConnection })
   const [enabled, setEnabled] = useState(!!pub);
   const [port, setPort] = useState(String(pub?.port ?? conn.port));
   const [allow, setAllow] = useState((pub?.allow ?? []).join("\n"));
-  // New public access requires TLS where the database can take it.
-  const [requireTLS, setRequireTLS] = useState(pub ? pub.require_tls : conn.public_tls);
+  // New public access requires TLS.
+  const [requireTLS, setRequireTLS] = useState(pub ? pub.require_tls : true);
   const [applyError, setApplyError] = useState("");
   const save = useMutation({
     mutationFn: (v: { port: number; allow: string[]; requireTLS: boolean }) =>
@@ -1846,7 +1849,7 @@ function PublicAccessCard({ app, conn }: { app: App; conn: DatabaseConnection })
       ),
       confirm: "Allow every address",
     }))) return;
-    save.mutate({ port: Number(port), allow: list, requireTLS: conn.public_tls && requireTLS });
+    save.mutate({ port: Number(port), allow: list, requireTLS });
   };
   return (
     <form className="card card-body form" onSubmit={submit}>
@@ -1866,17 +1869,10 @@ function PublicAccessCard({ app, conn }: { app: App; conn: DatabaseConnection })
           <Field label="Allowed addresses" help="IP addresses or CIDR prefixes, one per line; 0.0.0.0/0 and ::/0 allow any address">
             <textarea className="input mono" rows={3} value={allow} onChange={(e) => setAllow(e.target.value)} placeholder="203.0.113.7" required />
           </Field>
-          {conn.public_tls ? (
-            <label className="check">
-              <input type="checkbox" checked={requireTLS} onChange={(e) => setRequireTLS(e.target.checked)} /> Require TLS (refuse clients
-              that do not encrypt the connection)
-            </label>
-          ) : (
-            <div className="alert warn small">
-              MariaDB {app.version} has no TLS: the connection is not encrypted. Allow only addresses you trust, reach the port through an
-              SSH tunnel, or upgrade to MariaDB 11.4 or newer.
-            </div>
-          )}
+          <label className="check">
+            <input type="checkbox" checked={requireTLS} onChange={(e) => setRequireTLS(e.target.checked)} /> Require TLS (refuse clients
+            that do not encrypt the connection)
+          </label>
         </>
       )}
       {pub &&
@@ -1914,7 +1910,9 @@ function PublicTLSHelp({ app, conn, pub }: { app: App; conn: DatabaseConnection;
         ? `mysql -h ${host} -P ${pub.port} -u ${c.user} -p --ssl-mode=VERIFY_IDENTITY --ssl-ca=${caFile} ${c.database}`
         : app.engine === "mariadb"
           ? `mariadb -h ${host} -P ${pub.port} -u ${c.user} -p --ssl-ca=${caFile} --ssl-verify-server-cert ${c.database}`
-          : `redis-cli -h ${host} -p ${pub.port} --tls --cacert ${caFile} --askpass`;
+          : app.engine === "mongodb"
+            ? `mongosh "mongodb://${host}:${pub.port}/${c.database}?authSource=admin" --tls --tlsCAFile ${caFile} -u ${c.user} -p`
+            : `${app.engine === "valkey" ? "valkey-cli" : "redis-cli"} -h ${host} -p ${pub.port} --tls --cacert ${caFile} --askpass`;
   const download = () => {
     const url = URL.createObjectURL(new Blob([pub.ca_cert], { type: "application/x-pem-file" }));
     const a = document.createElement("a");
@@ -1966,7 +1964,7 @@ function VersionCard({ app }: { app: App }) {
   if (info.isPending || info.error) return info.error ? <ErrorBox error={info.error} /> : null;
   const d = info.data;
   const to = target || d.targets[0] || "";
-  const engine = app.engine === "postgres" ? "PostgreSQL" : app.engine === "mariadb" ? "MariaDB" : app.engine === "redis" ? "Redis" : "MySQL";
+  const engine = engineNames[app.engine ?? ""] ?? app.engine;
   const ask = async () => {
     const withBackup = backup && d.backups;
     const ok = await confirm({
@@ -1976,7 +1974,13 @@ function VersionCard({ app }: { app: App }) {
           <p>
             {d.dump
               ? "The database stops; its data is dumped and loaded into a new cluster of the new version in the same volume. It is down for as long as that takes (seconds for small databases, longer for large ones). If anything fails, the old version starts again with its data as it was; once the new version runs, the old data is removed."
-              : `The new version starts on the same data files and upgrades them${app.engine === "mariadb" ? " (mariadb-upgrade, a few seconds of downtime)" : ""}.`}
+              : `The new version starts on the same data files and upgrades them${
+                  app.engine === "mariadb"
+                    ? " (mariadb-upgrade, a few seconds of downtime)"
+                    : app.engine === "mongodb"
+                      ? "; once it runs, the data is set to its feature compatibility version (needed for the next upgrade)"
+                      : ""
+                }.`}
           </p>
           <p>
             There is no way back to {engine} {d.version} afterwards: rollbacks only go to deployments of the new version.

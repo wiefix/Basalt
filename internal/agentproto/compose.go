@@ -384,6 +384,9 @@ func (s *AppSpec) ValidateCompose() error {
 			return err
 		}
 	}
+	if s.MongoFCV != "" && (!fcvRE.MatchString(s.MongoFCV) || len(s.Services) != 1) {
+		return fmt.Errorf("invalid feature compatibility version %q", s.MongoFCV)
+	}
 	return ValidateAttach(s.AppID, s.Attach)
 }
 

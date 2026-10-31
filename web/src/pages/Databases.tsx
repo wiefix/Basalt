@@ -187,7 +187,7 @@ function NewDatabaseModal({ onClose }: { onClose: () => void }) {
               className="input mono"
               value={name}
               onChange={(e) => setName(e.target.value.toLowerCase())}
-              placeholder={engine === "redis" ? "cache" : "main-db"}
+              placeholder={engine === "redis" || engine === "valkey" ? "cache" : "main-db"}
               pattern="[a-z][a-z0-9\-]*[a-z0-9]"
               required
               autoFocus

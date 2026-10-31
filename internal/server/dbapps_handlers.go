@@ -32,7 +32,7 @@ func (s *Server) handleListEngines(w http.ResponseWriter, r *http.Request, p *pr
 func databaseSettings(st store.AppSettings, engine, version string) (store.AppSettings, error) {
 	e, ok := dbengine.Get(engine)
 	if !ok {
-		return st, errors.New("engine must be postgres, mysql, mariadb or redis")
+		return st, errors.New("engine must be postgres, mysql, mariadb, mongodb, redis or valkey")
 	}
 	if version == "" {
 		version = e.Versions[0]
@@ -86,6 +86,7 @@ func (s *Server) databaseSpec(app *store.App, version string, pinned map[string]
 	spec.Services = []agentproto.ServiceSpec{svc}
 	spec.ComposeVolumes = []string{dbengine.Volume}
 	spec.Attach = app.Links
+	spec.MongoFCV = e.FeatureCompat(version)
 	return nil
 }
 
@@ -104,9 +105,6 @@ type connectionView struct {
 	URL         string               `json:"url"`
 	EnvVar      string               `json:"env_var"`
 	Credentials dbengine.Credentials `json:"credentials"`
-	// PublicTLS reports whether clients outside the server can connect
-	// over TLS (not MariaDB 10.11).
-	PublicTLS bool `json:"public_tls"`
 	// Public is how clients outside the server connect; null when the
 	// database is reachable from linked apps only.
 	Public *publicAccessView `json:"public"`
@@ -119,9 +117,8 @@ type publicAccessView struct {
 	// connection URL with it.
 	Host string `json:"host"`
 	URL  string `json:"url"`
-	// RequireTLS reports whether clients must use TLS. CACert (PEM,
-	// with TLS) checks the server's certificate, which names its
-	// addresses.
+	// RequireTLS reports whether clients must use TLS. CACert (PEM)
+	// checks the server's certificate, which names its addresses.
 	RequireTLS bool   `json:"require_tls"`
 	CACert     string `json:"ca_cert"`
 }
@@ -136,7 +133,7 @@ func (s *Server) connection(ctx context.Context, app *store.App) (connectionView
 		return connectionView{}, err
 	}
 	c := e.CredentialsFrom(env)
-	v := connectionView{Host: app.Name, Port: e.Port, URL: e.URL(app.Name, c), EnvVar: e.EnvVar, Credentials: c, PublicTLS: e.TLS(app.EngineVersion)}
+	v := connectionView{Host: app.Name, Port: e.Port, URL: e.URL(app.Name, c), EnvVar: e.EnvVar, Credentials: c}
 	if app.PublicPort > 0 {
 		pub := &publicAccessView{Port: app.PublicPort, Allow: app.PublicAllow, RequireTLS: app.PublicRequireTLS}
 		if srv, err := s.db.ServerByID(ctx, app.ServerID); err == nil {
@@ -148,10 +145,8 @@ func (s *Server) connection(ctx context.Context, app *store.App) (connectionView
 				pub.URL = tlsURL(pub.URL)
 			}
 		}
-		if v.PublicTLS {
-			if pub.CACert, err = s.dbCACert(ctx); err != nil {
-				return connectionView{}, err
-			}
+		if pub.CACert, err = s.dbCACert(ctx); err != nil {
+			return connectionView{}, err
 		}
 		v.Public = pub
 	}
@@ -159,8 +154,9 @@ func (s *Server) connection(ctx context.Context, app *store.App) (connectionView
 }
 
 // tlsURL asks for TLS in a connection URL, where URLs can: PostgreSQL's
-// sslmode (verify-full needs the CA's file, so the client's choice) and
-// Redis's rediss scheme. MySQL clients take it as an option instead.
+// sslmode (verify-full needs the CA's file, so the client's choice),
+// Redis's rediss scheme and MongoDB's tls option. MySQL clients take it as
+// an option instead.
 func tlsURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -171,6 +167,10 @@ func tlsURL(raw string) string {
 		u.RawQuery = "sslmode=require"
 	case "redis":
 		u.Scheme = "rediss"
+	case "mongodb":
+		q := u.Query()
+		q.Set("tls", "true")
+		u.RawQuery = q.Encode()
 	}
 	return u.String()
 }
@@ -244,10 +244,6 @@ func (s *Server) handleDatabasePublicAccess(w http.ResponseWriter, r *http.Reque
 		}
 		for _, p := range prefixes {
 			allow = append(allow, p.String())
-		}
-		if e, ok := dbengine.Get(app.Engine); req.RequireTLS && (!ok || !e.TLS(app.EngineVersion)) {
-			writeError(w, http.StatusUnprocessableEntity, "this database version has no TLS (MariaDB has it from 11.4: upgrade the database first)")
-			return
 		}
 	}
 	err := s.db.SetAppPublicAccess(r.Context(), app.ID, req.Port, allow, req.RequireTLS)
@@ -482,8 +478,9 @@ type dbPasswordRequest struct {
 }
 
 // handleDatabasePassword gives a container database a new password. SQL
-// databases change it in place (connections already open stay); Redis is
-// redeployed with it. Linked apps whose variables held the old connection
+// databases change it in place (connections already open stay); Redis and
+// Valkey are redeployed with it, MongoDB both (its container's environment
+// must hold the new one). Linked apps whose variables held the old connection
 // URL get the new one.
 func (s *Server) handleDatabasePassword(w http.ResponseWriter, r *http.Request, p *principal) {
 	app, ok := s.databaseApp(w, r)
@@ -511,7 +508,7 @@ func (s *Server) handleDatabasePassword(w http.ResponseWriter, r *http.Request, 
 	old := e.CredentialsFrom(env)
 	next := old
 	next.Password = rand.Text()
-	if e.SQL {
+	if !e.KeyValue() {
 		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
 		defer cancel()
 		if err := s.agents.Call(ctx, app.ServerID, agentproto.TypeDBPassword, agentproto.ContainerDBPassword{
@@ -532,8 +529,7 @@ func (s *Server) handleDatabasePassword(w http.ResponseWriter, r *http.Request, 
 	}
 	app.EnvSealed = sealed
 	resp := map[string]any{}
-	if !e.SQL {
-		// Redis takes its password from the command line: a new container.
+	if e.PasswordRedeploys() {
 		if _, err := s.startDeployment(r.Context(), app, deployOptions{actorID: &p.user.ID, ip: clientIP(r), trigger: "manual"}); err != nil {
 			resp["deploy_error"] = err.Error()
 		}

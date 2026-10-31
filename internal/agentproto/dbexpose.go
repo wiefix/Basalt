@@ -17,9 +17,10 @@ import (
 //
 // With TLS set, the agent also offers TLS on the ports, in each database's
 // own protocol (Protocol): PostgreSQL's SSLRequest or direct TLS, MySQL's
-// switch to TLS within the handshake, Redis's TLS from the first byte. The
-// agent ends the client's TLS itself, so the database containers need no
-// certificate; RequireTLS refuses clients that do not switch to TLS.
+// switch to TLS within the handshake, Redis's and MongoDB's TLS from the
+// first byte. The agent ends the client's TLS itself, so the database
+// containers need no certificate; RequireTLS refuses clients that do not
+// switch to TLS.
 const TypeDBExpose = "db_expose"
 
 // Limits on public database access.
@@ -49,7 +50,8 @@ type DBExposeTLS struct {
 const (
 	DBProtocolPostgres = "postgres"
 	DBProtocolMySQL    = "mysql" // MySQL and MariaDB
-	DBProtocolRedis    = "redis"
+	DBProtocolRedis    = "redis" // Redis and Valkey
+	DBProtocolMongo    = "mongodb"
 )
 
 // DBExpose makes container port TargetPort of service Service of database
@@ -123,7 +125,7 @@ func (e *DBExpose) Validate() error {
 		return errors.New("invalid database port")
 	case e.Port < MinDBExposePort || e.Port > 65535:
 		return fmt.Errorf("the public port must be between %d and 65535", MinDBExposePort)
-	case !slices.Contains([]string{"", DBProtocolPostgres, DBProtocolMySQL, DBProtocolRedis}, e.Protocol):
+	case !slices.Contains([]string{"", DBProtocolPostgres, DBProtocolMySQL, DBProtocolRedis, DBProtocolMongo}, e.Protocol):
 		return fmt.Errorf("unknown database protocol %q", e.Protocol)
 	case e.RequireTLS && e.Protocol == "":
 		return errors.New("TLS needs the database's protocol")

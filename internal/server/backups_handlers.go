@@ -492,8 +492,8 @@ func (s *Server) items(ctx context.Context, t *backupTarget) ([]agentproto.Backu
 		if !ok {
 			return nil, errors.New("unknown database engine")
 		}
-		if !e.SQL {
-			volume(dbengine.Volume) // Redis: its data files
+		if e.KeyValue() {
+			volume(dbengine.Volume) // Redis and Valkey: their data files
 			break
 		}
 		env, err := s.appEnv(app)
