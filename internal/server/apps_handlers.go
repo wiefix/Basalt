@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/dbengine"
 	"github.com/wiefix/basalt/internal/docker"
 	"github.com/wiefix/basalt/internal/forge"
 	"github.com/wiefix/basalt/internal/mailserver"
@@ -419,6 +420,12 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request, p *prin
 	if st.Git.Builder == agentproto.BuilderRailpack && srv.Railpack == "" {
 		writeError(w, http.StatusUnprocessableEntity, "this server cannot build without a Dockerfile: re-run the installer on it with --with-docker (it adds Railpack)")
 		return
+	}
+	if e, ok := dbengine.Get(st.Engine); ok && req.Source == store.SourceDatabase && srv.OS == "linux" {
+		if msg := e.KernelProblem(st.EngineVersion, srv.Kernel); msg != "" {
+			writeError(w, http.StatusUnprocessableEntity, msg)
+			return
+		}
 	}
 	st.ProjectID = req.ProjectID
 	app, err := s.db.CreateApp(r.Context(), srv.ID, name, st, domains, tls)

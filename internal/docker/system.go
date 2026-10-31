@@ -15,6 +15,7 @@ type Info struct {
 	CgroupDriver    string      `json:"CgroupDriver"`
 	DockerRootDir   string      `json:"DockerRootDir"`
 	MemTotal        uint64      `json:"MemTotal"` // memory of the host (or VM) containers run on
+	KernelVersion   string      `json:"KernelVersion"`
 	DriverStatus    [][2]string `json:"DriverStatus"`
 }
 

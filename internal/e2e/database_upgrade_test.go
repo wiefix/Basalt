@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/wiefix/basalt/internal/dbengine"
 	"github.com/wiefix/basalt/internal/docker"
 )
 
@@ -181,6 +183,22 @@ func TestDatabaseUpgradeWithDocker(t *testing.T) {
 		t.Fatalf("valkey after the upgrade: %q", v)
 	}
 
+	// MongoDB 8.0 does not start on the kernels of new hosts (CI's among
+	// them): the panel refuses it on such a Linux server, and the upgrade
+	// from it cannot be tried there.
+	dinfo, err := dc.Info(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mongoEngine, _ := dbengine.Get("mongodb")
+	if msg := mongoEngine.KernelProblem("8.0", dinfo.KernelVersion); msg != "" {
+		if runtime.GOOS == "linux" {
+			p.call(http.StatusUnprocessableEntity, "POST", "/api/v1/apps", map[string]any{"server_id": sid,
+				"name": "mg", "source": "database", "engine": "mongodb", "version": "8.0"})
+		}
+		t.Log("MongoDB 8.0 → 9.0 not tried: " + msg)
+		return
+	}
 	// MongoDB starts on the files of the release before once they are set
 	// to its features: each deployment sets them to its own release.
 	mg := create(map[string]any{"name": "mg", "source": "database", "engine": "mongodb", "version": "8.0"})

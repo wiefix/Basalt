@@ -108,6 +108,23 @@ func (e *Engine) FeatureCompat(version string) string {
 	return version
 }
 
+// KernelProblem is why version cannot run on a Linux kernel release
+// (uname -r), or "": MongoDB 8.0 refuses to start on 6.19 and newer
+// (SERVER-121912). An unparsable release is no problem.
+func (e *Engine) KernelProblem(version, kernel string) string {
+	if e.ID != "mongodb" || version != "8.0" {
+		return ""
+	}
+	var major, minor int
+	if n, _ := fmt.Sscanf(kernel, "%d.%d", &major, &minor); n != 2 {
+		return ""
+	}
+	if major > 6 || major == 6 && minor >= 19 {
+		return "MongoDB 8.0 does not start on Linux kernel 6.19 and newer (this server runs " + kernel + "): choose MongoDB 9.0"
+	}
+	return ""
+}
+
 // Protocol is how the engine's clients start a connection
 // (agentproto.DBExpose.Protocol): MariaDB speaks MySQL's, Valkey Redis's.
 func (e *Engine) Protocol() string {

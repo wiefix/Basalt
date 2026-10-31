@@ -204,6 +204,24 @@ func TestDatabaseAppAPI(t *testing.T) {
 	if mg["version"] != "9.0" || mg["image"] != "mongo:9.0" {
 		t.Fatalf("mongodb = %v", mg)
 	}
+	// MongoDB 8.0 does not start on Linux 6.19 and newer.
+	var hostOS, kernel string
+	if err := p.db.W.QueryRow(`SELECT os, kernel FROM servers WHERE id = ?`, sid).Scan(&hostOS, &kernel); err != nil {
+		t.Fatal(err)
+	}
+	setKernel := func(os, kernel string) {
+		if _, err := p.db.W.Exec(`UPDATE servers SET os = ?, kernel = ? WHERE id = ?`, os, kernel, sid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setKernel("linux", "6.19.2-generic")
+	if e := create(http.StatusUnprocessableEntity, map[string]any{"name": "old-mongo", "source": "database", "engine": "mongodb",
+		"version": "8.0"}); !strings.Contains(e["error"].(string), "kernel 6.19") {
+		t.Fatalf("mongodb 8.0 on linux 6.19: %v", e)
+	}
+	setKernel("linux", "6.12.1")
+	create(http.StatusCreated, map[string]any{"name": "old-mongo", "source": "database", "engine": "mongodb", "version": "8.0"})
+	setKernel(hostOS, kernel)
 	mp := p.call(200, "PUT", "/api/v1/apps/"+jsonID(mg["id"])+"/public-access",
 		map[string]any{"port": freePort(t), "allow": []string{"127.0.0.1"}, "require_tls": true})["connection"].(map[string]any)
 	if u, _ := mp["public"].(map[string]any)["url"].(string); !strings.HasPrefix(mp["url"].(string), "mongodb://docs:") ||

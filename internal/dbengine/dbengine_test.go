@@ -104,6 +104,27 @@ func TestRejected(t *testing.T) {
 	}
 }
 
+func TestKernelProblem(t *testing.T) {
+	for _, c := range []struct {
+		engine, version, kernel string
+		problem                 bool
+	}{
+		{"mongodb", "8.0", "6.19.0-1-cloud-amd64", true},
+		{"mongodb", "8.0", "6.20.3", true},
+		{"mongodb", "8.0", "7.0.0", true},
+		{"mongodb", "8.0", "6.18.9-generic", false},
+		{"mongodb", "8.0", "6.8.0", false},
+		{"mongodb", "8.0", "", false},
+		{"mongodb", "9.0", "6.19.0", false},
+		{"postgres", "18", "6.19.0", false},
+	} {
+		e, _ := Get(c.engine)
+		if got := e.KernelProblem(c.version, c.kernel) != ""; got != c.problem {
+			t.Errorf("%s %s on %q: problem %v, want %v", c.engine, c.version, c.kernel, got, c.problem)
+		}
+	}
+}
+
 func TestUpgradeTargets(t *testing.T) {
 	for _, c := range []struct {
 		engine, from string
