@@ -49,33 +49,7 @@ func (s *Server) handleProjectAudit(w http.ResponseWriter, r *http.Request, p *p
 }
 
 func (s *Server) auditPage(w http.ResponseWriter, r *http.Request, q store.AuditQuery) {
-	v := r.URL.Query()
-	num := func(name string) (int64, bool) {
-		if v.Get(name) == "" {
-			return 0, true
-		}
-		n, err := strconv.ParseInt(v.Get(name), 10, 64)
-		return n, err == nil && n > 0
-	}
-	var ok bool
-	if q.Before, ok = num("before"); !ok {
-		writeError(w, http.StatusUnprocessableEntity, "before must be an entry ID")
-		return
-	}
-	if l, ok := num("limit"); !ok || l > auditPageMax {
-		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("limit must be 1 to %d", auditPageMax))
-		return
-	} else if l > 0 {
-		q.Limit = int(l)
-	}
-	if v.Get("actor") == "system" {
-		q.System = true
-	} else if q.ActorID, ok = num("actor"); !ok {
-		writeError(w, http.StatusUnprocessableEntity, `actor must be a user ID or "system"`)
-		return
-	}
-	if q.Action = v.Get("action"); len(q.Action) > 100 {
-		writeError(w, http.StatusUnprocessableEntity, "action is too long")
+	if !s.auditFilter(w, r, &q) {
 		return
 	}
 	entries, err := s.db.AuditEntries(r.Context(), q)
@@ -90,19 +64,63 @@ func (s *Server) auditPage(w http.ResponseWriter, r *http.Request, q store.Audit
 	}
 	out := make([]auditView, len(entries))
 	for i, e := range entries {
-		out[i] = auditView{ID: e.ID, At: e.At, Action: e.Action, IP: e.IP, Details: e.Details}
-		if e.ActorID != nil {
-			out[i].Actor = &auditActor{ID: *e.ActorID, Name: e.ActorName, Email: e.ActorEmail}
-		}
+		out[i] = viewAudit(e)
 	}
 	// A full page may be followed by more.
 	more := len(entries) == q.Limit
 	writeJSON(w, http.StatusOK, map[string]any{"entries": out, "actions": actions, "more": more})
 }
 
+func viewAudit(e store.AuditEntry) auditView {
+	v := auditView{ID: e.ID, At: e.At, Action: e.Action, IP: e.IP, Details: e.Details}
+	if e.ActorID != nil {
+		v.Actor = &auditActor{ID: *e.ActorID, Name: e.ActorName, Email: e.ActorEmail}
+	}
+	return v
+}
+
+// auditFilter reads the query's paging and filters into q (false: it
+// answered with an error).
+func (s *Server) auditFilter(w http.ResponseWriter, r *http.Request, q *store.AuditQuery) bool {
+	v := r.URL.Query()
+	num := func(name string) (int64, bool) {
+		if v.Get(name) == "" {
+			return 0, true
+		}
+		n, err := strconv.ParseInt(v.Get(name), 10, 64)
+		return n, err == nil && n > 0
+	}
+	var ok bool
+	if q.Before, ok = num("before"); !ok {
+		writeError(w, http.StatusUnprocessableEntity, "before must be an entry ID")
+		return false
+	}
+	if l, ok := num("limit"); !ok || l > auditPageMax {
+		writeError(w, http.StatusUnprocessableEntity, fmt.Sprintf("limit must be 1 to %d", auditPageMax))
+		return false
+	} else if l > 0 {
+		q.Limit = int(l)
+	}
+	if v.Get("actor") == "system" {
+		q.System = true
+	} else if q.ActorID, ok = num("actor"); !ok {
+		writeError(w, http.StatusUnprocessableEntity, `actor must be a user ID or "system"`)
+		return false
+	}
+	if q.Action = v.Get("action"); len(q.Action) > 100 {
+		writeError(w, http.StatusUnprocessableEntity, "action is too long")
+		return false
+	}
+	return true
+}
+
 type auditCheckView struct {
-	Entries  int       `json:"entries"`
-	Legacy   int       `json:"legacy"` // written before the chain existed: not protected
+	Entries int `json:"entries"`
+	Legacy  int `json:"legacy"` // written before the chain existed: not protected
+	// Pruned entries were removed after the retention period; the log
+	// starts at entry FirstID.
+	Pruned   int       `json:"pruned"`
+	FirstID  int64     `json:"first_id,omitempty"`
 	Intact   bool      `json:"intact"`
 	BrokenAt int64     `json:"broken_at,omitempty"`
 	At       time.Time `json:"at"`
@@ -134,7 +152,7 @@ func (s *Server) verifyAudit(ctx context.Context) (auditCheckView, error) {
 	if err != nil {
 		return auditCheckView{}, err
 	}
-	v := auditCheckView{Entries: c.Entries, Legacy: c.Legacy, Intact: c.BrokenAt == 0, BrokenAt: c.BrokenAt, At: s.now(),
+	v := auditCheckView{Entries: c.Entries, Legacy: c.Legacy, Pruned: c.Pruned, FirstID: c.FirstID, Intact: c.BrokenAt == 0, BrokenAt: c.BrokenAt, At: s.now(),
 		Anchors: s.anchorsView()}
 	if c.BrokenAt != 0 {
 		s.reportBrokenAudit(c.BrokenAt)

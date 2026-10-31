@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAuditChain(t *testing.T) {
@@ -107,5 +108,104 @@ func TestAuditChain(t *testing.T) {
 	db.W.Exec(`DELETE FROM audit_log WHERE id = 5`)
 	if c, _ := db.VerifyAudit(ctx); c.BrokenAt != 6 || c.Legacy != 2 {
 		t.Fatalf("no hash: %+v", c)
+	}
+}
+
+func TestAuditPrune(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTemp(t)
+	db.SetAuditKey([]byte("audit key"))
+
+	// Two legacy entries dated 1970, then signed ones written now.
+	if _, err := db.W.Exec(`DROP TRIGGER audit_log_no_update`); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range []string{"legacy.one", "legacy.two"} {
+		if _, err := db.W.Exec(`INSERT INTO audit_log (at, action) VALUES (0, ?)`, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range 8 {
+		if err := db.Audit(ctx, nil, "app.deployed", "", map[string]any{"n": i}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Nothing before the cutoff: nothing removed.
+	if n, _, err := db.PruneAudit(ctx, time.Unix(0, 0)); err != nil || n != 0 {
+		t.Fatalf("nothing: %d %v", n, err)
+	}
+	// Remove the legacy ones only.
+	n, through, err := db.PruneAudit(ctx, time.Unix(1, 0))
+	if err != nil || n != 2 || through != 2 {
+		t.Fatalf("legacy: %d %d %v", n, through, err)
+	}
+	c, err := db.VerifyAudit(ctx)
+	if err != nil || c.BrokenAt != 0 || c.Entries != 8 || c.Legacy != 0 || c.Pruned != 2 || c.FirstID != 3 {
+		t.Fatalf("after legacy: %+v %v", c, err)
+	}
+	// Remove everything old, a few per transaction: the newest entry
+	// always stays.
+	auditPruneBatch = 3
+	defer func() { auditPruneBatch = 10_000 }()
+	n, through, err = db.PruneAudit(ctx, time.Now().Add(time.Hour))
+	if err != nil || n != 7 || through != 9 {
+		t.Fatalf("all: %d %d %v", n, through, err)
+	}
+	c, _ = db.VerifyAudit(ctx)
+	if c.BrokenAt != 0 || c.Entries != 1 || c.Pruned != 9 || c.FirstID != 10 || c.LastID != 10 {
+		t.Fatalf("after all: %+v", c)
+	}
+	// The log goes on from the kept entry.
+	if err := db.Audit(ctx, nil, "audit.pruned", "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := db.VerifyAudit(ctx); c.BrokenAt != 0 || c.LastID != 11 {
+		t.Fatalf("appended: %+v", c)
+	}
+	// Still append-only outside pruning.
+	if _, err := db.W.Exec(`DELETE FROM audit_log WHERE id = 10`); err == nil || !strings.Contains(err.Error(), "append-only") {
+		t.Fatalf("delete after prune: %v", err)
+	}
+
+	// Removing more from the start without the key: the base no longer
+	// matches the first entry.
+	if _, err := db.W.Exec(`DROP TRIGGER audit_log_no_delete`); err != nil {
+		t.Fatal(err)
+	}
+	var h10 []byte
+	db.W.QueryRow(`SELECT hash FROM audit_log WHERE id = 10`).Scan(&h10)
+	if _, err := db.W.Exec(`DELETE FROM audit_log WHERE id = 10`); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := db.VerifyAudit(ctx); c.BrokenAt != 11 {
+		t.Fatalf("head removed: %+v", c)
+	}
+	// Moving the base along without the key does not help.
+	if _, err := db.W.Exec(`UPDATE audit_log_base SET first_id = 11, prev_hash = ?`, h10); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := db.VerifyAudit(ctx); c.BrokenAt != 11 {
+		t.Fatalf("base moved: %+v", c)
+	}
+	// Nor does dropping the base.
+	if _, err := db.W.Exec(`DELETE FROM audit_log_base`); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := db.VerifyAudit(ctx); c.BrokenAt != 11 {
+		t.Fatalf("base dropped: %+v", c)
+	}
+}
+
+func TestAuditRetentionSetting(t *testing.T) {
+	ctx := context.Background()
+	db, _ := openTemp(t)
+	if d, err := db.AuditRetention(ctx); err != nil || d != 0 {
+		t.Fatalf("default: %d %v", d, err)
+	}
+	if err := db.SetAuditRetention(ctx, 365); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := db.AuditRetention(ctx); d != 365 {
+		t.Fatal(d)
 	}
 }

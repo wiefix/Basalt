@@ -40,6 +40,7 @@ export function AuditPage({ user }: { user: User }) {
       </div>
       <div className="stack">
         <ChainCard check={check.data} error={check.error} pending={check.isFetching} onCheck={() => check.refetch()} owner={can(user, "owner")} />
+        <RetentionCard owner={can(user, "owner")} />
         <div className="card">
           <div className="card-body row wrap">
             <select className="input" style={{ width: "auto", minWidth: 200 }} value={action} onChange={(e) => setAction(e.target.value)}>
@@ -66,6 +67,15 @@ export function AuditPage({ user }: { user: User }) {
                 </option>
               ))}
             </select>
+            <span className="row" style={{ marginLeft: "auto" }}>
+              <span className="faint small">Export{action || actor ? " filtered" : ""}:</span>
+              <a className="btn sm" href={api.auditExportUrl({ format: "jsonl", action, actor })} title="One JSON object per line, with each entry's signature">
+                JSON Lines
+              </a>
+              <a className="btn sm" href={api.auditExportUrl({ format: "csv", action, actor })} title="For spreadsheets">
+                CSV
+              </a>
+            </span>
           </div>
           {log.isPending ? (
             <Loading />
@@ -127,6 +137,11 @@ export function AuditPage({ user }: { user: User }) {
               <button className="btn sm" onClick={() => log.fetchNextPage()} disabled={log.isFetchingNextPage}>
                 {log.isFetchingNextPage ? "Loading…" : "Load older"}
               </button>
+            </div>
+          )}
+          {!log.hasNextPage && entries.length > 0 && check.data?.first_id && (
+            <div className="empty small">
+              Entries before #{check.data.first_id} were removed after the retention period.
             </div>
           )}
         </div>
@@ -241,6 +256,91 @@ function ChainCard({
           : check
             ? ` ${check.entries} entries, all signed.`
             : ""}
+        {check && check.pruned > 0 && ` ${check.pruned} older entries were removed after the retention period; the chain starts at entry #${check.first_id}, and that start is signed too.`}
+      </p>
+    </div>
+  );
+}
+
+const retentionChoices = [
+  { days: 0, label: "Forever" },
+  { days: 90, label: "90 days" },
+  { days: 180, label: "180 days" },
+  { days: 365, label: "1 year" },
+  { days: 730, label: "2 years" },
+  { days: 1825, label: "5 years" },
+];
+
+// RetentionCard: how long entries are kept; owners change it.
+function RetentionCard({ owner }: { owner: boolean }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const confirm = useConfirm();
+  const ret = useQuery({ queryKey: ["audit-retention"], queryFn: api.auditRetention });
+  const [days, setDays] = useState<number | null>(null);
+  const save = useMutation({
+    mutationFn: api.setAuditRetention,
+    onSuccess: (r) => {
+      qc.setQueryData(["audit-retention"], r);
+      qc.invalidateQueries({ queryKey: ["audit"] });
+      qc.invalidateQueries({ queryKey: ["audit-verify"] });
+      setDays(null);
+      toast(r.days ? `Entries are kept for ${r.days} days` : "Entries are kept forever");
+    },
+  });
+  if (!ret.data) return ret.error ? <ErrorBox error={ret.error} /> : null;
+  const current = ret.data.days;
+  const chosen = days ?? current;
+  const choices = retentionChoices.some((c) => c.days === current)
+    ? retentionChoices
+    : [...retentionChoices, { days: current, label: `${current} days` }].sort((a, b) => a.days - b.days);
+  const apply = async () => {
+    if (chosen !== 0 && (current === 0 || chosen < current)) {
+      const ok = await confirm({
+        title: `Keep entries for ${chosen} days?`,
+        body: (
+          <p>
+            Entries older than {chosen} days are removed now, and every day from then on. They cannot be brought back: export
+            the log first to keep a copy. This change is recorded in the log.
+          </p>
+        ),
+        confirm: "Remove older entries",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    save.mutate(chosen);
+  };
+  return (
+    <div className="card card-body stack" style={{ gap: 10 }}>
+      <div className="row wrap" style={{ justifyContent: "space-between" }}>
+        <div className="row wrap">
+          <Icon name="archive" />
+          <h2>Retention</h2>
+          <span className="badge plain">{current ? `${current} days` : "kept forever"}</span>
+        </div>
+        {owner && (
+          <div className="row">
+            <select className="input" style={{ width: "auto" }} value={chosen} onChange={(e) => setDays(Number(e.target.value))}>
+              {choices.map((c) => (
+                <option key={c.days} value={c.days}>
+                  {c.label}
+                </option>
+              ))}
+            </select>
+            <button className="btn sm primary" onClick={apply} disabled={chosen === current || save.isPending}>
+              {save.isPending ? "Saving…" : "Save"}
+            </button>
+          </div>
+        )}
+      </div>
+      <ErrorBox error={save.error} />
+      <p className="faint small" style={{ margin: 0 }}>
+        {current
+          ? `Entries older than ${current} days are removed daily; the newest entry always stays, and the chain stays verifiable from the oldest one kept.`
+          : "Every entry is kept. Set a period to remove older entries daily."}
+        {ret.data.pruned > 0 && ` ${ret.data.pruned} entries removed so far, last on ${formatDate(ret.data.pruned_at)}.`}
+        {!owner && " Only an owner changes this."}
       </p>
     </div>
   );

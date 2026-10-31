@@ -69,8 +69,14 @@ func (s *Server) anchorAudit(ctx context.Context, serverID int64, replace bool) 
 		v.Server = srv.Name
 	}
 	if b := resp.Before; b.ID != 0 && !replace {
+		first, err := s.db.AuditFirstID(ctx)
+		if err != nil {
+			return nil, err
+		}
 		have, err := s.db.AuditHash(ctx, b.ID)
 		switch {
+		case errors.Is(err, store.ErrNotFound) && b.ID < first:
+			// Removed after the retention period: nothing to compare.
 		case errors.Is(err, store.ErrNotFound):
 			v.OK = false
 			v.Problem = fmt.Sprintf("the log ends at entry #%d, but this server was given entry #%d on %s: the entries after #%d were removed "+

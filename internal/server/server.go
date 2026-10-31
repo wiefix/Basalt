@@ -341,6 +341,7 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("DELETE /api/v1/projects/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteProject))
 	rt.Handle("PUT /api/v1/projects/{id}/limits", s.requireRole(store.RoleAdmin, s.handleSetProjectLimits))
 	rt.Handle("GET /api/v1/projects/{id}/audit", s.requireRole(store.RoleUser, s.handleProjectAudit))
+	rt.Handle("GET /api/v1/projects/{id}/audit/export", s.requireRole(store.RoleUser, s.handleProjectAuditExport))
 	rt.Handle("POST /api/v1/projects/{id}/members", s.requireRole(store.RoleUser, s.handleAddProjectMember))
 	rt.Handle("PUT /api/v1/projects/{id}/members/{uid}", s.requireRole(store.RoleUser, s.handleSetProjectMember))
 	rt.Handle("DELETE /api/v1/projects/{id}/members/{uid}", s.requireRole(store.RoleUser, s.handleRemoveProjectMember))
@@ -450,6 +451,9 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("GET /api/v1/audit", s.requireRole(store.RoleAdmin, s.handleAudit))
 	rt.Handle("GET /api/v1/audit/verify", s.requireRole(store.RoleAdmin, s.handleVerifyAudit))
 	rt.Handle("POST /api/v1/audit/anchors/reset", s.requireSession(store.RoleOwner, s.handleResetAuditAnchors))
+	rt.Handle("GET /api/v1/audit/export", s.requireRole(store.RoleAdmin, s.handleAuditExport))
+	rt.Handle("GET /api/v1/audit/retention", s.requireRole(store.RoleAdmin, s.handleAuditRetention))
+	rt.Handle("PUT /api/v1/audit/retention", s.requireSession(store.RoleOwner, s.handleSetAuditRetention))
 	rt.Handle("GET /api/v1/health-checks", s.requireRole(store.RoleUser, s.handleHealthChecks))
 	rt.Handle("POST /api/v1/health-checks", s.requireRole(store.RoleUser, s.handleCreateHealthCheck))
 	rt.Handle("PUT /api/v1/health-checks/{id}", s.requireProject(store.RoleAdmin, s.handleUpdateHealthCheck))
@@ -614,6 +618,9 @@ func (s *Server) cleanupLoop(ctx context.Context) {
 	for {
 		if _, err := s.db.DeleteExpiredAPITokens(ctx, s.now().Add(-expiredTokensKept)); err != nil && ctx.Err() == nil {
 			s.log.Error("delete expired API tokens", "err", err)
+		}
+		if err := s.pruneAudit(ctx); err != nil && ctx.Err() == nil {
+			s.log.Error("prune audit log", "err", err)
 		}
 		if n, err := s.db.DeleteExpiredSessions(ctx, s.now()); err != nil && ctx.Err() == nil {
 			s.log.Error("delete expired sessions", "err", err)

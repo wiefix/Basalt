@@ -91,6 +91,11 @@ var apiDocs = map[string]apiDoc{
 	"GET /api/v1/audit/verify": {summary: "Verify the audit log's hash chain, and check it against the newest entry each server's agent was given", resp: auditCheckView{}},
 	"POST /api/v1/audit/anchors/reset": {summary: "Accept the audit log as it is: every agent takes its newest entry even if older than the one it holds (after restoring the panel from a backup); owners, with a session",
 		resp: obj("anchors", []auditAnchorView{})},
+	"GET /api/v1/audit/export": {summary: "Download the audit log, oldest first, with each entry's signature", content: "download", query: []queryParam{
+		q("format", "jsonl (default) or csv"), q("actor", `a user ID, or "system"`), q("action", "an action prefix, e.g. app.")}},
+	"GET /api/v1/audit/retention": {summary: "How long audit entries are kept, and how many were removed", resp: auditRetentionView{}},
+	"PUT /api/v1/audit/retention": {summary: "Set how long audit entries are kept (0: forever, or 90 to 3650 days); older ones are removed right away; owners, with a session",
+		body: auditRetentionRequest{}, resp: auditRetentionView{}},
 
 	// Projects.
 	"GET /api/v1/projects":      {summary: "Projects (the default one first)", resp: obj("projects", []projectView{})},
@@ -104,6 +109,8 @@ var apiDocs = map[string]apiDoc{
 		q("before", "only entries with a smaller ID (paging)"), q("limit", "1 to 200, default 50"),
 		q("actor", `a user ID, or "system"`), q("action", "an action prefix, e.g. app.")},
 		resp: obj("entries", []auditView{}, "actions", []string{}, "more", false)},
+	"GET /api/v1/projects/{id}/audit/export": {summary: "Download the audit log of a project's resources, oldest first (its admins)", content: "download", query: []queryParam{
+		q("format", "jsonl (default) or csv"), q("actor", `a user ID, or "system"`), q("action", "an action prefix, e.g. app.")}},
 	"POST /api/v1/projects/{id}/members":         {summary: "Add a user, by email, to a project (or change their role)", body: addMemberRequest{}, resp: obj("member", projectMemberView{})},
 	"PUT /api/v1/projects/{id}/members/{uid}":    {summary: "Add a user to a project or change their role there", body: projectMemberRequest{}, resp: noContent},
 	"DELETE /api/v1/projects/{id}/members/{uid}": {summary: "Remove a user from a project", resp: noContent},

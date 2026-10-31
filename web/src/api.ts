@@ -921,10 +921,20 @@ export interface AuditEntry {
 export interface AuditCheck {
   entries: number;
   legacy: number; // written before the chain existed: not protected
+  pruned: number; // removed after the retention period
+  first_id?: number; // the oldest entry kept, after pruning
   intact: boolean;
   broken_at?: number;
   at: string;
   anchors: AuditAnchor[];
+}
+
+// AuditRetention: how long audit entries are kept (days 0: forever).
+export interface AuditRetention {
+  days: number;
+  pruned: number;
+  pruned_at?: string;
+  first_id?: number;
 }
 
 // AuditAnchor: the newest entry a server's agent was given, kept outside
@@ -1119,6 +1129,7 @@ export const api = {
   removeProjectMember: (id: number, userId: number) => del<void>(`/api/v1/projects/${id}/members/${userId}`),
   projectAudit: (id: number, before?: number) =>
     get<{ entries: AuditEntry[]; actions: string[]; more: boolean }>(`/api/v1/projects/${id}/audit${before ? `?before=${before}` : ""}`),
+  projectAuditExportUrl: (id: number, format: "jsonl" | "csv") => `/api/v1/projects/${id}/audit/export?format=${format}`,
   moveToProject: (kind: ProjectResource, id: number, projectId: number) =>
     put<void>(`/api/v1/${kind}/${id}/project`, { project_id: projectId }),
 
@@ -1263,6 +1274,14 @@ export const api = {
   openapi: () => get<OpenAPISpec>("/api/v1/openapi.json"),
   verifyAudit: () => get<AuditCheck>("/api/v1/audit/verify"),
   resetAuditAnchors: () => post<{ anchors: AuditAnchor[] }>("/api/v1/audit/anchors/reset"),
+  auditRetention: () => get<AuditRetention>("/api/v1/audit/retention"),
+  setAuditRetention: (days: number) => put<AuditRetention>("/api/v1/audit/retention", { days }),
+  auditExportUrl: (q: { format: "jsonl" | "csv"; actor?: string; action?: string }) => {
+    const p = new URLSearchParams({ format: q.format });
+    if (q.actor) p.set("actor", q.actor);
+    if (q.action) p.set("action", q.action);
+    return `/api/v1/audit/export?${p}`;
+  },
   healthChecks: () => get<{ checks: HealthCheck[] }>("/api/v1/health-checks"),
   createHealthCheck: (b: HealthCheckInput) => post<{ check: { id: number } }>("/api/v1/health-checks", b),
   updateHealthCheck: (id: number, b: HealthCheckInput) => put<void>(`/api/v1/health-checks/${id}`, b),

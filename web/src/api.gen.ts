@@ -203,8 +203,21 @@ export interface AuditCheckView {
   at: string;
   broken_at?: number;
   entries: number;
+  first_id?: number;
   intact: boolean;
   legacy: number;
+  pruned: number;
+}
+
+export interface AuditRetentionRequest {
+  days?: number;
+}
+
+export interface AuditRetentionView {
+  days: number;
+  first_id?: number;
+  pruned: number;
+  pruned_at?: string;
 }
 
 export interface AuditView {
@@ -1775,6 +1788,8 @@ export type GetAuditResponse = {
   more: boolean;
 };
 
+export type GetAuditRetentionResponse = AuditRetentionView;
+
 export type GetAuditVerifyResponse = AuditCheckView;
 
 export type GetAuthMeResponse = {
@@ -2563,6 +2578,10 @@ export type PutAppsIdWebhookResponse = {
 };
 
 export type PutAppsIdWebhookBody = WebhookRequest;
+
+export type PutAuditRetentionResponse = AuditRetentionView;
+
+export type PutAuditRetentionBody = AuditRetentionRequest;
 
 export type PutBackupStoragesIdResponse = {
   storage: StorageView;

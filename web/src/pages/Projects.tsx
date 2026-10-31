@@ -518,6 +518,14 @@ function ActivityCard({ projectId }: { projectId: number }) {
     <div className="card">
       <div className="card-head">
         <h2>Activity</h2>
+        <div className="row">
+          <a className="btn sm ghost" href={api.projectAuditExportUrl(projectId, "jsonl")} title="One JSON object per line">
+            Export JSON Lines
+          </a>
+          <a className="btn sm ghost" href={api.projectAuditExportUrl(projectId, "csv")}>
+            CSV
+          </a>
+        </div>
       </div>
       {log.isPending ? (
         <Loading />

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -207,5 +208,104 @@ func TestAuditAnchor(t *testing.T) {
 	}
 	if a := anchor(); a["ok"] != true {
 		t.Fatalf("checked after the reset: %v", a)
+	}
+}
+
+// TestAuditRetention: an owner sets how long entries are kept; older ones
+// are removed and the chain still holds from the oldest kept, also for an
+// agent whose anchor was removed; admins export the log.
+func TestAuditRetention(t *testing.T) {
+	var clock atomic.Pointer[time.Time]
+	now := time.Now()
+	clock.Store(&now)
+	p := startPanelWith(t, server.Options{Now: func() time.Time { return *clock.Load() }})
+	h := startHost(t, p)
+	p.call(http.StatusCreated, "POST", "/api/v1/users", map[string]string{
+		"email": "a@example.com", "name": "A", "password": "admin password 1", "role": "admin",
+	})
+	p.call(http.StatusCreated, "POST", "/api/v1/servers", map[string]string{"name": "node-a"})
+	// The agent holds the newest entry.
+	if a := p.call(200, "GET", "/api/v1/audit/verify", nil)["anchors"].([]any); len(a) != 1 || a[0].(map[string]any)["ok"] != true {
+		t.Fatalf("anchor: %v", a)
+	}
+	_ = h
+
+	if r := p.call(200, "GET", "/api/v1/audit/retention", nil); r["days"] != float64(0) || r["pruned"] != float64(0) {
+		t.Fatalf("default: %v", r)
+	}
+	admin := *p
+	admin.hc = &http.Client{Jar: newJar()}
+	admin.call(200, "POST", "/api/v1/auth/login", map[string]string{"email": "a@example.com", "password": "admin password 1"})
+	admin.call(200, "GET", "/api/v1/audit/retention", nil)
+	admin.call(http.StatusForbidden, "PUT", "/api/v1/audit/retention", map[string]int{"days": 90})
+	for _, bad := range []int{-1, 30, 89, 3651} {
+		p.call(http.StatusUnprocessableEntity, "PUT", "/api/v1/audit/retention", map[string]int{"days": bad})
+	}
+	// Nothing is old enough yet.
+	if r := p.call(200, "PUT", "/api/v1/audit/retention", map[string]int{"days": 90}); r["days"] != float64(90) || r["pruned"] != float64(0) {
+		t.Fatalf("set: %v", r)
+	}
+
+	// 91 days later, everything but the newest entry goes.
+	later := now.AddDate(0, 0, 91)
+	clock.Store(&later)
+	login := func(c *panel, email, password string) {
+		c.hc = &http.Client{Jar: newJar()}
+		c.call(200, "POST", "/api/v1/auth/login", map[string]string{"email": email, "password": password})
+	}
+	login(p, "o@example.com", "owner password 123") // the sessions expired meanwhile
+	login(&admin, "a@example.com", "admin password 1")
+	var total int // all go but the entry of setting it again
+	p.db.R.QueryRow(`SELECT COUNT(*) FROM audit_log`).Scan(&total)
+	r := p.call(200, "PUT", "/api/v1/audit/retention", map[string]int{"days": 90})
+	if r["pruned"] != float64(total) || r["first_id"] == nil {
+		t.Fatalf("pruned: %v (had %d before setting again)", r, total)
+	}
+	check := p.call(200, "GET", "/api/v1/audit/verify", nil)
+	a := check["anchors"].([]any)[0].(map[string]any)
+	if check["intact"] != true || check["pruned"] != float64(total) || check["entries"] != float64(2) || a["ok"] != true {
+		t.Fatalf("after pruning: %v", check)
+	}
+	e := p.call(200, "GET", "/api/v1/audit", nil)["entries"].([]any)
+	if len(e) != 2 || e[0].(map[string]any)["action"] != "audit.pruned" || e[1].(map[string]any)["action"] != "audit.retention_set" {
+		t.Fatalf("entries after pruning: %v", e)
+	}
+
+	// Export: every entry oldest first with its signature, the export
+	// itself recorded.
+	code, hdr, body := admin.raw("GET", "/api/v1/audit/export", "", nil)
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if code != 200 || hdr.Get("Content-Type") != "application/x-ndjson" ||
+		!strings.Contains(hdr.Get("Content-Disposition"), "attachment") || len(lines) != 3 {
+		t.Fatalf("export: %d %v %q", code, hdr, body)
+	}
+	var first, last map[string]any
+	json.Unmarshal([]byte(lines[0]), &first)
+	json.Unmarshal([]byte(lines[2]), &last)
+	if first["action"] != "audit.retention_set" || len(first["hash"].(string)) != 64 || last["action"] != "audit.exported" {
+		t.Fatalf("export lines: %v / %v", first, last)
+	}
+	code, hdr, body = p.raw("GET", "/api/v1/audit/export?format=csv&action=audit.pruned", "", nil)
+	rows := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if code != 200 || !strings.HasPrefix(hdr.Get("Content-Type"), "text/csv") || len(rows) != 2 ||
+		!strings.HasPrefix(rows[0], "id,at,actor_id") || !strings.Contains(rows[1], "audit.pruned") {
+		t.Fatalf("csv: %d %v %q", code, hdr, body)
+	}
+	for _, bad := range []string{"?format=xml", "?before=3", "?limit=5"} {
+		p.call(http.StatusUnprocessableEntity, "GET", "/api/v1/audit/export"+bad, nil)
+	}
+	code, _, _ = p.raw("GET", "/api/v1/projects/1/audit/export", "", nil)
+	if code != 200 {
+		t.Fatalf("project export: %d", code)
+	}
+
+	// Forever again: nothing more goes.
+	p.call(200, "PUT", "/api/v1/audit/retention", map[string]int{"days": 0})
+	far := now.AddDate(5, 0, 0)
+	clock.Store(&far)
+	login(p, "o@example.com", "owner password 123")
+	p.call(200, "GET", "/api/v1/audit/verify", nil)
+	if r := p.call(200, "GET", "/api/v1/audit/retention", nil); r["days"] != float64(0) || r["pruned"] != float64(total) {
+		t.Fatalf("forever: %v", r)
 	}
 }

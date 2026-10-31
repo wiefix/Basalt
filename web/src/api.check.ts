@@ -161,6 +161,8 @@ export const checks = [
   fits<Returns<A["audit"]>>()<G.GetAuditResponse>(),
   fits<Returns<A["verifyAudit"]>>()<G.GetAuditVerifyResponse>(),
   fits<Returns<A["resetAuditAnchors"]>>()<G.PostAuditAnchorsResetResponse>(),
+  fits<Returns<A["auditRetention"]>>()<G.GetAuditRetentionResponse>(),
+  fits<Returns<A["setAuditRetention"]>>()<G.PutAuditRetentionResponse>(),
   fits<Returns<A["healthChecks"]>>()<G.GetHealthChecksResponse>(),
   fits<Returns<A["createHealthCheck"]>>()<G.PostHealthChecksResponse>(),
   fits<Returns<A["updateHealthCheck"]>>()<G.PutHealthChecksIdResponse>(),
