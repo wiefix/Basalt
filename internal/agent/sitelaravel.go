@@ -364,18 +364,11 @@ func (a *Agent) downloadPinned(ctx context.Context, f pinnedFile) (string, error
 		return path, nil
 	}
 	hc := &http.Client{Timeout: 5 * time.Minute}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := hc.Do(req)
+	resp, err := downloadGet(ctx, hc, f.URL)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%s: %s", f.URL, resp.Status)
-	}
 	tmp, err := os.CreateTemp(dir, "pinned-*")
 	if err != nil {
 		return "", err

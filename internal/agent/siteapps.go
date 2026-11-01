@@ -198,18 +198,11 @@ func (a *Agent) wordpressURLOr() string {
 func (a *Agent) downloadVerified(ctx context.Context, url string) (string, error) {
 	hc := &http.Client{Timeout: 10 * time.Minute}
 	get := func(u string, limit int64, w io.Writer) error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-		if err != nil {
-			return err
-		}
-		resp, err := hc.Do(req)
+		resp, err := downloadGet(ctx, hc, u)
 		if err != nil {
 			return err
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("%s: %s", u, resp.Status)
-		}
 		n, err := io.Copy(w, io.LimitReader(resp.Body, limit+1))
 		if err == nil && n > limit {
 			err = fmt.Errorf("%s is too large", u)
