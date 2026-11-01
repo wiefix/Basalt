@@ -48,8 +48,13 @@ func start(t *testing.T) *fixture {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	userKey, _ := ssh.NewSignerFromKey(priv)
 
-	srv := New(slog.New(slog.NewTextHandler(io.Discard, nil)), hostKey, hasher, func(id int64) (*files.Site, error) {
-		return files.Open(filepath.Join(base, strconv.FormatInt(id, 10)))
+	srv := New(slog.New(slog.NewTextHandler(io.Discard, nil)), hostKey, hasher, func(_ context.Context, id int64, ch io.ReadWriteCloser) error {
+		site, err := files.Open(filepath.Join(base, strconv.FormatInt(id, 10)))
+		if err != nil {
+			return err
+		}
+		defer site.Close()
+		return ServeSFTP(site, ch)
 	})
 	srv.SetUsers([]User{
 		{Name: "blog", SiteID: 1, PasswordHash: hash},

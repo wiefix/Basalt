@@ -69,6 +69,9 @@ type Config struct {
 	PeerListen string
 	// Isolate runs each site as its own system user (Linux, root only).
 	Isolate bool
+	// WorkerExe is the binary started (as "<exe> site-worker …") for a
+	// site's file access with isolation; empty: this executable.
+	WorkerExe string
 	// WWWGroup is the group shared by site directories and the proxy.
 	WWWGroup string
 	// ProxyUser is the system user `basalt proxy` runs as ("" if root).
@@ -171,6 +174,13 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	}
 	if cfg.PHPRunDir == "" {
 		cfg.PHPRunDir = "/run/basalt/php"
+	}
+	if cfg.WorkerExe == "" && cfg.Isolate {
+		// Resolved now: after an update replaces the binary, the path
+		// leads to the new one (the old one shows as "(deleted)").
+		if cfg.WorkerExe, err = os.Executable(); err != nil {
+			return nil, fmt.Errorf("site file worker: %w", err)
+		}
 	}
 	sites := newSitesManager(cfg, log.With("subsystem", "sites"))
 	sftp, err := newSFTPManager(cfg, sites, log.With("subsystem", "sftp"))

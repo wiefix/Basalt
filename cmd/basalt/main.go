@@ -32,6 +32,7 @@ import (
 	"github.com/wiefix/basalt/internal/proxy/caddyrun"
 	"github.com/wiefix/basalt/internal/secrets"
 	"github.com/wiefix/basalt/internal/server"
+	"github.com/wiefix/basalt/internal/siteworker"
 	"github.com/wiefix/basalt/internal/standby"
 	"github.com/wiefix/basalt/internal/store"
 	"github.com/wiefix/basalt/internal/walship"
@@ -62,6 +63,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return 2
+	}
+	if args[0] == siteworker.Command {
+		// Internal: started by the agent as a site's user (not in usage).
+		return siteworker.Main(args[1:], os.Stdin, os.Stdout, stderr)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

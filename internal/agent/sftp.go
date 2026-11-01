@@ -51,7 +51,7 @@ func newSFTPManager(cfg Config, sites *sitesManager, log *slog.Logger) (*sftpMan
 	}
 	m.hostKey = key
 	hasher := auth.NewHasher(auth.DefaultArgon2Params, min(2, runtime.NumCPU()))
-	m.srv = sftpd.New(log, key, hasher, sites.open)
+	m.srv = sftpd.New(log, key, hasher, sites.serveSFTP)
 	m.srv.OnBan(func(b sftpd.Ban) {
 		log.Warn("sftp address banned for failed logins", "ip", b.IP, "until", b.Until, "failures", b.Failures)
 	})

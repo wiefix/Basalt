@@ -63,8 +63,17 @@ func TestLinuxIsolationAndPHP(t *testing.T) {
 		t.Fatal(err)
 	}
 	httpsPort := freePort(t)
+	// Site workers run as the sites' users: the test binary (in a folder
+	// only root may enter) is copied where they can run it.
+	workerExe := "/usr/local/bin/basalt-it-worker"
+	self, _ := os.Executable()
+	if b, err := os.ReadFile(self); err != nil || os.WriteFile(workerExe, b, 0o755) != nil {
+		t.Fatalf("copy the test binary for site workers: %v", err)
+	}
+	defer os.Remove(workerExe)
 	a, err := agent.New(agent.Config{
-		DataDir: agentDir, ProxyDir: proxyDir, SitesRoot: sitesRoot,
+		WorkerExe: workerExe,
+		DataDir:   agentDir, ProxyDir: proxyDir, SitesRoot: sitesRoot,
 		HTTPPort: freePort(t), HTTPSPort: httpsPort, SFTPListen: "127.0.0.1:0",
 		Isolate: true, PHPRunDir: "/run/basalt-it/php", MySQLSocket: "/run/mysqld/mysqld.sock",
 		Restic: "restic",
@@ -215,6 +224,53 @@ echo json_encode([
 			t.Errorf("sftp %s owned by %d:%d", name, st.Uid, st.Gid)
 		}
 	}
+
+	// The file manager and SFTP act as the site's user, not as root: a file
+	// of root's in the site is out of their reach, and the worker process
+	// runs with the site's uid.
+	rootOnly := filepath.Join(dirA, "public", "root-only.txt")
+	if err := os.WriteFile(rootOnly, []byte("root"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := p.raw("GET", "/api/v1/sites/"+idA+"/files/content"+q("/public/root-only.txt"), "", nil); code == http.StatusOK {
+		t.Error("the file manager read a file only root may read")
+	}
+	if code, _, _ := p.raw("PUT", "/api/v1/sites/"+idA+"/files/content"+q("/public/root-only.txt"), "", []byte("changed")); code != http.StatusCreated {
+		t.Errorf("upload over root's file: %d", code)
+	}
+	// An upload is renamed into place, which the folder's owner may do: the
+	// file is replaced by one of the site's, root's file itself is untouched.
+	if fi, err := os.Stat(rootOnly); err != nil || int(fi.Sys().(*syscall.Stat_t).Uid) != uidA {
+		t.Errorf("file uploaded over root's: %v", err)
+	}
+	if err := os.WriteFile(rootOnly+".new", []byte("root"), 0o600); err != nil || os.Rename(rootOnly+".new", rootOnly) != nil {
+		t.Fatal("root's file again:", err)
+	}
+	if code, _, _ := p.raw("POST", "/api/v1/sites/"+idA+"/files/chmod", "", []byte(`{"path":"/public/root-only.txt","mode":"644"}`)); code == http.StatusOK {
+		t.Error("the file manager changed the mode of root's file")
+	}
+	c, err = ssh.Dial("tcp", "127.0.0.1:"+strconv.Itoa(port), &ssh.ClientConfig{
+		User: "alpha", Auth: []ssh.AuthMethod{ssh.Password(acc["password"].(string))}, HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc, _ = sftp.NewClient(c)
+	if _, err := sc.Open("/public/root-only.txt"); err == nil {
+		t.Error("SFTP opened a file only root may read")
+	}
+	workers := siteWorkerUIDs(t, dirA)
+	sc.Close()
+	c.Close()
+	if len(workers) < 2 {
+		t.Errorf("site workers running: %v; want the file manager's and the SFTP session's", workers)
+	}
+	for pid, uid := range workers {
+		if uid != uidA {
+			t.Errorf("site worker %d runs as uid %d; want %d", pid, uid, uidA)
+		}
+	}
+	os.Remove(rootOnly)
 
 	// Switching to static: PHP stops, and its sources are never shown.
 	p.call(200, "PUT", "/api/v1/sites/"+idA+"/php", map[string]any{"version": ""})
@@ -628,4 +684,30 @@ func mustUID(t *testing.T, name string) string {
 		t.Fatal(err)
 	}
 	return u.Uid
+}
+
+// siteWorkerUIDs maps the running workers of the site in dir to their
+// real uids.
+func siteWorkerUIDs(t *testing.T, dir string) map[int]int {
+	t.Helper()
+	out := map[int]int{}
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		cmdline, _ := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		args := strings.Split(string(cmdline), "\x00")
+		if len(args) < 5 || args[1] != "site-worker" || args[4] != dir {
+			continue
+		}
+		status, _ := os.ReadFile(filepath.Join("/proc", e.Name(), "status"))
+		for _, line := range strings.Split(string(status), "\n") {
+			if f := strings.Fields(line); len(f) > 1 && f[0] == "Uid:" {
+				out[pid], _ = strconv.Atoi(f[1])
+			}
+		}
+	}
+	return out
 }

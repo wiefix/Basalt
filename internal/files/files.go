@@ -456,3 +456,16 @@ func (u *Upload) Abort() {
 	u.f.Close()
 	u.site.root.Remove(u.tmp)
 }
+
+// PublicError strips the absolute host path from a bare path error, so
+// errors leave the agent with paths relative to the site at most. Errors
+// that carry their own context keep their message.
+func PublicError(err error) error {
+	switch e := err.(type) {
+	case *fs.PathError:
+		return fmt.Errorf("%s: %w", e.Op, e.Err)
+	case *os.LinkError:
+		return fmt.Errorf("%s: %w", e.Op, e.Err)
+	}
+	return err
+}

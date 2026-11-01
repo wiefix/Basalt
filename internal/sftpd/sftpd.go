@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -48,10 +49,10 @@ type account struct {
 }
 
 type Server struct {
-	log      *slog.Logger
-	hostKey  ssh.Signer
-	hasher   *auth.Hasher
-	openSite func(siteID int64) (*files.Site, error)
+	log     *slog.Logger
+	hostKey ssh.Signer
+	hasher  *auth.Hasher
+	serve   SessionFunc
 
 	ipLimiter   *auth.Limiter
 	userLimiter *auth.Limiter
@@ -66,11 +67,15 @@ type Server struct {
 	bans *banList
 }
 
-// New creates the server. openSite gives access to a site's files (with the
-// right ownership for files the user creates).
-func New(log *slog.Logger, hostKey ssh.Signer, hasher *auth.Hasher, openSite func(int64) (*files.Site, error)) *Server {
+// SessionFunc runs the SFTP protocol of a logged-in user of siteID over ch
+// until the session ends: ServeSFTP on the site's files, in a process of
+// the site's own user where the agent isolates sites.
+type SessionFunc func(ctx context.Context, siteID int64, ch io.ReadWriteCloser) error
+
+// New creates the server. serve runs each SFTP session.
+func New(log *slog.Logger, hostKey ssh.Signer, hasher *auth.Hasher, serve SessionFunc) *Server {
 	return &Server{
-		log: log, hostKey: hostKey, hasher: hasher, openSite: openSite,
+		log: log, hostKey: hostKey, hasher: hasher, serve: serve,
 		ipLimiter:   auth.NewLimiter(20, 3*time.Second),
 		userLimiter: auth.NewLimiter(10, 6*time.Second),
 		accounts:    map[string]*account{},
@@ -246,11 +251,11 @@ func (s *Server) handle(ctx context.Context, raw net.Conn, ip string) {
 		if err != nil {
 			continue
 		}
-		go s.session(ch, requests, siteID, user)
+		go s.session(ctx, ch, requests, siteID, user)
 	}
 }
 
-func (s *Server) session(ch ssh.Channel, requests <-chan *ssh.Request, siteID int64, user string) {
+func (s *Server) session(ctx context.Context, ch ssh.Channel, requests <-chan *ssh.Request, siteID int64, user string) {
 	defer ch.Close()
 	for req := range requests {
 		ok := req.Type == "subsystem" && len(req.Payload) >= 4 && string(req.Payload[4:]) == "sftp"
@@ -258,21 +263,35 @@ func (s *Server) session(ch ssh.Channel, requests <-chan *ssh.Request, siteID in
 		if !ok {
 			continue // shell, exec, pty, env: refused
 		}
-		site, err := s.openSite(siteID)
-		if err != nil {
-			s.log.Warn("sftp: site unavailable", "site_id", siteID, "err", err)
-			return
-		}
-		h := &handlers{site: site}
-		srv := sftp.NewRequestServer(ch, sftp.Handlers{FileGet: h, FilePut: h, FileCmd: h, FileList: h})
-		err = srv.Serve()
-		srv.Close()
-		site.Close()
-		if err != nil && !errors.Is(err, os.ErrClosed) && err.Error() != "EOF" {
-			s.log.Debug("sftp session ended", "user", user, "err", err)
+		// Later requests on the channel (none are needed) are refused.
+		go func() {
+			for r := range requests {
+				r.Reply(false, nil)
+			}
+		}()
+		if err := s.serve(ctx, siteID, ch); err != nil && !sessionEnd(err) {
+			s.log.Warn("sftp session failed", "user", user, "site_id", siteID, "err", err)
 		}
 		return
 	}
+}
+
+// ServeSFTP runs the SFTP protocol over rw on site's files until the client
+// goes away.
+func ServeSFTP(site *files.Site, rw io.ReadWriteCloser) error {
+	h := &handlers{site: site}
+	srv := sftp.NewRequestServer(rw, sftp.Handlers{FileGet: h, FilePut: h, FileCmd: h, FileList: h})
+	err := srv.Serve()
+	srv.Close()
+	if sessionEnd(err) {
+		return nil
+	}
+	return err
+}
+
+// sessionEnd tells the client leaving from a failure.
+func sessionEnd(err error) bool {
+	return err == nil || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, os.ErrClosed) || err.Error() == "EOF"
 }
 
 // LoadOrCreateHostKey reads an ed25519 host key, generating it on first use.

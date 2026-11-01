@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -23,9 +21,8 @@ import (
 )
 
 const (
-	uploadIdleTimeout = time.Hour
 	// Temporaries of uploads and copies not written for tempKeep were left
-	// behind (an upload idles out after uploadIdleTimeout); the janitor
+	// behind (an upload idles out after siteworker.UploadIdleTimeout); the janitor
 	// looks for them every tempSweepEvery.
 	tempKeep       = 6 * time.Hour
 	tempSweepEvery = 6 * time.Hour
@@ -62,23 +59,20 @@ type sitesManager struct {
 	identityOnce sync.Once
 	identityErr  error
 
-	mu      sync.Mutex
-	uploads map[string]*pendingUpload
-}
+	// workerExe is the binary run as a site's file worker (this one).
+	workerExe string
 
-type pendingUpload struct {
-	siteID   int64
-	site     *files.Site
-	upload   *files.Upload
-	lastUsed time.Time
+	mu      sync.Mutex
+	workers map[int64]*siteWorker
 }
 
 func newSitesManager(cfg Config, log *slog.Logger) *sitesManager {
 	return &sitesManager{
 		log: log, root: cfg.SitesRoot,
 		isolate: cfg.Isolate, wwwGroup: cfg.WWWGroup, proxyUser: cfg.ProxyUser,
-		php:     php.DefaultHost(cfg.PHPRunDir),
-		uploads: map[string]*pendingUpload{},
+		php:       php.DefaultHost(cfg.PHPRunDir),
+		workerExe: cfg.WorkerExe,
+		workers:   map[int64]*siteWorker{},
 	}
 }
 
@@ -257,7 +251,7 @@ func (m *sitesManager) Delete(ctx context.Context, id int64) error {
 	if err != nil {
 		return err
 	}
-	m.abortUploads(id)
+	m.stopWorker(id)
 	if err := m.php.Remove(id); err != nil {
 		m.log.Warn("remove PHP pool", "site_id", id, "err", err)
 	}
@@ -330,100 +324,12 @@ func (m *sitesManager) open(id int64) (*files.Site, error) {
 	return s, err
 }
 
-func (m *sitesManager) handleFiles(ctx context.Context, req agentproto.FilesRequest) (*agentproto.FilesResponse, error) {
-	switch req.Op {
-	case agentproto.FilesUploadChunk:
-		u, err := m.upload(req.SiteID, req.UploadID)
-		if err != nil {
-			return nil, err
-		}
-		if err := u.upload.Write(req.Offset, req.Data); err != nil {
-			return nil, err
-		}
-		return &agentproto.FilesResponse{Size: u.upload.Size()}, nil
-	case agentproto.FilesUploadCommit, agentproto.FilesUploadAbort:
-		u, err := m.takeUpload(req.SiteID, req.UploadID)
-		if err != nil {
-			return nil, err
-		}
-		defer u.site.Close()
-		if req.Op == agentproto.FilesUploadAbort {
-			u.upload.Abort()
-			return &agentproto.FilesResponse{}, nil
-		}
-		size := u.upload.Size()
-		return &agentproto.FilesResponse{Size: size}, u.upload.Commit()
-	}
-
-	s, err := m.open(req.SiteID)
-	if err != nil {
-		return nil, err
-	}
-	if req.Op == agentproto.FilesUploadBegin {
-		u, err := s.BeginUpload(req.Path)
-		if err != nil {
-			s.Close()
-			return nil, err
-		}
-		id := m.addUpload(req.SiteID, s, u)
-		return &agentproto.FilesResponse{UploadID: id}, nil
-	}
-	defer s.Close()
-
-	resp := &agentproto.FilesResponse{}
-	switch req.Op {
-	case agentproto.FilesList:
-		var pg files.Page
-		pg, err = s.ListPage(req.Path, req.Cursor, req.Limit)
-		resp.Entries, resp.Total, resp.Next = pg.Entries, pg.Total, pg.Next
-	case agentproto.FilesStat:
-		var e files.Entry
-		e, err = s.Stat(req.Path)
-		resp.Entry = &e
-	case agentproto.FilesRead:
-		resp.Data, resp.Size, err = s.Read(req.Path, req.Offset, req.Length)
-	case agentproto.FilesWrite:
-		err = s.WriteFile(req.Path, req.Data)
-	case agentproto.FilesMkdir:
-		err = s.Mkdir(req.Path)
-	case agentproto.FilesRename:
-		err = s.Rename(req.Path, req.To)
-	case agentproto.FilesDelete:
-		for _, p := range req.Paths {
-			if err = s.Delete(p); err != nil {
-				err = fmt.Errorf("%s: %w", p, err)
-				break
-			}
-		}
-	case agentproto.FilesChmod:
-		err = s.Chmod(req.Path, req.Mode)
-	case agentproto.FilesExtract:
-		resp.Extract, err = s.Extract(req.Path, req.To, req.Overwrite, files.DefaultLimits)
-	case agentproto.FilesCompress:
-		err = s.Compress(req.Paths, req.To)
-	default:
-		err = fmt.Errorf("unknown files operation %q", req.Op)
-	}
-	if err != nil {
-		return nil, publicError(err)
-	}
-	return resp, nil
-}
-
 // publicError strips absolute host paths from errors before they leave the
 // agent; the panel only needs to see paths relative to the site.
 //
 // Only a bare path error is rewritten: errors that already carry our own
 // context (e.g. "php-fpm 8.4 is not running: ...") keep their message.
-func publicError(err error) error {
-	switch e := err.(type) {
-	case *fs.PathError:
-		return fmt.Errorf("%s: %w", e.Op, e.Err)
-	case *os.LinkError:
-		return fmt.Errorf("%s: %w", e.Op, e.Err)
-	}
-	return err
-}
+func publicError(err error) error { return files.PublicError(err) }
 
 // hostPaths rewrites the agent's own directories in every error that
 // leaves the agent, so a path missed by publicError (one wrapped with
@@ -487,50 +393,6 @@ func (h hostPaths) text(s string) string {
 	return s
 }
 
-func (m *sitesManager) addUpload(siteID int64, s *files.Site, u *files.Upload) string {
-	var b [16]byte
-	rand.Read(b[:])
-	id := hex.EncodeToString(b[:])
-	m.mu.Lock()
-	m.uploads[id] = &pendingUpload{siteID: siteID, site: s, upload: u, lastUsed: time.Now()}
-	m.mu.Unlock()
-	return id
-}
-
-func (m *sitesManager) upload(siteID int64, id string) (*pendingUpload, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	u := m.uploads[id]
-	if u == nil || u.siteID != siteID {
-		return nil, errors.New("unknown or expired upload")
-	}
-	u.lastUsed = time.Now()
-	return u, nil
-}
-
-func (m *sitesManager) takeUpload(siteID int64, id string) (*pendingUpload, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	u := m.uploads[id]
-	if u == nil || u.siteID != siteID {
-		return nil, errors.New("unknown or expired upload")
-	}
-	delete(m.uploads, id)
-	return u, nil
-}
-
-func (m *sitesManager) abortUploads(siteID int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for id, u := range m.uploads {
-		if u.siteID == siteID {
-			u.upload.Abort()
-			u.site.Close()
-			delete(m.uploads, id)
-		}
-	}
-}
-
 // removeTemps removes the sites' upload and copy temporaries last written
 // before before.
 func (m *sitesManager) removeTemps(ctx context.Context, before time.Time) {
@@ -562,6 +424,7 @@ func (m *sitesManager) janitor(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	var swept time.Time
+	defer m.sweepWorkers(true)
 	for {
 		select {
 		case <-ctx.Done():
@@ -585,14 +448,6 @@ func (m *sitesManager) janitor(ctx context.Context) {
 				m.removeTemps(ctx, swept.Add(-tempKeep))
 			}
 		}
-		m.mu.Lock()
-		for id, u := range m.uploads {
-			if time.Since(u.lastUsed) > uploadIdleTimeout {
-				u.upload.Abort()
-				u.site.Close()
-				delete(m.uploads, id)
-			}
-		}
-		m.mu.Unlock()
+		m.sweepWorkers(false)
 	}
 }
