@@ -155,10 +155,8 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 					exact = append(exact, dom)
 				}
 			}
-			handlers, fsEntry := routeHandlers(r, part.Service)
-			if fsEntry != nil {
-				filesystems = append(filesystems, fsEntry)
-			}
+			handlers, fsEntries := routeHandlers(r, part.Service)
+			filesystems = append(filesystems, fsEntries...)
 			handle := []any{obj{"handler": "subroute", "routes": []any{obj{"handle": handlers}}}}
 			if len(exact) > 0 {
 				routes = append(routes, obj{"match": []any{obj{"host": exact}}, "handle": handle, "terminal": true})
@@ -218,7 +216,7 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 
 // routeHandlers serves route r; service names the app's service the
 // domains go to ("": the published one).
-func routeHandlers(r Route, service string) (handlers []any, fsEntry obj) {
+func routeHandlers(r Route, service string) (handlers []any, fsEntries []any) {
 	set := obj{
 		"X-Content-Type-Options": []any{"nosniff"},
 		"Referrer-Policy":        []any{"strict-origin-when-cross-origin"},
@@ -243,10 +241,10 @@ func routeHandlers(r Route, service string) (handlers []any, fsEntry obj) {
 			return append(handlers, obj{"handler": "static_response", "status_code": 503}), nil
 		}
 		fsName := "basalt-route-" + strconv.FormatInt(r.ID, 10)
-		fsEntry = obj{
+		fsEntries = []any{obj{
 			"name":        fsName,
 			"file_system": obj{"backend": "basalt_root", "root": r.Root},
-		}
+		}}
 		static := []any{
 			obj{
 				"handler":   "encode",
@@ -263,9 +261,16 @@ func routeHandlers(r Route, service string) (handlers []any, fsEntry obj) {
 			},
 		}
 		if !r.PHP {
-			return append(handlers, static...), fsEntry
+			return append(handlers, static...), fsEntries
 		}
-		return append(handlers, obj{"handler": "subroute", "routes": phpRoutes(r, fsName, static)}), fsEntry
+		// try_files sees scripts the proxy may not read (PHP-FPM reads them
+		// as the site user); file_server keeps the strict file system.
+		matchFS := fsName + "-match"
+		fsEntries = append(fsEntries, obj{
+			"name":        matchFS,
+			"file_system": obj{"backend": "basalt_root", "root": r.Root, "stat_unreadable": true},
+		})
+		return append(handlers, obj{"handler": "subroute", "routes": phpRoutes(r, matchFS, static)}), fsEntries
 	case KindReverseProxy:
 		rp := obj{
 			"handler": "reverse_proxy",
@@ -284,7 +289,7 @@ func routeHandlers(r Route, service string) (handlers []any, fsEntry obj) {
 		}
 		handlers = append(handlers, rp)
 	}
-	return handlers, fsEntry
+	return handlers, fsEntries
 }
 
 func tlsPolicies(internalNames, dnsNames []string, email string, o BuildOptions) []any {
@@ -343,13 +348,14 @@ func acmeIssuer(directory, email string, dns01 bool, o BuildOptions) obj {
 // phpRoutes mirrors Caddy's php_fastcgi directive: redirect directories to
 // their canonical slash form when they hold an index.php, rewrite missing
 // paths to index.php (front controller), send *.php to PHP-FPM and serve the
-// rest as static files. File checks use the confined file system.
-func phpRoutes(r Route, fsName string, static []any) []any {
+// rest as static files. File checks use matchFS, the confined file system that
+// also sees files the proxy may not read.
+func phpRoutes(r Route, matchFS string, static []any) []any {
 	const path = "{http.request.uri.path}"
 	return []any{
 		obj{
 			"match": []any{obj{
-				"file": obj{"fs": fsName, "root": ".", "try_files": []any{path + "/index.php"}},
+				"file": obj{"fs": matchFS, "root": ".", "try_files": []any{path + "/index.php"}},
 				"not":  []any{obj{"path": []any{"*/"}}},
 			}},
 			"handle": []any{obj{
@@ -360,7 +366,7 @@ func phpRoutes(r Route, fsName string, static []any) []any {
 		},
 		obj{
 			"match": []any{obj{"file": obj{
-				"fs": fsName, "root": ".",
+				"fs": matchFS, "root": ".",
 				"try_files":  []any{path, path + "/index.php", "index.php"},
 				"try_policy": "first_exist_fallback",
 				"split_path": []any{".php"},

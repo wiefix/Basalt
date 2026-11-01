@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/fcgi"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -49,6 +50,26 @@ func TestProxyServes(t *testing.T) {
 	os.Symlink(filepath.Join(sites, "2", "config.php"), filepath.Join(site, "leak.txt"))
 	os.Symlink("sub/page.txt", filepath.Join(site, "inside.txt")) // stays within the root: allowed
 
+	// A PHP site with a fake PHP-FPM that names the script it was asked to
+	// run. Scripts the proxy may not read (0600 of the site user in production)
+	// must still reach PHP-FPM instead of falling through to index.php.
+	phpSite := filepath.Join(sites, "3")
+	os.MkdirAll(filepath.Join(phpSite, "sub"), 0o755)
+	for name, mode := range map[string]os.FileMode{"index.php": 0o644, "locked.php": 0, "sub/index.php": 0, "secret.txt": 0} {
+		os.WriteFile(filepath.Join(phpSite, name), []byte("secret source"), 0o644)
+		os.Chmod(filepath.Join(phpSite, name), mode)
+	}
+	unreadable := os.Geteuid() != 0 // root reads files regardless of mode
+	fpmSocket := filepath.Join(dir, "fpm.sock")
+	fpm, err := net.Listen("unix", fpmSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fpm.Close()
+	go fcgi.Serve(fpm, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "fpm "+strings.TrimPrefix(fcgi.ProcessEnv(r)["SCRIPT_FILENAME"], phpSite))
+	}))
+
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Server", "upstream/1.0")
 		io.WriteString(w, "from upstream "+r.Host)
@@ -67,6 +88,7 @@ func TestProxyServes(t *testing.T) {
 	d := proxy.Desired{Routes: []proxy.Route{
 		{ID: 1, Kind: proxy.KindStatic, Domains: []string{"site.localhost"}, Root: site, HSTS: true},
 		{ID: 2, Kind: proxy.KindReverseProxy, Domains: []string{"app.localhost"}, Upstream: strings.TrimPrefix(upstream.URL, "http://")},
+		{ID: 3, Kind: proxy.KindStatic, SiteID: 3, Domains: []string{"php.localhost"}, Root: phpSite, PHP: true, PHPSocket: fpmSocket},
 	}}
 	if err := d.Validate(sites); err != nil {
 		t.Fatal(err)
@@ -126,6 +148,25 @@ func TestProxyServes(t *testing.T) {
 		if strings.Contains(body, "secret") || code == 200 {
 			t.Errorf("%s: %d %q — must not be served", path, code, body)
 		}
+	}
+
+	for path, want := range map[string]string{
+		"/":           "fpm /index.php",
+		"/missing":    "fpm /index.php",
+		"/locked.php": "fpm /locked.php",
+		"/sub/":       "fpm /sub/index.php",
+	} {
+		if code, _, body := get("https://php.localhost" + path); code != 200 || body != want {
+			t.Errorf("php %s: %d %q, want %q", path, code, body, want)
+		}
+	}
+	if code, hdr, _ := get("https://php.localhost/sub"); code != http.StatusPermanentRedirect || hdr.Get("Location") != "/sub/" {
+		t.Errorf("php directory redirect: %d %q", code, hdr.Get("Location"))
+	}
+	// An unreadable non-PHP file is refused by the strict file server, not
+	// handed to PHP and not served.
+	if code, _, body := get("https://php.localhost/secret.txt"); unreadable && (code != http.StatusForbidden || strings.Contains(body, "secret")) {
+		t.Errorf("unreadable static file: %d %q", code, body)
 	}
 
 	code, hdr, body = get("https://app.localhost/")

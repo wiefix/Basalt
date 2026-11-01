@@ -23,6 +23,13 @@ func init() {
 // serve another site's files or system files.
 type RootFS struct {
 	Root string `json:"root"`
+	// StatUnreadable makes Open return a stat-only file for an existing file
+	// the proxy may not read. Caddy keeps file systems behind a wrapper with
+	// only Open, so its file matcher checks existence by opening; without this
+	// a PHP script readable only by the site user (0600) counts as missing and
+	// the request falls through to index.php. Matchers only: file_server keeps
+	// a strict file system and answers 403 for unreadable files.
+	StatUnreadable bool `json:"stat_unreadable,omitempty"`
 
 	state *rootState
 }
@@ -103,7 +110,29 @@ func (f *RootFS) Open(name string) (fs.File, error) {
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 	}
-	return r.FS().Open(n)
+	file, err := r.FS().Open(n)
+	if err != nil && f.StatUnreadable && errors.Is(err, fs.ErrPermission) {
+		if info, serr := r.Stat(n); serr == nil {
+			return statOnlyFile{info: info, name: n}, nil
+		}
+	}
+	return file, err
+}
+
+// statOnlyFile is an existing file the proxy may not read: only its metadata
+// is available.
+type statOnlyFile struct {
+	info fs.FileInfo
+	name string
+}
+
+func (f statOnlyFile) Stat() (fs.FileInfo, error) { return f.info, nil }
+func (f statOnlyFile) Close() error               { return nil }
+func (f statOnlyFile) Read([]byte) (int, error) {
+	return 0, &fs.PathError{Op: "read", Path: f.name, Err: fs.ErrPermission}
+}
+func (f statOnlyFile) ReadDir(int) ([]fs.DirEntry, error) {
+	return nil, &fs.PathError{Op: "readdir", Path: f.name, Err: fs.ErrPermission}
 }
 
 func (f *RootFS) Stat(name string) (fs.FileInfo, error) {
@@ -120,6 +149,7 @@ func (f *RootFS) Stat(name string) (fs.FileInfo, error) {
 
 var (
 	_ fs.StatFS          = (*RootFS)(nil)
+	_ fs.ReadDirFile     = statOnlyFile{}
 	_ caddy.Provisioner  = (*RootFS)(nil)
 	_ caddy.CleanerUpper = (*RootFS)(nil)
 )
