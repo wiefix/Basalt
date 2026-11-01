@@ -19,6 +19,10 @@ const (
 	adminerDir    = "/.basalt-adminer"
 	adminerCore   = adminerDir + "/adminer.php"
 	adminerMarker = "// Basalt Adminer "
+	// The proxy (group basalt-www) must open the page: Caddy's file
+	// matcher sees a file it cannot open as missing and sends the request
+	// to the site's index.php. Other sites' users are not in the group.
+	adminerPageMode = 0o640
 )
 
 var adminerPageRE = regexp.MustCompile(`^adminer-[a-z2-7]{26}\.php$`)
@@ -58,6 +62,10 @@ func (a *Agent) siteAdminer(ctx context.Context, req agentproto.SiteAdminer) (ag
 		if len(pages) == 0 {
 			return agentproto.SiteAdminerResponse{}, nil
 		}
+		// Older agents wrote the page 0600, which the proxy cannot open.
+		if err := site.Chmod("/public/"+pages[0], adminerPageMode); err != nil {
+			return agentproto.SiteAdminerResponse{}, err
+		}
 		return agentproto.SiteAdminerResponse{Path: "/" + pages[0], Version: version}, nil
 	case agentproto.AdminerRemove:
 		return agentproto.SiteAdminerResponse{}, removeAdminer(site, pages)
@@ -89,7 +97,7 @@ func (a *Agent) siteAdminer(ctx context.Context, req agentproto.SiteAdminer) (ag
 	if err := site.WriteFile("/public/"+page, []byte(adminerPage(version))); err != nil {
 		return agentproto.SiteAdminerResponse{}, err
 	}
-	if err := site.Chmod("/public/"+page, 0o600); err != nil {
+	if err := site.Chmod("/public/"+page, adminerPageMode); err != nil {
 		return agentproto.SiteAdminerResponse{}, err
 	}
 	return agentproto.SiteAdminerResponse{Path: "/" + page, Version: version}, nil

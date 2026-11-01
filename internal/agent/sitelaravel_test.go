@@ -220,8 +220,23 @@ func TestSiteAdminer(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(site, ".basalt-adminer", "adminer.php")); string(b) != "<?php // adminer" {
 		t.Fatal("Adminer not outside public/")
 	}
+	// The proxy opens the page (else Caddy sends it to index.php); Adminer
+	// itself only PHP reads.
+	modes := func() (page, core os.FileMode) {
+		fp, _ := os.Stat(filepath.Join(site, "public", r.Path))
+		fc, _ := os.Stat(filepath.Join(site, ".basalt-adminer", "adminer.php"))
+		return fp.Mode().Perm(), fc.Mode().Perm()
+	}
+	if p, c := modes(); p != 0o640 || c != 0o600 {
+		t.Fatalf("modes: page %o, adminer %o", p, c)
+	}
+	// Status repairs a page written 0600 by an older agent.
+	os.Chmod(filepath.Join(site, "public", r.Path), 0o600)
 	if s := call(agentproto.AdminerStatus); s != r {
 		t.Fatalf("status %+v, want %+v", s, r)
+	}
+	if p, _ := modes(); p != 0o640 {
+		t.Fatalf("status left the page %o", p)
 	}
 	// Installing again moves it to a new address.
 	r2 := call(agentproto.AdminerInstall)
