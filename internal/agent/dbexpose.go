@@ -219,9 +219,11 @@ func (l *dbListener) update(e agentproto.DBExpose, allow []netip.Prefix) {
 	}
 }
 
+// close stops accepting before anything else, so the port is free once a
+// connection stops being forwarded.
 func (l *dbListener) close() {
-	l.cancel()
 	l.ln.Close()
+	l.cancel()
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for c := range l.conns {

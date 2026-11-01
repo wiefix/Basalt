@@ -164,8 +164,16 @@ func TestDBExpose(t *testing.T) {
 	}
 
 	// Saved: a restarted agent listens again without the panel.
+	// Wait for the port itself to close: a connection queued on the old
+	// listener would be reset when it closes.
 	cancel()
-	eventuallyTrue(t, func() bool { return echoes(port) != nil })
+	eventuallyTrue(t, func() bool {
+		c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), time.Second)
+		if err == nil {
+			c.Close()
+		}
+		return err != nil
+	})
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	m2 := newDBExposeManager(Config{DataDir: dir}, resolve, slog.New(slog.DiscardHandler))

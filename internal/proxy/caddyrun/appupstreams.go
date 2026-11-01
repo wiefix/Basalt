@@ -135,6 +135,7 @@ func loadTable(dir string) error {
 	appTable.Lock()
 	defer appTable.Unlock()
 	appTable.file = path
+	appTable.m = map[string]string{}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
