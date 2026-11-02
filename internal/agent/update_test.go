@@ -121,7 +121,7 @@ func TestUpdater(t *testing.T) {
 		mu.Lock()
 		got := strings.Join(restarted, " ")
 		mu.Unlock()
-		if got == "basalt-proxy.service basalt-agent.service" {
+		if got == "basalt-proxy.service basalt-agent-helper.service basalt-agent.service" {
 			break
 		}
 		if time.Now().After(deadline) {

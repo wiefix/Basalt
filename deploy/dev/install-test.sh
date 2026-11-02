@@ -49,7 +49,7 @@ docker exec basalt-panel grep -q -- "--agent-url https://$PANELIP:8443 " /etc/sy
 docker exec basalt-panel sh /deploy/install.sh panel --agent-host 'a;b' >/dev/null 2>&1 && exit 5
 
 echo "### services on panel"
-docker exec basalt-panel systemctl is-active basalt-server basalt-proxy basalt-agent
+docker exec basalt-panel systemctl is-active basalt-server basalt-proxy basalt-agent-helper basalt-agent
 echo "### panel UI through the proxy"
 for i in $(seq 30); do
   docker exec basalt-panel curl -sk "https://$PANELIP/" | grep -q "<title>Basalt</title>" && break; sleep 1
@@ -66,14 +66,14 @@ echo "### add node1 with the one-line command from the panel"
 CMD=$($API -d '{"name":"node1"}' http://127.0.0.1:8080/api/v1/servers | python3 -c 'import sys,json; print(json.load(sys.stdin)["enrollment"]["install_command"])')
 case "$CMD" in *"--panel https://$PANELIP:8443 "*) ;; *) echo "the command does not use the agent host: $CMD"; exit 5 ;; esac
 docker exec basalt-node1 sh -c "$CMD --with-php --with-mariadb --with-docker --with-dns"
-docker exec basalt-node1 systemctl is-active basalt-proxy basalt-agent
+docker exec basalt-node1 systemctl is-active basalt-proxy basalt-agent-helper basalt-agent
 docker exec basalt-node1 sh -c 'git --version && docker buildx version | cut -d" " -f1-2' 
 docker exec basalt-node1 ps -o user=,comm= -C basalt | sort | uniq -c
 echo "### a standby panel on its own server, from its one-line command"
 SBCMD=$($API -d '{"name":"spare"}' http://127.0.0.1:8080/api/v1/standbys | python3 -c 'import sys,json; print(json.load(sys.stdin)["enrollment"]["install_command"])')
 case "$SBCMD" in *"| sh -s -- standby --panel https://$PANELIP:8443 "*"--agent-token "*) ;; *) echo "standby command: $SBCMD"; exit 5 ;; esac
 docker exec basalt-standby sh -c "$SBCMD"
-docker exec basalt-standby systemctl is-active basalt-server basalt-proxy basalt-agent
+docker exec basalt-standby systemctl is-active basalt-server basalt-proxy basalt-agent-helper basalt-agent
 standby_ready() {
   $API http://127.0.0.1:8080/api/v1/standbys | python3 -c 'import sys,json; s=json.load(sys.stdin)["standbys"][0]; print("  standby:", s["name"], "connected" if s["connected"] else "not connected", "ready" if s["ready"] else "copying", s.get("error", "")); sys.exit(0 if s["connected"] and s["ready"] else 1)'
 }
@@ -101,7 +101,7 @@ for i in $(seq 30); do docker exec basalt-node1 grep -q "https://$N1IP:8445" /va
 echo "  the second standby knows: $(docker exec basalt-node1 python3 -c 'import json; print(json.load(open("/var/lib/basalt/spare2/standby.json"))["panels"])')"
 docker exec basalt-node1 grep -q "https://$N1IP:8445" /var/lib/basalt/spare2/standby.json || { echo "the second standby does not know the panel's addresses"; exit 1; }
 echo "### systemd exposure scores (lower is safer)"
-for u in basalt-agent basalt-proxy; do
+for u in basalt-agent basalt-agent-helper basalt-proxy; do
   echo "  $u: $(docker exec basalt-node1 systemd-analyze security $u.service 2>/dev/null | tail -1)"
 done
 
@@ -129,6 +129,10 @@ for i in $(seq 30); do
   docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " && break; sleep 1
 done
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/; echo
+echo "### the site's user was made by the privileged helper, which answers only root"
+docker exec basalt-node1 journalctl -u basalt-agent-helper --no-pager -o cat | grep -q "site user created.*\"site_id\":$SITE" || { echo "the helper did not create the site user"; exit 1; }
+[ "$(docker exec basalt-node1 stat -c '%U %a' /run/basalt-helper/helper.sock)" = "root 600" ] || { echo "the helper's socket is open to others"; exit 1; }
+docker exec basalt-node1 runuser -u basalt-proxy -- python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.connect("/run/basalt-helper/helper.sock")' 2>/dev/null && { echo "another user reached the helper's socket"; exit 1; }
 echo "### the proxy logs the site's requests"
 $API "http://127.0.0.1:8080/api/v1/sites/$SITE/access-log?limit=5" | python3 -c 'import sys,json; l=json.load(sys.stdin)["entries"]; [print("  ", e["at"], e["method"], e["host"], e["uri"], e["status"]) for e in l[:2]]; sys.exit(0 if l and l[0]["host"]=="shop.test" else "no access log")'
 echo "### the site's PHP runs as its own systemd service, with CPU and memory limits"
@@ -525,7 +529,7 @@ echo "  versions (servers, panel): $V"
 [ "$V" = "v9.9.9 v9.9.9 v9.9.9 v9.9.9" ] || { $API http://127.0.0.1:8080/api/v1/updates; exit 1; }
 for host in panel node1 standby; do
   docker exec basalt-$host basalt version | grep -q " v9.9.9 " || { echo "$host runs another binary"; exit 1; }
-  docker exec basalt-$host systemctl is-active -q basalt-proxy basalt-agent || { echo "$host services down after the update"; exit 1; }
+  docker exec basalt-$host systemctl is-active -q basalt-proxy basalt-agent-helper basalt-agent || { echo "$host services down after the update"; exit 1; }
 done
 for i in $(seq 30); do
   docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " && break; sleep 1
@@ -609,7 +613,7 @@ docker exec basalt-node1 journalctl -u basalt-agent --no-pager -o cat | grep -m1
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "site stopped with the panel's removal"; exit 1; }
 echo "### uninstall keeps the data; --purge deletes it"
 docker exec basalt-node1 sh /deploy/install.sh uninstall
-docker exec basalt-node1 sh -c '! systemctl is-active -q basalt-agent basalt-proxy && ! test -e /usr/local/bin/basalt && test -d /srv/basalt/sites && id basalt-s'$SITE' >/dev/null' || { echo "plain uninstall removed too much or too little"; exit 1; }
+docker exec basalt-node1 sh -c '! systemctl is-active -q basalt-agent basalt-agent-helper basalt-proxy && ! test -e /etc/systemd/system/basalt-agent-helper.service && ! test -e /usr/local/bin/basalt && test -d /srv/basalt/sites && id basalt-s'$SITE' >/dev/null' || { echo "plain uninstall removed too much or too little"; exit 1; }
 docker exec basalt-node1 sh /deploy/install.sh uninstall --purge --yes
 docker exec basalt-node1 sh -c '
   ! test -e /srv/basalt && ! test -e /var/lib/basalt || exit 1

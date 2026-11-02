@@ -29,6 +29,7 @@ import (
 	"github.com/wiefix/basalt/internal/compose"
 	"github.com/wiefix/basalt/internal/config"
 	"github.com/wiefix/basalt/internal/logging"
+	"github.com/wiefix/basalt/internal/privhelper"
 	"github.com/wiefix/basalt/internal/proxy/caddyrun"
 	"github.com/wiefix/basalt/internal/secrets"
 	"github.com/wiefix/basalt/internal/server"
@@ -47,6 +48,8 @@ Commands:
              server promote: make this standby panel the panel)
   agent     run the agent on a managed host
             (agent enroll: register this host with a panel)
+  agent-helper
+            run the agent's privileged helper (root, on a managed host)
   proxy     run the web proxy (embedded Caddy) on a managed host
   catalog   catalog build DIR: check the app templates in DIR and print
             the catalog index (sign it with ssh-keygen -Y sign -n basalt-catalog)
@@ -78,6 +81,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		err = runServer(ctx, args[1:], stderr)
 	case "agent":
 		err = runAgent(ctx, args[1:], stderr)
+	case privhelper.Command:
+		err = runAgentHelper(ctx, args[1:], stderr)
 	case "proxy":
 		err = runProxy(ctx, args[1:], stderr)
 	case "catalog":
@@ -392,6 +397,7 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 		PeerListen:      cfg.PeerListen,
 		Isolate:         cfg.Isolate == "on" || (cfg.Isolate == "auto" && runtime.GOOS == "linux" && os.Geteuid() == 0),
 		ProxyUser:       cfg.ProxyUser,
+		HelperSocket:    cfg.HelperSocket,
 		MySQLSocket:     cfg.MySQLSocket,
 		DockerSocket:    cfg.DockerSocket,
 		DockerNamespace: cfg.DockerNamespace,
@@ -449,6 +455,27 @@ func runLocalEnroll(ctx context.Context, args []string, stdout, stderr io.Writer
 	}
 	fmt.Fprintf(stdout, "--panel %s --token %s --ca-sha256 %s\n", cfg.AgentURL, token, ca.Fingerprint())
 	return nil
+}
+
+func runAgentHelper(ctx context.Context, args []string, stderr io.Writer) error {
+	cfg, err := config.ParseAgentHelper(args, stderr)
+	if err != nil {
+		return err
+	}
+	log, err := logging.New(stderr, cfg.LogLevel, cfg.LogFormat)
+	if err != nil {
+		return err
+	}
+	log = log.With("component", "agent-helper")
+	if os.Geteuid() != 0 {
+		return errors.New("the privileged helper runs as root")
+	}
+	h, err := privhelper.New(privhelper.Config{SitesRoot: cfg.SitesRoot, WWWGroup: cfg.WWWGroup, ProxyUser: cfg.ProxyUser}, log)
+	if err != nil {
+		return err
+	}
+	log.Info("starting", "version", buildinfo.Version)
+	return privhelper.Serve(ctx, cfg.Socket, cfg.AgentUID, h.Handle, log)
 }
 
 func runProxy(ctx context.Context, args []string, stderr io.Writer) error {

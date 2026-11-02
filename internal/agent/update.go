@@ -23,7 +23,7 @@ import (
 )
 
 // The units the installer writes; an update restarts those that exist.
-var basaltUnits = []string{"basalt-server.service", "basalt-proxy.service", "basalt-agent.service"}
+var basaltUnits = []string{"basalt-server.service", "basalt-proxy.service", "basalt-agent-helper.service", "basalt-agent.service"}
 
 const unitDir = "/etc/systemd/system"
 

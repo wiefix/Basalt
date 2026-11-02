@@ -88,6 +88,7 @@ type Agent struct {
 	PeerListen    string
 	Isolate       string // "auto", "on", "off"
 	ProxyUser     string
+	HelperSocket  string
 	MySQLSocket   string
 	DockerSocket  string
 	// DockerNamespace keeps this agent's Docker resources apart from those
@@ -101,6 +102,18 @@ type Agent struct {
 	PanelUpstream   string
 	ReleaseKey      string
 	WordPressURL    string
+}
+
+// AgentHelper configures `basalt agent-helper`, the agent's privileged
+// helper.
+type AgentHelper struct {
+	Socket    string
+	AgentUID  int
+	SitesRoot string
+	WWWGroup  string
+	ProxyUser string
+	LogLevel  string
+	LogFormat string
 }
 
 // Proxy configures `basalt proxy`.
@@ -225,6 +238,7 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 	fs.StringVar(&cfg.PeerListen, "peer-listen", env("PEER_LISTEN", ""), "address other servers' agents reach this one's tunnel at, for database replication (e.g. :8444; empty disables it)")
 	fs.StringVar(&cfg.Isolate, "isolate", env("ISOLATE", "auto"), "per-site system users: auto (on when root on Linux), on, off")
 	fs.StringVar(&cfg.ProxyUser, "proxy-user", env("PROXY_USER", ""), "system user `basalt proxy` runs as (added to the web group)")
+	fs.StringVar(&cfg.HelperSocket, "helper-socket", env("HELPER_SOCKET", ""), "socket of the privileged helper (basalt agent-helper); empty: the agent does its work itself")
 	fs.StringVar(&cfg.PanelDomain, "panel-domain", env("PANEL_DOMAIN", ""), "publish the panel UI on this domain or IP through the local proxy (panel host only)")
 	fs.StringVar(&cfg.PanelUpstream, "panel-upstream", env("PANEL_UPSTREAM", "127.0.0.1:8080"), "address of the panel's HTTP listener")
 	fs.StringVar(&cfg.MySQLSocket, "mysql-socket", env("MYSQL_SOCKET", "/run/mysqld/mysqld.sock"), "local MariaDB/MySQL socket (empty disables databases)")
@@ -262,6 +276,33 @@ func ParseAgent(args []string, output io.Writer) (Agent, error) {
 		*d = abs
 	}
 	return cfg, cfg.validate()
+}
+
+// ParseAgentHelper parses flags for `basalt agent-helper`.
+func ParseAgentHelper(args []string, output io.Writer) (AgentHelper, error) {
+	var cfg AgentHelper
+	fs := flag.NewFlagSet("basalt agent-helper", flag.ContinueOnError)
+	fs.SetOutput(output)
+	fs.StringVar(&cfg.Socket, "socket", env("HELPER_SOCKET", "/run/basalt-helper/helper.sock"), "unix socket to listen on")
+	fs.IntVar(&cfg.AgentUID, "agent-uid", 0, "user id of the agent, the only one answered")
+	fs.StringVar(&cfg.SitesRoot, "sites-root", env("SITES_ROOT", "/srv/basalt/sites"), "directory that contains all site files")
+	fs.StringVar(&cfg.WWWGroup, "www-group", "basalt-www", "group shared by the site folders and the proxy")
+	fs.StringVar(&cfg.ProxyUser, "proxy-user", env("PROXY_USER", ""), "system user `basalt proxy` runs as (added to the web group)")
+	fs.StringVar(&cfg.LogLevel, "log-level", env("LOG_LEVEL", "info"), "log level: debug, info, warn, error")
+	fs.StringVar(&cfg.LogFormat, "log-format", env("LOG_FORMAT", "text"), "log format: text or json")
+	if err := fs.Parse(args); err != nil {
+		return cfg, err
+	}
+	if fs.NArg() > 0 {
+		return cfg, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if !filepath.IsAbs(cfg.Socket) || !filepath.IsAbs(cfg.SitesRoot) {
+		return cfg, errors.New("socket and sites-root must be absolute paths")
+	}
+	if cfg.AgentUID < 0 {
+		return cfg, errors.New("agent-uid must not be negative")
+	}
+	return cfg, nil
 }
 
 // ParseAgentEnroll parses flags for `basalt agent enroll`.

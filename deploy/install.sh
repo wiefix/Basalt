@@ -224,7 +224,7 @@ if [ "$MODE" = uninstall ]; then
 		[ "$answer" = purge ] || die "nothing was changed"
 	fi
 	say "Stopping the Basalt services"
-	for unit in basalt-agent basalt-proxy basalt-server; do
+	for unit in basalt-agent basalt-agent-helper basalt-proxy basalt-server; do
 		systemctl disable --now "$unit.service" >/dev/null 2>&1 || true
 		rm -f "$UNITS/$unit.service"
 	done
@@ -555,11 +555,40 @@ fi
 # Other servers' agents reach this one here for database replication; it
 # lets in only what the panel allows, with the panel's certificates.
 AGENT_FLAGS="$AGENT_FLAGS --peer-listen :8444"
+# The agent's privileged helper: what needs root (creating site users, for
+# now) the agent asks it on a socket that answers only the agent's user.
+cat >"$UNITS/basalt-agent-helper.service" <<EOF
+[Unit]
+Description=Basalt agent's privileged helper
+Before=basalt-agent.service
+
+[Service]
+ExecStart=$BIN agent-helper --socket /run/basalt-helper/helper.sock --agent-uid 0 --sites-root $SITES --proxy-user basalt-proxy --log-format json
+Restart=always
+RestartSec=2
+RuntimeDirectory=basalt-helper
+RuntimeDirectoryMode=0700
+UMask=0077
+# useradd and friends: /etc (passwd, group, shadow) is all it writes.
+ProtectSystem=strict
+ReadWritePaths=/etc
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_AUDIT_WRITE
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+IPAddressDeny=any
+RestrictNamespaces=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+$HARDEN
+
+[Install]
+WantedBy=multi-user.target
+EOF
+AGENT_FLAGS="$AGENT_FLAGS --helper-socket /run/basalt-helper/helper.sock"
 cat >"$UNITS/basalt-agent.service" <<EOF
 [Unit]
 Description=Basalt agent
-After=network-online.target basalt-proxy.service
-Wants=network-online.target basalt-proxy.service
+After=network-online.target basalt-proxy.service basalt-agent-helper.service
+Wants=network-online.target basalt-proxy.service basalt-agent-helper.service
 
 [Service]
 Environment=HOME=$LIB/agent
@@ -568,8 +597,8 @@ Restart=always
 RestartSec=2
 RuntimeDirectory=basalt
 RuntimeDirectoryPreserve=yes
-# Root, but only with the powers its work needs: managing site users and
-# their files (chown, setgid folders, reading everything for backups),
+# Root, but only with the powers its work needs: managing the sites'
+# files (chown, setgid folders, reading everything for backups),
 # binding port 53, signalling PHP-FPM. No module loading, raw devices,
 # tracing, clock or network administration.
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_KILL CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE CAP_AUDIT_WRITE
@@ -631,8 +660,8 @@ if [ ! -f "$LIB/agent/agent.json" ] || [ -f "$LIB/agent/removed" ]; then
 	"$BIN" agent enroll --data-dir "$LIB/agent" $ENROLL
 fi
 
-systemctl enable --now basalt-proxy.service basalt-agent.service >/dev/null 2>&1
-systemctl restart basalt-proxy.service basalt-agent.service
+systemctl enable --now basalt-proxy.service basalt-agent-helper.service basalt-agent.service >/dev/null 2>&1
+systemctl restart basalt-proxy.service basalt-agent-helper.service basalt-agent.service
 
 # ---------- done ----------
 

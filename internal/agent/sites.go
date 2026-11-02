@@ -17,6 +17,7 @@ import (
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/files"
 	"github.com/wiefix/basalt/internal/php"
+	"github.com/wiefix/basalt/internal/privhelper"
 	"github.com/wiefix/basalt/internal/sysuser"
 )
 
@@ -51,13 +52,14 @@ type sitesManager struct {
 	log  *slog.Logger
 	root string
 
-	isolate   bool
-	wwwGroup  string
-	proxyUser string
-	php       *php.Host
+	isolate  bool
+	wwwGroup string
+	php      *php.Host
+	// priv creates and removes the site users (with isolation).
+	priv privileged
 
-	identityOnce sync.Once
-	identityErr  error
+	identityMu   sync.Mutex
+	identityDone bool
 
 	// workerExe is the binary run as a site's file worker (this one).
 	workerExe string
@@ -69,7 +71,7 @@ type sitesManager struct {
 func newSitesManager(cfg Config, log *slog.Logger) *sitesManager {
 	return &sitesManager{
 		log: log, root: cfg.SitesRoot,
-		isolate: cfg.Isolate, wwwGroup: cfg.WWWGroup, proxyUser: cfg.ProxyUser,
+		isolate: cfg.Isolate, wwwGroup: cfg.WWWGroup,
 		php:       php.DefaultHost(cfg.PHPRunDir),
 		workerExe: cfg.WorkerExe,
 		workers:   map[int64]*siteWorker{},
@@ -83,6 +85,22 @@ func (m *sitesManager) dir(id int64) (string, error) {
 	return filepath.Join(m.root, strconv.FormatInt(id, 10)), nil
 }
 
+// privileged is what the agent has the privileged helper do: a
+// privhelper.Client, or a privhelper.Helper in this process when the host
+// has no helper (development, servers installed before it).
+type privileged interface {
+	HostIdentity(ctx context.Context) error
+	EnsureSiteUser(ctx context.Context, id int64) (uid, gid int, err error)
+	DeleteSiteUser(ctx context.Context, id int64) error
+}
+
+func newPrivileged(cfg Config, log *slog.Logger) (privileged, error) {
+	if cfg.HelperSocket != "" {
+		return privhelper.NewClient(cfg.HelperSocket), nil
+	}
+	return privhelper.New(privhelper.Config{SitesRoot: cfg.SitesRoot, WWWGroup: cfg.WWWGroup, ProxyUser: cfg.ProxyUser}, log)
+}
+
 // PublicDir is where the proxy serves a site from.
 func (m *sitesManager) PublicDir(id int64) string {
 	d, _ := m.dir(id)
@@ -92,18 +110,19 @@ func (m *sitesManager) PublicDir(id int64) string {
 // PHPVersions lists the PHP-FPM versions installed on this host.
 func (m *sitesManager) PHPVersions() []string { return m.php.Versions() }
 
-// hostIdentity creates the shared web group and puts the proxy's user in it.
+// hostIdentity has the shared web group created and the proxy's user put
+// in it, once (a failure, say the helper not running yet, is retried).
 func (m *sitesManager) hostIdentity(ctx context.Context) error {
-	m.identityOnce.Do(func() {
-		if _, err := sysuser.EnsureGroup(ctx, m.wwwGroup); err != nil {
-			m.identityErr = err
-			return
-		}
-		if m.proxyUser != "" {
-			m.identityErr = sysuser.AddToGroup(ctx, m.proxyUser, m.wwwGroup)
-		}
-	})
-	return m.identityErr
+	m.identityMu.Lock()
+	defer m.identityMu.Unlock()
+	if m.identityDone {
+		return nil
+	}
+	if err := m.priv.HostIdentity(ctx); err != nil {
+		return err
+	}
+	m.identityDone = true
+	return nil
 }
 
 // Ensure creates the site's directories, system user and PHP pool
@@ -137,7 +156,7 @@ func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string, 
 		if err := m.hostIdentity(ctx); err != nil {
 			return fmt.Errorf("prepare host users: %w", err)
 		}
-		if uid, gid, err = sysuser.EnsureUser(ctx, sysuser.SiteUser(id), d); err != nil {
+		if uid, gid, err = m.priv.EnsureSiteUser(ctx, id); err != nil {
 			return err
 		}
 		if wwwGID, err = sysuser.LookupGroup(m.wwwGroup); err != nil {
@@ -274,7 +293,7 @@ func (m *sitesManager) Delete(ctx context.Context, id int64) error {
 		m.log.Info("site moved to trash", "site_id", id, "path", dest)
 	}
 	if m.isolate {
-		return sysuser.DeleteUser(ctx, sysuser.SiteUser(id))
+		return m.priv.DeleteSiteUser(ctx, id)
 	}
 	return nil
 }

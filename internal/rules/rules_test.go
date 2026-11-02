@@ -139,6 +139,9 @@ var importers = map[string][]string{
 	"internal/agenthub": {"cmd/basalt"},
 	"internal/standby":  {"cmd/basalt", "internal/server"},
 	"internal/store":    {"cmd/basalt", "internal/server", "internal/agenthub", "internal/standby"},
+	// The privileged helper: run by main, used (or, without a helper
+	// process, run in-process) by the agent.
+	"internal/privhelper": {"cmd/basalt", "internal/agent"},
 }
 
 // testHelper matches packages made for tests (githubtest, webauthntest, ...).
@@ -305,7 +308,7 @@ func checkSetgid(pkgs map[string]*pkg) []violation {
 // runners are the packages that may start other programs (os/exec): the
 // agent and the host tools it uses. The panel, the proxy and everything
 // they share start none.
-var runners = []string{"internal/agent", "internal/php", "internal/restic", "internal/sysuser"}
+var runners = []string{"internal/agent", "internal/php", "internal/restic", "internal/privhelper"}
 
 // checkExec finds packages outside runners that import os/exec.
 func checkExec(pkgs map[string]*pkg) []violation {
@@ -320,6 +323,42 @@ func checkExec(pkgs map[string]*pkg) []violation {
 					out = append(out, violation{p.fset.Position(imp.Pos()), p.path + " starts programs (os/exec): only " + strings.Join(runners, ", ") + " may"})
 				}
 			}
+		}
+	}
+	return out
+}
+
+// privilegedPrograms change the host as only root may; they are run by
+// the privileged helper alone (the agent asks it), so its requests are the
+// whole list of what needs root. Moving more there (21.3, 21.4) adds to it.
+var privilegedPrograms = []string{"useradd", "userdel", "usermod", "groupadd", "groupdel", "groupmod"}
+
+// privilegedPkg is the privileged helper.
+const privilegedPkg = "internal/privhelper"
+
+// checkPrivileged finds the names of privileged programs (as string
+// literals: how a program is named to os/exec) outside the helper.
+func checkPrivileged(pkgs map[string]*pkg) []violation {
+	var out []violation
+	for _, p := range sortedPkgs(pkgs) {
+		if p.path == privilegedPkg {
+			continue
+		}
+		for _, f := range p.files {
+			ast.Inspect(f, func(n ast.Node) bool {
+				l, ok := n.(*ast.BasicLit)
+				if !ok || l.Kind != token.STRING {
+					return true
+				}
+				v, err := strconv.Unquote(l.Value)
+				if err != nil {
+					return true
+				}
+				if prog := filepath.Base(v); slices.Contains(privilegedPrograms, prog) {
+					out = append(out, violation{p.fset.Position(l.Pos()), fmt.Sprintf("%s names the privileged program %s: only %s runs it", p.path, prog, privilegedPkg)})
+				}
+				return true
+			})
 		}
 	}
 	return out
@@ -432,6 +471,8 @@ func TestExternalPrograms(t *testing.T) { report(t, checkExec(repo(t))) }
 
 func TestHTTPTimeouts(t *testing.T) { report(t, checkHTTPTimeouts(repo(t))) }
 
+func TestPrivilegedPrograms(t *testing.T) { report(t, checkPrivileged(repo(t))) }
+
 // TestRulesCatch makes sure each check finds what it is meant to find.
 func TestRulesCatch(t *testing.T) {
 	src := map[string]string{
@@ -526,6 +567,15 @@ func f() {
 		"internal/agent": `package agent
 import "os/exec"
 var _ = exec.Command
+func g() {
+	exec.Command("useradd", "x")
+	_ = "/usr/sbin/userdel"
+	_ = "useradd is fine in a sentence"
+}
+`,
+		"internal/privhelper": `package privhelper
+import "os/exec"
+var _ = exec.Command("groupadd", "x")
 `,
 	}
 	fset := token.NewFileSet()
@@ -549,5 +599,8 @@ var _ = exec.Command
 	}
 	if got := lines(checkHTTPTimeouts(pkgs)); got != "8,12,13" {
 		t.Errorf("timeout findings on lines %s, want 8,12,13", got)
+	}
+	if got := lines(checkPrivileged(pkgs)); got != "5,6" {
+		t.Errorf("privileged program findings on lines %s, want 5,6", got)
 	}
 }

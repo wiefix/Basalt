@@ -72,6 +72,9 @@ type Config struct {
 	// WorkerExe is the binary started (as "<exe> site-worker …") for a
 	// site's file access with isolation; empty: this executable.
 	WorkerExe string
+	// HelperSocket is where the privileged helper (basalt agent-helper)
+	// listens; empty: its work is done in this process.
+	HelperSocket string
 	// WWWGroup is the group shared by site directories and the proxy.
 	WWWGroup string
 	// ProxyUser is the system user `basalt proxy` runs as ("" if root).
@@ -183,6 +186,11 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		}
 	}
 	sites := newSitesManager(cfg, log.With("subsystem", "sites"))
+	if cfg.Isolate {
+		if sites.priv, err = newPrivileged(cfg, log.With("subsystem", "privileged")); err != nil {
+			return nil, err
+		}
+	}
 	sftp, err := newSFTPManager(cfg, sites, log.With("subsystem", "sftp"))
 	if err != nil {
 		return nil, err

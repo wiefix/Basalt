@@ -113,7 +113,7 @@ func (m *sitesManager) restoreTrash(ctx context.Context, name string, id int64) 
 	}
 	uid, gid, www := -1, -1, -1
 	if m.isolate {
-		if uid, gid, err = sysuser.EnsureUser(ctx, sysuser.SiteUser(id), dst); err != nil {
+		if uid, gid, err = m.priv.EnsureSiteUser(ctx, id); err != nil {
 			return err
 		}
 		if www, err = sysuser.LookupGroup(m.wwwGroup); err != nil {

@@ -30,6 +30,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/wiefix/basalt/internal/agent"
+	"github.com/wiefix/basalt/internal/privhelper"
 	"github.com/wiefix/basalt/internal/proxy/caddyrun"
 )
 
@@ -71,9 +72,20 @@ func TestLinuxIsolationAndPHP(t *testing.T) {
 		t.Fatalf("copy the test binary for site workers: %v", err)
 	}
 	defer os.Remove(workerExe)
+	// Site users come from the privileged helper, over its socket as on an
+	// installed server.
+	helper, err := privhelper.New(privhelper.Config{SitesRoot: sitesRoot}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	helperSocket := "/run/basalt-it/helper.sock"
+	os.MkdirAll(filepath.Dir(helperSocket), 0o700)
+	helperDone := make(chan error, 1)
+	go func() { helperDone <- privhelper.Serve(ctx, helperSocket, 0, helper.Handle, log) }()
+	defer func() { cancel(); <-helperDone }()
 	a, err := agent.New(agent.Config{
-		WorkerExe: workerExe,
-		DataDir:   agentDir, ProxyDir: proxyDir, SitesRoot: sitesRoot,
+		WorkerExe: workerExe, HelperSocket: helperSocket,
+		DataDir: agentDir, ProxyDir: proxyDir, SitesRoot: sitesRoot,
 		HTTPPort: freePort(t), HTTPSPort: httpsPort, SFTPListen: "127.0.0.1:0",
 		Isolate: true, PHPRunDir: "/run/basalt-it/php", MySQLSocket: "/run/mysqld/mysqld.sock",
 		Restic: "restic",
