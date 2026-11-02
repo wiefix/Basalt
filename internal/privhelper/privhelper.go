@@ -11,9 +11,10 @@
 // connection broke.
 //
 // It creates and removes the sites' users, puts the sites' PHP in place
-// (pools, their systemd services, Laravel's processes) and keeps MariaDB's
-// option file of database replication. MariaDB's databases themselves the
-// agent manages over MariaDB's socket.
+// (pools, their systemd services, Laravel's processes), keeps MariaDB's
+// option file of database replication, runs restic for backups (it reads
+// and restores every site's files) and installs updates of Basalt.
+// MariaDB's databases themselves the agent manages over MariaDB's socket.
 //
 // Without a helper (development, servers installed before it existed) the
 // agent runs the same Helper in its own process.
@@ -31,6 +32,7 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/php"
+	"github.com/wiefix/basalt/internal/sshsig"
 	"github.com/wiefix/basalt/internal/sysuser"
 )
 
@@ -94,6 +96,22 @@ type Config struct {
 	MariaDBConf string
 	// PHP is the host's PHP (default: php.DefaultHost of PHPRunDir).
 	PHP *php.Host
+
+	// Restic is the restic binary backups run with ("" disables them).
+	// StateDir keeps restic's cache and the SSH keys of SFTP storages
+	// (default /var/lib/basalt/helper); AgentDataDir is the agent's data,
+	// where no local repository may be.
+	Restic       string
+	StateDir     string
+	AgentDataDir string
+
+	// ReleaseKey is the key release checksums must be signed with (default:
+	// the Basalt release key). UpdateExe is the binary an update replaces
+	// (default: this one, if the installer set the host up; "": no
+	// updates) and Restart restarts the services (default: systemctl).
+	ReleaseKey string
+	UpdateExe  string
+	Restart    func(units []string) error
 }
 
 // Helper carries out the privileged operations.
@@ -108,6 +126,9 @@ type Helper struct {
 	phpMu sync.Mutex
 	// mariadbMu: one writer of the option file at a time.
 	mariadbMu sync.Mutex
+	// updateMu guards staged, the version waiting in UpdateExe + ".new".
+	updateMu sync.Mutex
+	staged   string
 }
 
 func New(cfg Config, log *slog.Logger) (*Helper, error) {
@@ -123,7 +144,19 @@ func New(cfg Config, log *slog.Logger) (*Helper, error) {
 	if cfg.MariaDBConf == "" {
 		cfg.MariaDBConf = DefaultMariaDBConf
 	}
-	for _, p := range []string{cfg.PHPRunDir, cfg.SiteDBDir, cfg.MariaDBConf} {
+	if cfg.StateDir == "" {
+		cfg.StateDir = "/var/lib/basalt/helper"
+	}
+	if cfg.ReleaseKey == "" {
+		cfg.ReleaseKey = sshsig.ReleaseKey
+	}
+	if cfg.UpdateExe == "" {
+		cfg.UpdateExe = updateExe()
+	}
+	if cfg.Restart == nil {
+		cfg.Restart = systemctlRestart
+	}
+	for _, p := range []string{cfg.PHPRunDir, cfg.SiteDBDir, cfg.MariaDBConf, cfg.StateDir} {
 		if !filepath.IsAbs(p) {
 			return nil, fmt.Errorf("%q must be an absolute path", p)
 		}
@@ -198,6 +231,10 @@ func (h *Helper) Handle(ctx context.Context, msgType string, payload json.RawMes
 		return struct{}{}, h.WriteMariaDBConfig(ctx, req)
 	case MsgMariaDBRestart:
 		return struct{}{}, h.RestartMariaDB(ctx)
+	case MsgRestic:
+		return h.handleRestic(ctx, payload)
+	case MsgUpdateInfo, MsgUpdateStage, MsgUpdateActivate:
+		return h.handleUpdate(ctx, msgType, payload)
 	}
 	return nil, fmt.Errorf("unknown request %q", msgType)
 }

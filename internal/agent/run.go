@@ -195,7 +195,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		return nil, err
 	}
 	apps := newAppsManager(cfg, log.With("subsystem", "apps"))
-	backups := newBackupManager(cfg, sites, apps, log.With("subsystem", "backup"))
+	backups := newBackupManager(cfg, priv, sites, apps, log.With("subsystem", "backup"))
 	proxy := newProxyManager(cfg, sites, apps, log.With("subsystem", "proxy"))
 	apps.onChange = func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -221,7 +221,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		MetricsInterval: metricsInterval,
 		RenewBefore:     renewBefore,
 		collector:       newCollector(),
-		updater:         newUpdater(cfg, log.With("subsystem", "update")),
+		updater:         newUpdater(cfg, priv, log.With("subsystem", "update")),
 		wordpressURL:    cfg.WordPressURL,
 	}
 	a.restartDB = cfg.RestartMariaDB
@@ -390,7 +390,7 @@ func (a *Agent) session(ctx context.Context, url string) (connected bool, err er
 	if hello.Docker != "" {
 		hello.Railpack = a.apps.railpackVersion(ctx)
 	}
-	hello.Updatable = a.updater.updatable()
+	hello.Updatable = a.updater.updatable(ctx)
 	hello.PHPLimits = a.sites.isolate && a.sites.php.Units
 	hello.DNSPort, hello.DNSError = a.dns.Status()
 	hello.PeerPort, hello.PeerError = a.tunnel.Status()
@@ -756,7 +756,7 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return nil, err
 		}
-		return struct{}{}, a.updater.activate(req)
+		return struct{}{}, a.updater.activate(ctx, req)
 	case agentproto.TypeComposeFile:
 		var req agentproto.ComposeFileRequest
 		if err := json.Unmarshal(payload, &req); err != nil {

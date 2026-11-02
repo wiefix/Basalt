@@ -22,6 +22,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/privhelper"
 	"github.com/wiefix/basalt/internal/release"
 	"github.com/wiefix/basalt/internal/sshsig"
 )
@@ -60,16 +61,22 @@ func TestUpdater(t *testing.T) {
 	os.WriteFile(exe, script("v1.0.0"), 0o755)
 	var mu sync.Mutex
 	var restarted []string
-	u := newUpdater(Config{ReleaseKey: key, UpdateExe: exe, Restart: func(units []string) error {
-		mu.Lock()
-		defer mu.Unlock()
-		restarted = units
-		return nil
-	}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if !u.updatable() {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	helper, err := privhelper.New(privhelper.Config{SitesRoot: t.TempDir(), StateDir: t.TempDir(), ReleaseKey: key, UpdateExe: exe,
+		Restart: func(units []string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			restarted = units
+			return nil
+		}}, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := newUpdater(Config{ReleaseKey: key, DataDir: t.TempDir()}, helper, log)
+	ctx := context.Background()
+	if !u.updatable(ctx) {
 		t.Fatal("not updatable")
 	}
-	ctx := context.Background()
 	prepare := func(v string, req agentproto.UpdatePrepare) error {
 		req.Version = v
 		return u.prepare(ctx, panel.Client(), panel.URL, req)
@@ -97,7 +104,7 @@ func TestUpdater(t *testing.T) {
 	if _, err := os.Stat(exe + ".new"); !os.IsNotExist(err) {
 		t.Fatal("a refused binary was left staged")
 	}
-	if err := u.activate(agentproto.UpdateActivate{Version: "v1.1.0"}); err == nil {
+	if err := u.activate(ctx, agentproto.UpdateActivate{Version: "v1.1.0"}); err == nil {
 		t.Fatal("activated without preparing")
 	}
 
@@ -107,10 +114,10 @@ func TestUpdater(t *testing.T) {
 	if b, _ := os.ReadFile(exe); string(b) != string(script("v1.0.0")) {
 		t.Fatal("preparing replaced the running binary")
 	}
-	if err := u.activate(agentproto.UpdateActivate{Version: "v1.2.0"}); err == nil {
+	if err := u.activate(ctx, agentproto.UpdateActivate{Version: "v1.2.0"}); err == nil {
 		t.Fatal("activated another version")
 	}
-	if err := u.activate(agentproto.UpdateActivate{Version: "v1.1.0"}); err != nil {
+	if err := u.activate(ctx, agentproto.UpdateActivate{Version: "v1.1.0"}); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(exe); string(b) != string(newBin) {
@@ -121,7 +128,7 @@ func TestUpdater(t *testing.T) {
 		mu.Lock()
 		got := strings.Join(restarted, " ")
 		mu.Unlock()
-		if got == "basalt-proxy.service basalt-agent-helper.service basalt-agent.service" {
+		if got == "basalt-proxy.service basalt-agent.service basalt-agent-helper.service" {
 			break
 		}
 		if time.Now().After(deadline) {

@@ -188,14 +188,16 @@ func (r *Runner) Init(ctx context.Context, repo Repo) (bool, error) {
 	return true, nil
 }
 
-// BackupOptions select what one snapshot holds: Paths, or the standard
-// output of StdinCommand stored as StdinFilename.
+// BackupOptions select what one snapshot holds: Paths, the standard
+// output of StdinCommand, or what is read from Stdin; the last two stored
+// as StdinFilename.
 type BackupOptions struct {
 	Host          string
 	Tags          []string
 	Paths         []string
 	Excludes      []string
 	StdinCommand  []string
+	Stdin         io.Reader
 	StdinFilename string
 }
 
@@ -222,14 +224,17 @@ func (r *Runner) Backup(ctx context.Context, repo Repo, o BackupOptions) (Summar
 	for _, e := range o.Excludes {
 		args = append(args, "--exclude", e)
 	}
-	if len(o.StdinCommand) > 0 {
+	switch {
+	case len(o.StdinCommand) > 0:
 		args = append(args, "--stdin-filename", o.StdinFilename, "--stdin-from-command", "--")
 		args = append(args, o.StdinCommand...)
-	} else {
+	case o.Stdin != nil:
+		args = append(args, "--stdin-filename", o.StdinFilename, "--stdin")
+	default:
 		args = append(args, "--")
 		args = append(args, o.Paths...)
 	}
-	out, err := r.run(ctx, repo, nil, args...)
+	out, err := r.run(ctx, repo, o.Stdin, args...)
 	var s Summary
 	for line := range bytes.SplitSeq(out, []byte("\n")) {
 		var m struct {
@@ -308,6 +313,12 @@ func (r *Runner) Forget(ctx context.Context, repo Repo, host string, tags []stri
 		}
 	}
 	_, err := r.run(ctx, repo, nil, args...)
+	return err
+}
+
+// ForgetIDs removes snapshots by id. Data is freed by Prune.
+func (r *Runner) ForgetIDs(ctx context.Context, repo Repo, ids ...string) error {
+	_, err := r.run(ctx, repo, nil, append([]string{"forget", "--quiet", "--"}, ids...)...)
 	return err
 }
 

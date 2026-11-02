@@ -42,7 +42,7 @@ var errNotInBackup = errors.New("no such file or folder in this backup")
 
 // checkSnapshot loads the snapshot the request names; it must hold the
 // requested part of this very resource.
-func (b *backupManager) checkSnapshot(ctx context.Context, r *restic.Runner, repo restic.Repo, req agentproto.SnapshotFilesRequest) (*restic.Snapshot, error) {
+func (b *backupManager) checkSnapshot(ctx context.Context, r resticRun, repo agentproto.BackupRepo, req agentproto.SnapshotFilesRequest) (*restic.Snapshot, error) {
 	snap, err := r.SnapshotByID(ctx, repo, req.Snapshot)
 	if err != nil {
 		return nil, err
@@ -57,7 +57,7 @@ func (b *backupManager) checkSnapshot(ctx context.Context, r *restic.Runner, rep
 // snapshotNode finds what the request names in a snapshot of a site's
 // files: the snapshot, the absolute path in it, the path relative to the
 // site's directory ("" for all of it) and the entry itself.
-func (b *backupManager) snapshotNode(ctx context.Context, r *restic.Runner, repo restic.Repo, req agentproto.SnapshotFilesRequest) (snapID, abs, rel string, node *restic.Node, err error) {
+func (b *backupManager) snapshotNode(ctx context.Context, r resticRun, repo agentproto.BackupRepo, req agentproto.SnapshotFilesRequest) (snapID, abs, rel string, node *restic.Node, err error) {
 	snap, err := b.checkSnapshot(ctx, r, repo, req)
 	if err != nil {
 		return "", "", "", nil, err
@@ -204,7 +204,7 @@ func (b *backupManager) Export(ctx context.Context, req agentproto.SnapshotFiles
 }
 
 // exportDump writes a database dump of a snapshot for the panel to read.
-func (b *backupManager) exportDump(ctx context.Context, r *restic.Runner, repo restic.Repo, req agentproto.SnapshotFilesRequest) (agentproto.ExportResponse, error) {
+func (b *backupManager) exportDump(ctx context.Context, r resticRun, repo agentproto.BackupRepo, req agentproto.SnapshotFilesRequest) (agentproto.ExportResponse, error) {
 	snap, err := b.checkSnapshot(ctx, r, repo, req)
 	if err != nil {
 		return agentproto.ExportResponse{}, err
@@ -352,7 +352,7 @@ func (b *backupManager) RestoreCopy(ctx context.Context, req agentproto.Snapshot
 // -2, -3… when taken).
 func restoredName() string { return "restored-" + time.Now().UTC().Format("20060102-150405") }
 
-func (b *backupManager) restoreInto(ctx context.Context, r *restic.Runner, repo restic.Repo, site *files.Site, id, abs, rel, typ, folder string) (*files.ExtractResult, error) {
+func (b *backupManager) restoreInto(ctx context.Context, r resticRun, repo agentproto.BackupRepo, site *files.Site, id, abs, rel, typ, folder string) (*files.ExtractResult, error) {
 	dest, base := folder, path.Base(rel)
 	if typ == "dir" && rel != "" {
 		dest = folder + "/" + base

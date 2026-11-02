@@ -557,7 +557,8 @@ fi
 AGENT_FLAGS="$AGENT_FLAGS --peer-listen :8444"
 # The agent's privileged helper: what needs root (the sites' users, their
 # PHP-FPM pools and services, Laravel's processes, MariaDB's replication
-# settings and restart) the agent asks it on a socket that answers only the
+# settings and restart, restic reading and restoring every site's files,
+# installing an update) the agent asks it on a socket that answers only the
 # agent's user.
 cat >"$UNITS/basalt-agent-helper.service" <<EOF
 [Unit]
@@ -565,28 +566,32 @@ Description=Basalt agent's privileged helper
 Before=basalt-agent.service
 
 [Service]
-ExecStart=$BIN agent-helper --socket /run/basalt-helper/helper.sock --agent-uid 0 --sites-root $SITES --proxy-user basalt-proxy --log-format json
+ExecStart=$BIN agent-helper --socket /run/basalt-helper/helper.sock --agent-uid 0 --sites-root $SITES --proxy-user basalt-proxy --state-dir $LIB/helper --agent-data-dir $LIB/agent --log-format json
 Restart=always
 RestartSec=2
 RuntimeDirectory=basalt-helper
 RuntimeDirectoryMode=0700
+StateDirectory=basalt/helper
+StateDirectoryMode=0700
 UMask=0022
-# /etc is all it writes: users (passwd, group, shadow), PHP-FPM pools and
-# configurations, systemd units, MariaDB's option file. The rest systemd
-# does (starting PHP-FPM, Laravel's processes, MariaDB).
-ProtectSystem=strict
-ReadWritePaths=/etc
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_AUDIT_WRITE
-RestrictAddressFamilies=AF_UNIX AF_NETLINK
-IPAddressDeny=any
+# It writes /etc (users, PHP-FPM pools and configurations, systemd units,
+# MariaDB's option file), the sites on a restore, local backup
+# repositories wherever the panel put them, and the binary on an update:
+# only /usr stays read-only. The rest systemd does (starting PHP-FPM,
+# Laravel's processes, MariaDB). restic reaches S3 and SFTP storages.
+ProtectSystem=yes
+ReadWritePaths=$(dirname "$BIN")
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_AUDIT_WRITE
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 RestrictNamespaces=yes
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
-# Not MemoryDenyWriteExecute (PHP's JIT in php-fpm --test).
+# Not MemoryDenyWriteExecute (PHP's JIT in php-fpm --test), nor
+# RestrictSUIDSGID (a restore puts the sites' setgid folders back).
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
-ProtectHome=yes
+ProtectHome=read-only
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -594,7 +599,6 @@ ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 RestrictRealtime=yes
-RestrictSUIDSGID=yes
 LockPersonality=yes
 SystemCallArchitectures=native
 

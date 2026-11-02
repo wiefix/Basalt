@@ -72,9 +72,10 @@ func TestLinuxIsolationAndPHP(t *testing.T) {
 		t.Fatalf("copy the test binary for site workers: %v", err)
 	}
 	defer os.Remove(workerExe)
-	// Site users and their PHP come from the privileged helper, over its
-	// socket as on an installed server.
-	helper, err := privhelper.New(privhelper.Config{SitesRoot: sitesRoot, PHPRunDir: "/run/basalt-it/php"}, log)
+	// Site users, their PHP and restic come from the privileged helper,
+	// over its socket as on an installed server.
+	helper, err := privhelper.New(privhelper.Config{SitesRoot: sitesRoot, PHPRunDir: "/run/basalt-it/php",
+		Restic: "restic", StateDir: filepath.Join(filepath.Dir(agentDir), "helper"), AgentDataDir: agentDir}, log)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,8 +18,22 @@ import (
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
-	"github.com/wiefix/basalt/internal/restic"
+	"github.com/wiefix/basalt/internal/privhelper"
 )
+
+// testBackups is a backup manager whose restic runs in a helper in this
+// process, with data under dir.
+func testBackups(t *testing.T, bin, dir string) *backupManager {
+	t.Helper()
+	sites := filepath.Join(dir, "sites")
+	priv, err := privhelper.New(privhelper.Config{SitesRoot: sites, Restic: bin, StateDir: filepath.Join(dir, "agent"),
+		AgentDataDir: filepath.Join(dir, "agent")}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &backupManager{binary: bin, dataDir: filepath.Join(dir, "agent"), priv: priv, sites: &sitesManager{root: sites},
+		slots: make(chan struct{}, 2), locks: map[string]*sync.Mutex{}}
+}
 
 // volumeTar is a volume as the helper container archives it.
 func volumeTar(t *testing.T) []byte {
@@ -51,8 +66,7 @@ func TestVolumeSnapshotFiles(t *testing.T) {
 	}
 	ctx := context.Background()
 	dir := t.TempDir()
-	b := &backupManager{binary: bin, dataDir: filepath.Join(dir, "agent"), sites: &sitesManager{root: filepath.Join(dir, "sites")},
-		slots: make(chan struct{}, 2), locks: map[string]*sync.Mutex{}}
+	b := testBackups(t, bin, dir)
 	spec := agentproto.BackupRepo{Kind: agentproto.StorageLocal, Path: filepath.Join(dir, "repo"), Password: "pw"}
 	repo, err := b.repo(spec)
 	if err != nil {
@@ -65,7 +79,7 @@ func TestVolumeSnapshotFiles(t *testing.T) {
 	stdin := func(content []byte, file string, tags ...string) string {
 		p := filepath.Join(dir, file)
 		os.WriteFile(p, content, 0o600)
-		s, err := r.Backup(ctx, repo, restic.BackupOptions{Host: backupHost, Tags: tags, StdinCommand: []string{"cat", p}, StdinFilename: file})
+		s, err := r.BackupCommand(ctx, repo, tags, file, exec.Command("cat", p))
 		if err != nil {
 			t.Fatal(err)
 		}

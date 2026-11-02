@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/php"
+	"github.com/wiefix/basalt/internal/restic"
 )
 
 // dialWait is how long a call waits for the helper to listen (it starts
@@ -77,6 +79,37 @@ func (c *Client) RestartMariaDB(ctx context.Context) error {
 	return c.call(ctx, MsgMariaDBRestart, struct{}{}, nil)
 }
 
+// Restic runs a restic command in the helper, on a connection of its own
+// carrying the command's files.
+func (c *Client) Restic(ctx context.Context, req ResticRequest, stdio Stdio, line func(string)) (ResticResult, error) {
+	var res ResticResult
+	err := c.callAlone(ctx, MsgRestic, req, &res, stdio.files(), func(f json.RawMessage) error {
+		var l ResticLine
+		if json.Unmarshal(f, &l) == nil && line != nil {
+			line(l.Line)
+		}
+		return nil
+	})
+	if err == nil && res.Error != "" {
+		err = &restic.Error{Code: res.Code, Message: res.Error}
+	}
+	return res, err
+}
+
+func (c *Client) Updatable(ctx context.Context) (bool, error) {
+	var info UpdateInfo
+	err := c.call(ctx, MsgUpdateInfo, struct{}{}, &info)
+	return info.Updatable, err
+}
+
+func (c *Client) StageUpdate(ctx context.Context, req agentproto.UpdatePrepare, bin *os.File) error {
+	return c.callAlone(ctx, MsgUpdateStage, req, nil, []*os.File{bin}, nil)
+}
+
+func (c *Client) ActivateUpdate(ctx context.Context, req agentproto.UpdateActivate) error {
+	return c.call(ctx, MsgUpdateActivate, req, nil)
+}
+
 // Close drops the connection.
 func (c *Client) Close() {
 	c.mu.Lock()
@@ -108,6 +141,57 @@ func (c *Client) call(ctx context.Context, msgType string, req, resp any) error 
 	}
 }
 
+// stopWait is how long a request asked to stop may take to answer before
+// its connection is dropped (which stops it too).
+const stopWait = 30 * time.Second
+
+// callAlone sends a request on a connection of its own, with files (may
+// be none), passing the frames of its answer to fn (may be nil). It is
+// for long requests (restic) and those with files; it is not repeated.
+//
+// When ctx ends, the helper is asked to stop and the call waits for its
+// answer (up to stopWait): the caller learns the request has stopped
+// before it, say, closes a pipe the helper reads.
+func (c *Client) callAlone(ctx context.Context, msgType string, req, resp any, files []*os.File, fn func(json.RawMessage) error) error {
+	conn, err := c.dial(ctx)
+	if err != nil {
+		return fmt.Errorf("privileged helper: %w", err)
+	}
+	defer conn.Close()
+	if len(files) > 0 {
+		if err := sendFiles(conn.(*net.UnixConn), files); err != nil {
+			return fmt.Errorf("privileged helper: %w", err)
+		}
+	}
+	p := agentproto.NewPeer(conn, conn, nil, refuseRequests)
+	go p.Run(context.Background())
+
+	interrupt := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		close(interrupt)
+		select {
+		case <-p.Done():
+		case <-time.After(stopWait):
+			conn.Close()
+		}
+	})
+	defer stop()
+	err = p.Stream(agentproto.WithInterrupt(context.WithoutCancel(ctx), interrupt), msgType, req, resp, fn)
+	switch re := (*agentproto.RemoteError)(nil); {
+	case err == nil:
+		return nil
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case errors.As(err, &re):
+		return errors.New(re.Msg)
+	}
+	return fmt.Errorf("privileged helper: %w", err)
+}
+
+func refuseRequests(context.Context, string, json.RawMessage) (any, error) {
+	return nil, errors.New("the agent serves no requests of the helper")
+}
+
 func (c *Client) connect(ctx context.Context) (*agentproto.Peer, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -124,9 +208,7 @@ func (c *Client) connect(ctx context.Context) (*agentproto.Peer, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := agentproto.NewPeer(conn, conn, nil, func(context.Context, string, json.RawMessage) (any, error) {
-		return nil, errors.New("the agent serves no requests of the helper")
-	})
+	p := agentproto.NewPeer(conn, conn, nil, refuseRequests)
 	go p.Run(context.Background())
 	c.peer, c.conn = p, conn
 	return p, nil

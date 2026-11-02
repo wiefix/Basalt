@@ -133,6 +133,28 @@ echo "### the site's user was made by the privileged helper, which answers only 
 docker exec basalt-node1 journalctl -u basalt-agent-helper --no-pager -o cat | grep -q "site user created.*\"site_id\":$SITE" || { echo "the helper did not create the site user"; exit 1; }
 [ "$(docker exec basalt-node1 stat -c '%U %a' /run/basalt-helper/helper.sock)" = "root 600" ] || { echo "the helper's socket is open to others"; exit 1; }
 docker exec basalt-node1 runuser -u basalt-proxy -- python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.connect("/run/basalt-helper/helper.sock")' 2>/dev/null && { echo "another user reached the helper's socket"; exit 1; }
+echo "### the site's backup and restore: restic runs in the helper, within its sandbox"
+SST=$($API -d '{"name":"sites","kind":"local","path":"/var/backups/basalt-sites"}' http://127.0.0.1:8080/api/v1/backup-storages | python3 -c 'import sys,json; print(json.load(sys.stdin)["storage"]["id"])')
+$API -X PUT -d "{\"storage_id\":$SST,\"schedule\":\"manual\",\"keep_last\":3}" http://127.0.0.1:8080/api/v1/sites/$SITE/backup-policy >/dev/null
+SETGID=$(docker exec basalt-node1 find /srv/basalt/sites/$SITE -perm -2000 | sort)
+site_run() { # $1: run id; waits for it and prints its status
+  for i in $(seq 120); do
+    S=$($API http://127.0.0.1:8080/api/v1/sites/$SITE/backups/$1 | python3 -c 'import sys,json; print(json.load(sys.stdin)["backup"]["status"])')
+    [ "$S" != running ] && break; sleep 1
+  done
+  [ "$S" = succeeded ] || { $API http://127.0.0.1:8080/api/v1/sites/$SITE/backups/$1; exit 1; }
+}
+BK=$($API -d '{}' http://127.0.0.1:8080/api/v1/sites/$SITE/backups | python3 -c 'import sys,json; print(json.load(sys.stdin)["backup"]["id"])')
+site_run $BK
+SNAPS=$($API http://127.0.0.1:8080/api/v1/sites/$SITE/backups/$BK | python3 -c 'import sys,json; print(json.dumps([s["id"] for s in json.load(sys.stdin)["backup"]["snapshots"]]))')
+docker exec basalt-node1 test -d /var/lib/basalt/helper/restic-cache || { echo "restic did not run in the helper"; exit 1; }
+$API -X PUT -H Content-Type:application/octet-stream --data-binary 'damaged' "http://127.0.0.1:8080/api/v1/sites/$SITE/files/content?path=/public/index.php" >/dev/null
+RS=$($API -d "{\"snapshots\":$SNAPS}" http://127.0.0.1:8080/api/v1/sites/$SITE/restore | python3 -c 'import sys,json; print(json.load(sys.stdin)["backup"]["id"])')
+site_run $RS
+docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "the site's page was not restored"; exit 1; }
+[ "$(docker exec basalt-node1 stat -c %U /srv/basalt/sites/$SITE/public/index.php)" = "basalt-s$SITE" ] || { echo "the restored file is not the site user's"; exit 1; }
+[ "$(docker exec basalt-node1 find /srv/basalt/sites/$SITE -perm -2000 | sort)" = "$SETGID" ] || { echo "the restore lost the site's setgid folders"; exit 1; }
+echo "  backed up and restored, $(echo "$SETGID" | wc -l) setgid folder(s) kept"
 echo "### the proxy logs the site's requests"
 $API "http://127.0.0.1:8080/api/v1/sites/$SITE/access-log?limit=5" | python3 -c 'import sys,json; l=json.load(sys.stdin)["entries"]; [print("  ", e["at"], e["method"], e["host"], e["uri"], e["status"]) for e in l[:2]]; sys.exit(0 if l and l[0]["host"]=="shop.test" else "no access log")'
 echo "### the site's PHP runs as its own systemd service, with CPU and memory limits"
@@ -512,7 +534,11 @@ standby_ready
 echo "### update from the panel: a signed newer release reaches both servers through systemd"
 docker run -d --name basalt-releases --network basalt-net -v "$PWD/$RT":/www:ro busybox:1.37 httpd -f -p 80 -h /www >/dev/null
 for host in panel node1 standby; do
-  docker exec basalt-$host sh -c "mkdir -p /etc/systemd/system/basalt-agent.service.d && printf '[Service]\nEnvironment=\"BASALT_RELEASE_KEY=%s\"\n' '$RELKEY' >/etc/systemd/system/basalt-agent.service.d/release.conf && systemctl daemon-reload && systemctl restart basalt-agent"
+  # The helper installs the update: it checks the signature itself.
+  for u in basalt-agent basalt-agent-helper; do
+    docker exec basalt-$host sh -c "mkdir -p /etc/systemd/system/$u.service.d && printf '[Service]\nEnvironment=\"BASALT_RELEASE_KEY=%s\"\n' '$RELKEY' >/etc/systemd/system/$u.service.d/release.conf"
+  done
+  docker exec basalt-$host sh -c "systemctl daemon-reload && systemctl restart basalt-agent-helper basalt-agent"
 done
 docker exec basalt-panel sh -c "mkdir -p /etc/systemd/system/basalt-server.service.d && printf '[Service]\nEnvironment=BASALT_RELEASE_URL=http://basalt-releases BASALT_RELEASE_ALLOW_PRIVATE=1 \"BASALT_RELEASE_KEY=%s\"\n' '$RELKEY' >/etc/systemd/system/basalt-server.service.d/release.conf && systemctl daemon-reload && systemctl restart basalt-server"
 for i in $(seq 60); do docker exec basalt-panel curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1 && break; sleep 0.5; done

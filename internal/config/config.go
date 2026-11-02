@@ -107,13 +107,17 @@ type Agent struct {
 // AgentHelper configures `basalt agent-helper`, the agent's privileged
 // helper.
 type AgentHelper struct {
-	Socket    string
-	AgentUID  int
-	SitesRoot string
-	WWWGroup  string
-	ProxyUser string
-	LogLevel  string
-	LogFormat string
+	Socket       string
+	AgentUID     int
+	SitesRoot    string
+	WWWGroup     string
+	ProxyUser    string
+	StateDir     string
+	AgentDataDir string
+	Restic       string
+	ReleaseKey   string
+	LogLevel     string
+	LogFormat    string
 }
 
 // Proxy configures `basalt proxy`.
@@ -288,6 +292,10 @@ func ParseAgentHelper(args []string, output io.Writer) (AgentHelper, error) {
 	fs.StringVar(&cfg.SitesRoot, "sites-root", env("SITES_ROOT", "/srv/basalt/sites"), "directory that contains all site files")
 	fs.StringVar(&cfg.WWWGroup, "www-group", "basalt-www", "group shared by the site folders and the proxy")
 	fs.StringVar(&cfg.ProxyUser, "proxy-user", env("PROXY_USER", ""), "system user `basalt proxy` runs as (added to the web group)")
+	fs.StringVar(&cfg.StateDir, "state-dir", "/var/lib/basalt/helper", "directory of the helper's own data (restic's cache, SSH keys of backup storages)")
+	fs.StringVar(&cfg.AgentDataDir, "agent-data-dir", "/var/lib/basalt/agent", "the agent's data directory (no local backup repository may be in it)")
+	fs.StringVar(&cfg.Restic, "restic", env("RESTIC", "restic"), "restic binary used for backups")
+	fs.StringVar(&cfg.ReleaseKey, "release-key", env("RELEASE_KEY", ""), "public key (authorized_keys line) updates must be signed with (default: the Basalt release key)")
 	fs.StringVar(&cfg.LogLevel, "log-level", env("LOG_LEVEL", "info"), "log level: debug, info, warn, error")
 	fs.StringVar(&cfg.LogFormat, "log-format", env("LOG_FORMAT", "text"), "log format: text or json")
 	if err := fs.Parse(args); err != nil {
@@ -296,8 +304,8 @@ func ParseAgentHelper(args []string, output io.Writer) (AgentHelper, error) {
 	if fs.NArg() > 0 {
 		return cfg, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
 	}
-	if !filepath.IsAbs(cfg.Socket) || !filepath.IsAbs(cfg.SitesRoot) {
-		return cfg, errors.New("socket and sites-root must be absolute paths")
+	if !filepath.IsAbs(cfg.Socket) || !filepath.IsAbs(cfg.SitesRoot) || !filepath.IsAbs(cfg.StateDir) || !filepath.IsAbs(cfg.AgentDataDir) {
+		return cfg, errors.New("socket, sites-root, state-dir and agent-data-dir must be absolute paths")
 	}
 	if cfg.AgentUID < 0 {
 		return cfg, errors.New("agent-uid must not be negative")

@@ -12,9 +12,10 @@ import (
 	"github.com/wiefix/basalt/internal/agentproto"
 )
 
-// maxConns bounds the helper's connections: the agent needs one, a few
-// for a moment while it reconnects.
-const maxConns = 8
+// maxConns bounds the helper's connections: the agent keeps one, and opens
+// one for each restic command (two backups, browsing and downloads of
+// backups, integrity checks) and each update.
+const maxConns = 32
 
 // Serve answers requests on a unix socket at path until ctx ends. Only
 // processes running as uid get answers: the kernel tells who is connected
@@ -82,8 +83,14 @@ func Serve(ctx context.Context, path string, uid int, h agentproto.Handler, log 
 		go func() {
 			defer func() { <-slots }()
 			defer c.Close()
-			p := agentproto.NewPeer(c, c, nil, h)
-			if err := p.Run(ctx); err != nil && !errors.Is(err, agentproto.ErrClosed) && ctx.Err() == nil {
+			r, files, err := receiveFiles(c)
+			if err != nil {
+				log.Debug("agent connection ended", "err", err)
+				return
+			}
+			defer closeFiles(files)
+			p := agentproto.NewPeer(r, c, nil, h)
+			if err := p.Run(context.WithValue(ctx, filesKey{}, files)); err != nil && !errors.Is(err, agentproto.ErrClosed) && ctx.Err() == nil {
 				log.Debug("agent connection ended", "err", err)
 			}
 		}()

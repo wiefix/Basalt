@@ -17,7 +17,6 @@ import (
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/docker"
 	"github.com/wiefix/basalt/internal/files"
-	"github.com/wiefix/basalt/internal/restic"
 )
 
 // Files of a snapshot of an app's volume. The snapshot holds one file, the
@@ -96,7 +95,7 @@ var errStop = errors.New("stop")
 
 // readVolume feeds the tar stream of a volume snapshot to fn; fn returns
 // errStop when it needs no more of it.
-func readVolume(ctx context.Context, r *restic.Runner, repo restic.Repo, snapshot, file string, fn func(*tar.Reader) error) error {
+func readVolume(ctx context.Context, r resticRun, repo agentproto.BackupRepo, snapshot, file string, fn func(*tar.Reader) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	pr, pw := io.Pipe()
@@ -125,7 +124,7 @@ func readVolume(ctx context.Context, r *restic.Runner, repo restic.Repo, snapsho
 
 // volumeSnapshot checks the request and returns the snapshot's ID, the
 // volume's name and the path in it ("" for the top).
-func (b *backupManager) volumeSnapshot(ctx context.Context, r *restic.Runner, repo restic.Repo, req agentproto.SnapshotFilesRequest) (id, volume, rel string, err error) {
+func (b *backupManager) volumeSnapshot(ctx context.Context, r resticRun, repo agentproto.BackupRepo, req agentproto.SnapshotFilesRequest) (id, volume, rel string, err error) {
 	snap, err := b.checkSnapshot(ctx, r, repo, req)
 	if err != nil {
 		return "", "", "", err
@@ -141,7 +140,7 @@ func (b *backupManager) volumeSnapshot(ctx context.Context, r *restic.Runner, re
 }
 
 // volumeIndex lists a volume snapshot, reading it once.
-func (b *backupManager) volumeIndex(ctx context.Context, r *restic.Runner, repo restic.Repo, snapshot, file string) (*volumeIndex, error) {
+func (b *backupManager) volumeIndex(ctx context.Context, r resticRun, repo agentproto.BackupRepo, snapshot, file string) (*volumeIndex, error) {
 	key := snapshot + "/" + file
 	if idx := b.indexes.get(key); idx != nil {
 		return idx, nil
@@ -195,7 +194,7 @@ func (b *backupManager) volumeIndex(ctx context.Context, r *restic.Runner, repo 
 	return idx, nil
 }
 
-func (b *backupManager) browseVolume(ctx context.Context, r *restic.Runner, repo restic.Repo, req agentproto.SnapshotFilesRequest) (agentproto.BrowseResponse, error) {
+func (b *backupManager) browseVolume(ctx context.Context, r resticRun, repo agentproto.BackupRepo, req agentproto.SnapshotFilesRequest) (agentproto.BrowseResponse, error) {
 	id, vol, rel, err := b.volumeSnapshot(ctx, r, repo, req)
 	if err != nil {
 		return agentproto.BrowseResponse{}, err
@@ -216,7 +215,7 @@ func (b *backupManager) browseVolume(ctx context.Context, r *restic.Runner, repo
 
 // exportVolume writes a file of a volume snapshot, or a folder of it as a
 // zip archive, for the panel to read.
-func (b *backupManager) exportVolume(ctx context.Context, r *restic.Runner, repo restic.Repo, req agentproto.SnapshotFilesRequest) (agentproto.ExportResponse, error) {
+func (b *backupManager) exportVolume(ctx context.Context, r resticRun, repo agentproto.BackupRepo, req agentproto.SnapshotFilesRequest) (agentproto.ExportResponse, error) {
 	id, vol, rel, err := b.volumeSnapshot(ctx, r, repo, req)
 	if err != nil {
 		return agentproto.ExportResponse{}, err
@@ -319,7 +318,7 @@ func zipEntry(zw *zip.Writer, h *tar.Header, name string, r io.Reader) error {
 // permissions are kept (without setuid, setgid and sticky bits); symbolic
 // links, hard links and special files are left out. It is written by the
 // volume helper container, under the daemon's user namespaces like the app.
-func (b *backupManager) restoreVolumeCopy(ctx context.Context, r *restic.Runner, repo restic.Repo, req agentproto.SnapshotFilesRequest) (agentproto.RestoreCopyResponse, error) {
+func (b *backupManager) restoreVolumeCopy(ctx context.Context, r resticRun, repo agentproto.BackupRepo, req agentproto.SnapshotFilesRequest) (agentproto.RestoreCopyResponse, error) {
 	id, vol, rel, err := b.volumeSnapshot(ctx, r, repo, req)
 	if err != nil {
 		return agentproto.RestoreCopyResponse{}, err
@@ -371,7 +370,7 @@ func (b *backupManager) restoreVolumeCopy(ctx context.Context, r *restic.Runner,
 
 // copyIntoVolume streams what rel names in a volume snapshot, as a new tar
 // archive with names under its base name, to the extracting command.
-func (b *backupManager) copyIntoVolume(ctx context.Context, r *restic.Runner, repo restic.Repo, id, vol, rel string, extract []string) (agentproto.RestoreCopyResponse, error) {
+func (b *backupManager) copyIntoVolume(ctx context.Context, r resticRun, repo agentproto.BackupRepo, id, vol, rel string, extract []string) (agentproto.RestoreCopyResponse, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	pr, pw := io.Pipe()

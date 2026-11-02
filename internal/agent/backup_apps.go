@@ -11,7 +11,6 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/docker"
-	"github.com/wiefix/basalt/internal/restic"
 )
 
 // volumeHelperImage reads and writes volumes for backups: a throwaway
@@ -128,7 +127,7 @@ func (b *backupManager) appBackupOptions(ctx context.Context, it agentproto.Back
 }
 
 // restoreAppItem puts one part of an app back.
-func (b *backupManager) restoreAppItem(ctx context.Context, r *restic.Runner, repo restic.Repo, it agentproto.RestoreItem, lg *deployLog) error {
+func (b *backupManager) restoreAppItem(ctx context.Context, r resticRun, repo agentproto.BackupRepo, it agentproto.RestoreItem, lg *deployLog) error {
 	bin, err := b.dockerCLI()
 	if err != nil {
 		return err
@@ -222,7 +221,7 @@ func (b *backupManager) stopUsers(ctx context.Context, appID int64, vol string, 
 }
 
 // pipeSnapshot feeds a file of a snapshot to cmd's standard input.
-func pipeSnapshot(ctx context.Context, r *restic.Runner, repo restic.Repo, snapshot, file string, cmd *exec.Cmd) error {
+func pipeSnapshot(ctx context.Context, r resticRun, repo agentproto.BackupRepo, snapshot, file string, cmd *exec.Cmd) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	pr, pw := io.Pipe()

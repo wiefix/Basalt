@@ -330,7 +330,7 @@ func checkExec(pkgs map[string]*pkg) []violation {
 
 // privilegedPrograms change the host as only root may; they are run by
 // the privileged helper alone (the agent asks it), so its requests are the
-// whole list of what needs root. Moving more there (21.4) adds to it.
+// whole list of what needs root. Moving more there adds to it.
 var privilegedPrograms = []string{"useradd", "userdel", "usermod", "groupadd", "groupdel", "groupmod"}
 
 // privilegedPkg is the privileged helper.
@@ -338,12 +338,16 @@ const privilegedPkg = "internal/privhelper"
 
 // systemPrograms run the host's services and read their logs: only the
 // helper and the PHP code it runs (the agent uses package php to read the
-// installed versions) name them, and the agent's update until 21.4 moves
-// it into the helper. An entry ending in .go is one file of a package.
+// installed versions) name them. An entry ending in .go is one file of a
+// package.
 var systemPrograms = map[string][]string{
-	"systemctl":  {privilegedPkg, "internal/php", "internal/agent/update.go"},
+	"systemctl":  {privilegedPkg, "internal/php"},
 	"journalctl": {privilegedPkg, "internal/php"},
 }
+
+// resticRunners may make a restic.Runner: the helper (it reads and
+// restores the sites' files for the agent) and the panel (its own backup).
+var resticRunners = []string{privilegedPkg, "internal/server"}
 
 // checkPrivileged finds the names of privileged and system programs (as
 // string literals: how a program is named to os/exec) outside where they
@@ -354,6 +358,14 @@ func checkPrivileged(pkgs map[string]*pkg) []violation {
 		for _, f := range p.files {
 			file := p.path + "/" + filepath.Base(p.fset.Position(f.Pos()).Filename)
 			ast.Inspect(f, func(n ast.Node) bool {
+				if c, ok := n.(*ast.CompositeLit); ok {
+					if sel, ok := c.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "Runner" && !slices.Contains(resticRunners, p.path) {
+						if x, ok := sel.X.(*ast.Ident); ok && x.Name == "restic" {
+							out = append(out, violation{p.fset.Position(c.Pos()), fmt.Sprintf("%s runs restic: only %s do", p.path, strings.Join(resticRunners, ", "))})
+						}
+					}
+					return true
+				}
 				l, ok := n.(*ast.BasicLit)
 				if !ok || l.Kind != token.STRING {
 					return true
@@ -584,6 +596,7 @@ func g() {
 	_ = "/usr/sbin/userdel"
 	_ = "useradd is fine in a sentence"
 	exec.Command("systemctl", "restart", "mariadb")
+	_ = &restic.Runner{Binary: "restic"}
 }
 `,
 		"internal/php": `package php
@@ -592,6 +605,7 @@ var _ = []string{"systemctl", "journalctl"}
 		"internal/privhelper": `package privhelper
 import "os/exec"
 var _ = exec.Command("groupadd", "x")
+var _ = restic.Runner{}
 `,
 	}
 	fset := token.NewFileSet()
@@ -616,7 +630,7 @@ var _ = exec.Command("groupadd", "x")
 	if got := lines(checkHTTPTimeouts(pkgs)); got != "8,12,13" {
 		t.Errorf("timeout findings on lines %s, want 8,12,13", got)
 	}
-	if got := lines(checkPrivileged(pkgs)); got != "5,6,8" {
-		t.Errorf("privileged program findings on lines %s, want 5,6,8", got)
+	if got := lines(checkPrivileged(pkgs)); got != "5,6,8,9" {
+		t.Errorf("privileged program findings on lines %s, want 5,6,8,9", got)
 	}
 }

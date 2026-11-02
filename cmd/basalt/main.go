@@ -470,7 +470,8 @@ func runAgentHelper(ctx context.Context, args []string, stderr io.Writer) error 
 	if os.Geteuid() != 0 {
 		return errors.New("the privileged helper runs as root")
 	}
-	h, err := privhelper.New(privhelper.Config{SitesRoot: cfg.SitesRoot, WWWGroup: cfg.WWWGroup, ProxyUser: cfg.ProxyUser}, log)
+	h, err := privhelper.New(privhelper.Config{SitesRoot: cfg.SitesRoot, WWWGroup: cfg.WWWGroup, ProxyUser: cfg.ProxyUser,
+		StateDir: cfg.StateDir, AgentDataDir: cfg.AgentDataDir, Restic: cfg.Restic, ReleaseKey: cfg.ReleaseKey}, log)
 	if err != nil {
 		return err
 	}
@@ -508,7 +509,7 @@ func runAgentEnroll(ctx context.Context, args []string, stderr io.Writer) error 
 	}
 	fmt.Fprintf(stderr, "enrolled as server %d; credentials saved in %s\n", id, cfg.DataDir)
 	// Installed by install.sh, whose service starts the agent next.
-	if !agent.InstalledAsService() {
+	if !privhelper.InstalledAsService() {
 		fmt.Fprintf(stderr, "start the agent with: basalt agent --data-dir %s\n", cfg.DataDir)
 	}
 	return nil

@@ -105,6 +105,12 @@ type privileged interface {
 
 	WriteMariaDBConfig(ctx context.Context, c privhelper.MariaDBConfig) error
 	RestartMariaDB(ctx context.Context) error
+
+	Restic(ctx context.Context, req privhelper.ResticRequest, stdio privhelper.Stdio, line func(string)) (privhelper.ResticResult, error)
+
+	Updatable(ctx context.Context) (bool, error)
+	StageUpdate(ctx context.Context, req agentproto.UpdatePrepare, bin *os.File) error
+	ActivateUpdate(ctx context.Context, req agentproto.UpdateActivate) error
 }
 
 func newPrivileged(cfg Config, log *slog.Logger) (privileged, error) {
@@ -114,6 +120,8 @@ func newPrivileged(cfg Config, log *slog.Logger) (privileged, error) {
 	return privhelper.New(privhelper.Config{
 		SitesRoot: cfg.SitesRoot, WWWGroup: cfg.WWWGroup, ProxyUser: cfg.ProxyUser,
 		PHPRunDir: cfg.PHPRunDir, SiteDBDir: cfg.SiteDBDir, MariaDBConf: cfg.MariaDBConf,
+		Restic: cfg.Restic, StateDir: cfg.DataDir, AgentDataDir: cfg.DataDir,
+		ReleaseKey: cfg.ReleaseKey, UpdateExe: cfg.UpdateExe, Restart: cfg.Restart,
 	}, log)
 }
 
@@ -377,6 +385,11 @@ func newHostPaths(cfg Config) hostPaths {
 		name  string
 	}
 	dirs := []dir{{cfg.SitesRoot, true, "<sites>"}, {cfg.DataDir, false, "<agent-data>"}, {cfg.ProxyDir, false, "<proxy-data>"}}
+	if cfg.HelperSocket != "" && cfg.DataDir != "" {
+		// The helper's own data (restic's cache, SSH keys of storages),
+		// next to the agent's as the installer sets them up.
+		dirs = append(dirs, dir{filepath.Join(filepath.Dir(cfg.DataDir), "helper"), false, "<helper-data>"})
+	}
 	// Nested directories first, so the longest prefix names the path.
 	slices.SortFunc(dirs, func(a, b dir) int { return len(b.path) - len(a.path) })
 	var h hostPaths

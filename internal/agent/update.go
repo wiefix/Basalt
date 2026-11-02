@@ -10,128 +10,74 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
-	"sync"
-	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/release"
 	"github.com/wiefix/basalt/internal/sshsig"
 )
 
-// The units the installer writes; an update restarts those that exist.
-var basaltUnits = []string{"basalt-server.service", "basalt-proxy.service", "basalt-agent-helper.service", "basalt-agent.service"}
-
-const unitDir = "/etc/systemd/system"
-
 // maxBinary bounds a downloaded binary.
 const maxBinary = 512 << 20
 
-// updater replaces the Basalt binary with a release's and restarts the
-// services. The new binary must match the checksums signed with the
-// release key built into this agent.
+// updater downloads a release's binary for the privileged helper, which
+// checks it against the signed checksums itself, puts it in place and
+// restarts the services.
 type updater struct {
-	log     *slog.Logger
-	key     string
-	exe     string // the binary to replace ("" when updates are not possible)
-	restart func(units []string) error
-
-	mu     sync.Mutex
-	staged string // version waiting in exe + ".new"
+	log  *slog.Logger
+	key  string
+	dir  string // where downloads wait for the helper
+	priv privileged
 }
 
-func newUpdater(cfg Config, log *slog.Logger) *updater {
-	u := &updater{log: log, key: cfg.ReleaseKey, exe: cfg.UpdateExe, restart: cfg.Restart}
+func newUpdater(cfg Config, priv privileged, log *slog.Logger) *updater {
+	u := &updater{log: log, key: cfg.ReleaseKey, dir: filepath.Join(cfg.DataDir, "update"), priv: priv}
 	if u.key == "" {
 		u.key = sshsig.ReleaseKey
-	}
-	if u.exe == "" && runtime.GOOS == "linux" && os.Geteuid() == 0 && systemdUnits() != nil {
-		if exe, err := os.Executable(); err == nil {
-			u.exe, _ = filepath.EvalSymlinks(exe)
-		}
-	}
-	if u.restart == nil {
-		u.restart = systemctlRestart
 	}
 	return u
 }
 
-// InstalledAsService tells whether the installer set this host up: its
-// basalt-agent service runs the agent.
-func InstalledAsService() bool { return systemdUnits() != nil }
-
-// systemdUnits lists the installed Basalt units; nil without systemd or
-// without the agent's unit (not installed by the installer).
-func systemdUnits() []string {
-	if _, err := os.Stat("/run/systemd/system"); err != nil {
-		return nil
-	}
-	if _, err := os.Stat(filepath.Join(unitDir, "basalt-agent.service")); err != nil {
-		return nil
-	}
-	var units []string
-	for _, u := range basaltUnits {
-		if _, err := os.Stat(filepath.Join(unitDir, u)); err == nil {
-			units = append(units, u)
-		}
-	}
-	return units
-}
-
-// systemctlRestart has systemd restart the units without waiting: this
-// process is one of them.
-func systemctlRestart(units []string) error {
-	args := append([]string{"--no-block", "restart"}, units...)
-	out, err := exec.Command("systemctl", args...).CombinedOutput()
+func (u *updater) updatable(ctx context.Context) bool {
+	ok, err := u.priv.Updatable(ctx)
 	if err != nil {
-		return fmt.Errorf("systemctl: %v: %s", err, strings.TrimSpace(string(out)))
+		u.log.Warn("ask whether updates are possible", "err", err)
 	}
-	return nil
+	return ok
 }
-
-func (u *updater) updatable() bool { return u.exe != "" }
 
 func (u *updater) prepare(ctx context.Context, hc *http.Client, panelURL string, req agentproto.UpdatePrepare) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
-	if !u.updatable() {
-		return errors.New("this server's Basalt was not installed by the installer: update it by running the installer again")
-	}
+	// Checked here too, before downloading anything: the helper repeats it.
 	sums, err := release.VerifySums(req.Sums, req.Sig, u.key)
 	if err != nil {
 		return err
-	}
-	if v, ok := sums[release.VersionFile]; !ok || v == "" {
-		return errors.New("the checksums do not cover the version file")
 	}
 	name := release.BinaryName(runtime.GOARCH)
 	want, ok := sums[name]
 	if !ok {
 		return fmt.Errorf("the release has no binary for %s", runtime.GOARCH)
 	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-
-	staged := u.exe + ".new"
-	if err := download(ctx, hc, panelURL+agentproto.PathRelease+req.Version+"/"+name, staged, want); err != nil {
-		os.Remove(staged)
+	if !u.updatable(ctx) {
+		return errors.New("this server's Basalt was not installed by the installer: update it by running the installer again")
+	}
+	if err := os.MkdirAll(u.dir, 0o700); err != nil {
 		return err
 	}
-	// The new binary must run here and be the version announced.
-	vctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(vctx, staged, "version").Output()
-	if err != nil || !strings.Contains(string(out), " "+req.Version+" ") {
-		os.Remove(staged)
-		return fmt.Errorf("the new binary does not run here or is not %s (%v)", req.Version, err)
+	path := filepath.Join(u.dir, name)
+	defer os.Remove(path)
+	if err := download(ctx, hc, panelURL+agentproto.PathRelease+req.Version+"/"+name, path, want); err != nil {
+		return err
 	}
-	u.staged = req.Version
-	u.log.Info("update staged", "version", req.Version)
-	return nil
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return u.priv.StageUpdate(ctx, req, f)
 }
 
 // download saves url to path, checking its SHA-256.
@@ -148,7 +94,7 @@ func download(ctx context.Context, hc *http.Client, url, path, wantHex string) e
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download the new version: %s", resp.Status)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o755)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
@@ -169,31 +115,11 @@ func download(ctx context.Context, hc *http.Client, url, path, wantHex string) e
 	return nil
 }
 
-// activate puts the staged binary in place, then restarts the services a
-// moment after the answer has gone out.
-func (u *updater) activate(req agentproto.UpdateActivate) error {
+// activate has the helper put the staged binary in place and restart the
+// services.
+func (u *updater) activate(ctx context.Context, req agentproto.UpdateActivate) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if u.staged != req.Version {
-		return fmt.Errorf("version %s is not prepared here", req.Version)
-	}
-	if err := os.Rename(u.exe+".new", u.exe); err != nil {
-		return err
-	}
-	u.staged = ""
-	units := systemdUnits()
-	if len(units) == 0 {
-		units = basaltUnits[1:] // tests: the restart hook gets the usual ones
-	}
-	u.log.Info("updated; restarting", "version", req.Version, "units", units)
-	go func() {
-		time.Sleep(time.Second)
-		if err := u.restart(units); err != nil {
-			u.log.Error("restart after update", "err", err)
-		}
-	}()
-	return nil
+	return u.priv.ActivateUpdate(ctx, req)
 }

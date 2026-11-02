@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,11 +22,13 @@ const backupHost = "basalt"
 
 const maxConcurrentBackups = 2
 
-// backupManager runs backups and restores with restic.
+// backupManager runs backups and restores with restic (in the privileged
+// helper).
 type backupManager struct {
 	log     *slog.Logger
 	binary  string
 	dataDir string
+	priv    privileged
 	sites   *sitesManager
 	mysql   string // MariaDB socket
 	apps    *appsManager
@@ -40,8 +40,8 @@ type backupManager struct {
 	indexes volumeIndexes // listings of volume snapshots, for browsing
 }
 
-func newBackupManager(cfg Config, sites *sitesManager, apps *appsManager, log *slog.Logger) *backupManager {
-	return &backupManager{log: log, binary: cfg.Restic, dataDir: cfg.DataDir, sites: sites, apps: apps, mysql: cfg.MySQLSocket,
+func newBackupManager(cfg Config, priv privileged, sites *sitesManager, apps *appsManager, log *slog.Logger) *backupManager {
+	return &backupManager{log: log, binary: cfg.Restic, dataDir: cfg.DataDir, priv: priv, sites: sites, apps: apps, mysql: cfg.MySQLSocket,
 		slots: make(chan struct{}, maxConcurrentBackups), locks: map[string]*sync.Mutex{}}
 }
 
@@ -86,64 +86,28 @@ func (b *backupManager) Version(ctx context.Context) string {
 	if b.binary == "" {
 		return ""
 	}
-	r := b.runner(nil)
-	v, err := r.Version(ctx)
+	v, err := b.runner(nil).Version(ctx)
 	if err != nil {
-		if _, lookErr := exec.LookPath(b.binary); lookErr == nil {
-			b.log.Warn("restic not usable", "err", err)
-		}
+		b.log.Warn("restic not usable", "err", err)
 		return ""
 	}
 	return v
 }
 
-func (b *backupManager) runner(line func(string)) *restic.Runner {
-	return &restic.Runner{Binary: b.binary, CacheDir: filepath.Join(b.dataDir, "restic-cache"), Line: line}
+func (b *backupManager) runner(line func(string)) resticRun {
+	return resticRun{priv: b.priv, line: line}
 }
 
-// repo turns the panel's description into what restic opens.
-func (b *backupManager) repo(spec agentproto.BackupRepo) (restic.Repo, error) {
+// repo checks the panel's description of a repository; the helper turns
+// it into what restic opens (and checks where a local one may be).
+func (b *backupManager) repo(spec agentproto.BackupRepo) (agentproto.BackupRepo, error) {
 	if err := spec.Validate(); err != nil {
-		return restic.Repo{}, err
+		return spec, err
 	}
 	if b.binary == "" {
-		return restic.Repo{}, errors.New("backups are disabled on this server (no restic)")
+		return spec, errors.New("backups are disabled on this server (no restic)")
 	}
-	if err := os.MkdirAll(filepath.Join(b.dataDir, "restic-cache"), 0o700); err != nil {
-		return restic.Repo{}, err
-	}
-	if spec.Kind == agentproto.StorageLocal {
-		if err := b.localPathAllowed(spec.Path); err != nil {
-			return restic.Repo{}, err
-		}
-		if err := os.MkdirAll(spec.Path, 0o700); err != nil {
-			return restic.Repo{}, fmt.Errorf("create the backup directory: %w", err)
-		}
-	}
-	return restic.FromSpec(spec, filepath.Join(b.dataDir, "backup-ssh"))
-}
-
-// localPathAllowed keeps local repositories out of places other users
-// reach (site directories) or Basalt manages.
-func (b *backupManager) localPathAllowed(p string) error {
-	for _, forbidden := range []string{b.sites.root, b.dataDir} {
-		if forbidden == "" {
-			continue
-		}
-		abs, err := filepath.Abs(forbidden)
-		if err != nil {
-			continue
-		}
-		if p == abs || strings.HasPrefix(p+"/", abs+"/") || strings.HasPrefix(abs+"/", p+"/") {
-			return errors.New("the backup directory must not contain or be inside the sites or the agent's data directory")
-		}
-	}
-	for _, sys := range []string{"/proc", "/sys", "/dev", "/run", "/etc", "/bin", "/sbin", "/usr", "/lib", "/boot"} {
-		if p == sys || strings.HasPrefix(p, sys+"/") {
-			return fmt.Errorf("the backup directory cannot be under %s", sys)
-		}
-	}
-	return nil
+	return spec, nil
 }
 
 // Check opens the repository, creating it if needed.
@@ -202,33 +166,26 @@ func (b *backupManager) Run(ctx context.Context, req agentproto.BackupRequest, s
 		lg.printf("Created a new repository")
 	}
 	for _, it := range req.Items {
-		o := restic.BackupOptions{Host: backupHost, Tags: itemTags(req.Resource, it)}
+		tags := itemTags(req.Resource, it)
+		var s restic.Summary
 		switch it.Kind {
 		case agentproto.ItemSiteFiles:
-			dir, err := b.sites.dir(it.SiteID)
-			if err != nil {
-				return fail(err)
-			}
 			lg.printf("Backing up the site's files")
-			o.Paths = []string{dir}
-			// Temporary files and the file manager's unfinished uploads.
-			// tmp/ itself stays, so a restore keeps the directory PHP uses.
-			o.Excludes = []string{filepath.Join(dir, "tmp", "*"), filepath.Join(dir, "**", ".basalt-upload-*")}
+			s, err = r.BackupSite(ctx, repo, tags, it.SiteID)
 		case agentproto.ItemMariaDB:
-			cmd, err := b.dumpCommand(it.Database)
-			if err != nil {
-				return fail(err)
+			argv, derr := b.dumpCommand(it.Database)
+			if derr != nil {
+				return fail(derr)
 			}
 			lg.printf("Dumping database %s", it.Database)
-			o.StdinCommand, o.StdinFilename = cmd, dumpFile(it.Database)
+			s, err = r.BackupCommand(ctx, repo, tags, dumpFile(it.Database), command(ctx, argv))
 		default:
-			cmd, file, err := b.appBackupOptions(ctx, it, &lg)
-			if err != nil {
-				return fail(err)
+			argv, file, aerr := b.appBackupOptions(ctx, it, &lg)
+			if aerr != nil {
+				return fail(aerr)
 			}
-			o.StdinCommand, o.StdinFilename = cmd, file
+			s, err = r.BackupCommand(ctx, repo, tags, file, command(ctx, argv))
 		}
-		s, err := r.Backup(ctx, repo, o)
 		if err != nil {
 			return fail(err)
 		}
@@ -239,7 +196,7 @@ func (b *backupManager) Run(ctx context.Context, req agentproto.BackupRequest, s
 		snaps = append(snaps, agentproto.BackupSnapshot{Item: it, ID: s.SnapshotID, Bytes: s.BytesProcessed, DataAdded: s.DataAdded})
 	}
 	lg.printf("Removing snapshots the retention policy does not keep")
-	if err := r.Forget(ctx, repo, backupHost, []string{"res=" + req.Resource}, restic.Keep(req.Keep)); err != nil {
+	if err := r.Forget(ctx, repo, []string{"res=" + req.Resource}, restic.Keep(req.Keep)); err != nil {
 		return fail(err)
 	}
 	if req.Prune {
@@ -320,7 +277,7 @@ func (b *backupManager) Snapshots(ctx context.Context, req agentproto.SnapshotsR
 	if err != nil {
 		return agentproto.SnapshotsResponse{}, err
 	}
-	list, err := b.runner(nil).Snapshots(ctx, repo, backupHost, []string{"res=" + req.Resource})
+	list, err := b.runner(nil).Snapshots(ctx, repo, []string{"res=" + req.Resource})
 	if errors.Is(err, restic.ErrNoRepository) {
 		return agentproto.SnapshotsResponse{Snapshots: []agentproto.SnapshotInfo{}}, nil
 	}
@@ -375,12 +332,8 @@ func (b *backupManager) Restore(ctx context.Context, req agentproto.RestoreReque
 	for _, it := range req.Items {
 		switch it.Item.Kind {
 		case agentproto.ItemSiteFiles:
-			dir, err := b.sites.dir(it.Item.SiteID)
-			if err != nil {
-				return fail(err)
-			}
 			lg.printf("Restoring the site's files from snapshot %s", it.Snapshot[:8])
-			if err := r.RestoreTree(ctx, repo, it.Snapshot, dir, dir); err != nil {
+			if err := r.RestoreSite(ctx, repo, it.Snapshot, it.Item.SiteID); err != nil {
 				return fail(err)
 			}
 		case agentproto.ItemMariaDB:
@@ -399,7 +352,7 @@ func (b *backupManager) Restore(ctx context.Context, req agentproto.RestoreReque
 }
 
 // restoreDatabase feeds a dump from the repository to the MariaDB client.
-func (b *backupManager) restoreDatabase(ctx context.Context, r *restic.Runner, repo restic.Repo, it agentproto.RestoreItem) error {
+func (b *backupManager) restoreDatabase(ctx context.Context, r resticRun, repo agentproto.BackupRepo, it agentproto.RestoreItem) error {
 	if b.mysql == "" || !mariadb.Available(b.mysql) {
 		return errors.New("MariaDB is not available on this server")
 	}
