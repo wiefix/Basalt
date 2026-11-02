@@ -34,7 +34,7 @@ func pinnedServer(t *testing.T, name string, body []byte, sum string) pinnedFile
 func testSiteAgent(t *testing.T, siteID int64) (*Agent, string) {
 	root := t.TempDir()
 	cfg := Config{DataDir: t.TempDir(), SitesRoot: root}
-	a := &Agent{dir: cfg.DataDir, sites: newSitesManager(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))}
+	a := &Agent{dir: cfg.DataDir, sites: testSites(t, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))}
 	if err := a.sites.Ensure(context.Background(), siteID, "", php.Settings{}, ""); err != nil {
 		t.Fatal(err)
 	}

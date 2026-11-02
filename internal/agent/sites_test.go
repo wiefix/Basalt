@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,4 +86,15 @@ func TestOwnDirSymlink(t *testing.T) {
 			t.Errorf("%s: mode %v, %v; want %v", dir, fi.Mode().Perm(), err, want)
 		}
 	}
+}
+
+// testSites is a sites manager whose privileged work is done in-process,
+// as on a host without a helper.
+func testSites(t *testing.T, cfg Config, log *slog.Logger) *sitesManager {
+	t.Helper()
+	priv, err := newPrivileged(cfg, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newSitesManager(cfg, priv, log)
 }

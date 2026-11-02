@@ -54,8 +54,11 @@ type sitesManager struct {
 
 	isolate  bool
 	wwwGroup string
-	php      *php.Host
-	// priv creates and removes the site users (with isolation).
+	// php is read here (versions, sockets); the privileged helper changes
+	// the sites' PHP.
+	php *php.Host
+	// priv creates and removes the site users (with isolation) and puts the
+	// sites' PHP in place.
 	priv privileged
 
 	identityMu   sync.Mutex
@@ -68,11 +71,12 @@ type sitesManager struct {
 	workers map[int64]*siteWorker
 }
 
-func newSitesManager(cfg Config, log *slog.Logger) *sitesManager {
+func newSitesManager(cfg Config, priv privileged, log *slog.Logger) *sitesManager {
 	return &sitesManager{
 		log: log, root: cfg.SitesRoot,
 		isolate: cfg.Isolate, wwwGroup: cfg.WWWGroup,
 		php:       php.DefaultHost(cfg.PHPRunDir),
+		priv:      priv,
 		workerExe: cfg.WorkerExe,
 		workers:   map[int64]*siteWorker{},
 	}
@@ -92,13 +96,25 @@ type privileged interface {
 	HostIdentity(ctx context.Context) error
 	EnsureSiteUser(ctx context.Context, id int64) (uid, gid int, err error)
 	DeleteSiteUser(ctx context.Context, id int64) error
+
+	ApplySitePHP(ctx context.Context, s privhelper.SitePHP) error
+	RemoveSitePHP(ctx context.Context, id int64) error
+	ApplyLaravel(ctx context.Context, s privhelper.SitePHP, l php.Laravel) error
+	LaravelProcesses(ctx context.Context, req agentproto.SiteLaravel) (agentproto.SiteLaravelResponse, error)
+	RestartUpdatedPHP(ctx context.Context) ([]int64, error)
+
+	WriteMariaDBConfig(ctx context.Context, c privhelper.MariaDBConfig) error
+	RestartMariaDB(ctx context.Context) error
 }
 
 func newPrivileged(cfg Config, log *slog.Logger) (privileged, error) {
 	if cfg.HelperSocket != "" {
 		return privhelper.NewClient(cfg.HelperSocket), nil
 	}
-	return privhelper.New(privhelper.Config{SitesRoot: cfg.SitesRoot, WWWGroup: cfg.WWWGroup, ProxyUser: cfg.ProxyUser}, log)
+	return privhelper.New(privhelper.Config{
+		SitesRoot: cfg.SitesRoot, WWWGroup: cfg.WWWGroup, ProxyUser: cfg.ProxyUser,
+		PHPRunDir: cfg.PHPRunDir, SiteDBDir: cfg.SiteDBDir, MariaDBConf: cfg.MariaDBConf,
+	}, log)
 }
 
 // PublicDir is where the proxy serves a site from.
@@ -212,15 +228,24 @@ func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string, 
 	}
 
 	if phpVersion == "" {
-		return m.php.Remove(id)
+		return m.priv.RemoveSitePHP(ctx, id)
 	}
 	if !m.isolate {
 		return errors.New("PHP sites need per-site user isolation (agent running as root on Linux)")
 	}
-	return m.php.Apply(ctx, php.Pool{
-		SiteID: id, Version: phpVersion, User: sysuser.SiteUser(id),
-		SocketGroup: m.wwwGroup, SiteDir: d, Settings: settings, DBSocket: dbSocket,
-	})
+	// The pools' sockets go to the agent's runtime folder, which the
+	// helper cannot write to.
+	if err := os.MkdirAll(m.php.RunDir, 0o755); err != nil {
+		return err
+	}
+	return m.priv.ApplySitePHP(ctx, sitePHP(id, phpVersion, settings, dbSocket))
+}
+
+// sitePHP is the site's PHP as the helper is told it: a dbSocket (the
+// agent's socket for the site's database) is one the helper knows the
+// path of.
+func sitePHP(id int64, version string, settings php.Settings, dbSocket string) privhelper.SitePHP {
+	return privhelper.SitePHP{SiteID: id, Version: version, Settings: settings, DBSocket: dbSocket != ""}
 }
 
 // Laravel makes the site's Laravel processes (scheduler, queue workers)
@@ -232,34 +257,18 @@ func (m *sitesManager) Laravel(ctx context.Context, id int64, phpVersion string,
 		}
 		return nil
 	}
-	d, err := m.dir(id)
-	if err != nil {
-		return err
+	if id <= 0 {
+		return fmt.Errorf("invalid site id %d", id)
 	}
-	return m.php.ApplyLaravel(ctx, php.Pool{
-		SiteID: id, Version: phpVersion, User: sysuser.SiteUser(id),
-		SocketGroup: m.wwwGroup, SiteDir: d, Settings: settings, DBSocket: dbSocket,
-	}, l)
+	return m.priv.ApplyLaravel(ctx, sitePHP(id, phpVersion, settings, dbSocket), l)
 }
 
 // LaravelProcesses reports on, or restarts, the site's Laravel processes.
 func (m *sitesManager) LaravelProcesses(ctx context.Context, req agentproto.SiteLaravel) (agentproto.SiteLaravelResponse, error) {
-	var resp agentproto.SiteLaravelResponse
 	if req.SiteID <= 0 {
-		return resp, errors.New("bad site id")
+		return agentproto.SiteLaravelResponse{}, errors.New("bad site id")
 	}
-	var err error
-	switch req.Op {
-	case agentproto.LaravelStatus:
-		resp.Processes, err = m.php.LaravelStatus(ctx, req.SiteID)
-	case agentproto.LaravelLog:
-		resp.Lines, err = m.php.LaravelLog(ctx, req.SiteID, req.Lines)
-	case agentproto.LaravelRestart:
-		err = m.php.LaravelRestart(req.SiteID)
-	default:
-		err = fmt.Errorf("unknown operation %q", req.Op)
-	}
-	return resp, err
+	return m.priv.LaravelProcesses(ctx, req)
 }
 
 // Delete removes the site's PHP pool and system user and moves its files to
@@ -271,7 +280,7 @@ func (m *sitesManager) Delete(ctx context.Context, id int64) error {
 		return err
 	}
 	m.stopWorker(id)
-	if err := m.php.Remove(id); err != nil {
+	if err := m.priv.RemoveSitePHP(ctx, id); err != nil {
 		m.log.Warn("remove PHP pool", "site_id", id, "err", err)
 	}
 	if _, err := os.Lstat(d); err == nil {
@@ -450,9 +459,9 @@ func (m *sitesManager) janitor(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		if m.php != nil {
+		if m.priv != nil {
 			// After an update of PHP, sites must not keep running the old code.
-			ids, err := m.php.RestartUpdated()
+			ids, err := m.priv.RestartUpdatedPHP(ctx)
 			if len(ids) > 0 {
 				m.log.Info("restarted the PHP of sites to run the updated PHP", "sites", ids)
 			}

@@ -59,7 +59,7 @@ func TestSiteInstallWordPress(t *testing.T) {
 
 	root := t.TempDir()
 	cfg := Config{DataDir: t.TempDir(), SitesRoot: root, WordPressURL: srv.URL + "/wp.tar.gz"}
-	a := &Agent{dir: cfg.DataDir, sites: newSitesManager(cfg, slog.New(slog.NewTextHandler(io.Discard, nil))), wordpressURL: cfg.WordPressURL}
+	a := &Agent{dir: cfg.DataDir, sites: testSites(t, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))), wordpressURL: cfg.WordPressURL}
 	a.wpCLI = pinnedServer(t, "wp-cli-test.phar", []byte("<?php // wp-cli"), "")
 	ctx := context.Background()
 	if err := a.sites.Ensure(ctx, 5, "", php.Settings{}, ""); err != nil {

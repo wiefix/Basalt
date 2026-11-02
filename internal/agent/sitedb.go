@@ -9,10 +9,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"strconv"
 	"sync"
 
 	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/privhelper"
 	"github.com/wiefix/basalt/internal/sysuser"
 )
 
@@ -49,7 +49,7 @@ func newSiteDBs(cfg Config, tunnel *tunnelManager, log *slog.Logger) *siteDBs {
 
 // Socket is the path of a site's database socket.
 func (m *siteDBs) Socket(id int64) string {
-	return filepath.Join(m.dir, "site-"+strconv.FormatInt(id, 10)+".sock")
+	return privhelper.SiteDBSocket(m.dir, id)
 }
 
 // start opens the sockets of the routes kept on disk.

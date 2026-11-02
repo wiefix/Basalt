@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/php"
 )
 
 // dialWait is how long a call waits for the helper to listen (it starts
@@ -34,14 +35,46 @@ func (c *Client) HostIdentity(ctx context.Context) error {
 
 func (c *Client) EnsureSiteUser(ctx context.Context, id int64) (uid, gid int, err error) {
 	var u SiteUser
-	if err := c.call(ctx, MsgSiteUserEnsure, SiteUserRequest{SiteID: id}, &u); err != nil {
+	if err := c.call(ctx, MsgSiteUserEnsure, SiteRequest{SiteID: id}, &u); err != nil {
 		return -1, -1, err
 	}
 	return u.UID, u.GID, nil
 }
 
 func (c *Client) DeleteSiteUser(ctx context.Context, id int64) error {
-	return c.call(ctx, MsgSiteUserDelete, SiteUserRequest{SiteID: id}, nil)
+	return c.call(ctx, MsgSiteUserDelete, SiteRequest{SiteID: id}, nil)
+}
+
+func (c *Client) ApplySitePHP(ctx context.Context, s SitePHP) error {
+	return c.call(ctx, MsgSitePHPApply, s, nil)
+}
+
+func (c *Client) RemoveSitePHP(ctx context.Context, id int64) error {
+	return c.call(ctx, MsgSitePHPRemove, SiteRequest{SiteID: id}, nil)
+}
+
+func (c *Client) ApplyLaravel(ctx context.Context, s SitePHP, l php.Laravel) error {
+	return c.call(ctx, MsgSiteLaravelApply, SiteLaravel{SitePHP: s, Laravel: l}, nil)
+}
+
+func (c *Client) LaravelProcesses(ctx context.Context, req agentproto.SiteLaravel) (agentproto.SiteLaravelResponse, error) {
+	var resp agentproto.SiteLaravelResponse
+	err := c.call(ctx, MsgSiteLaravel, req, &resp)
+	return resp, err
+}
+
+func (c *Client) RestartUpdatedPHP(ctx context.Context) ([]int64, error) {
+	var resp RestartedSites
+	err := c.call(ctx, MsgPHPRestartUpdated, struct{}{}, &resp)
+	return resp.SiteIDs, err
+}
+
+func (c *Client) WriteMariaDBConfig(ctx context.Context, cfg MariaDBConfig) error {
+	return c.call(ctx, MsgMariaDBConfig, cfg, nil)
+}
+
+func (c *Client) RestartMariaDB(ctx context.Context) error {
+	return c.call(ctx, MsgMariaDBRestart, struct{}{}, nil)
 }
 
 // Close drops the connection.

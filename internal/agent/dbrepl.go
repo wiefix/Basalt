@@ -19,14 +19,13 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/mariadb"
+	"github.com/wiefix/basalt/internal/privhelper"
 )
 
 // Replication of site databases (see agentproto.DBReplApply): this server
 // as a source keeps a binary log and lets the replication user in; as a
 // replica it copies what the panel lists, seeding each new database from a
 // dump taken through the tunnel and aligned with the replication stream.
-
-const defaultMariaDBConf = "/etc/mysql/mariadb.conf.d/90-basalt.cnf"
 
 type dbRepl struct {
 	mu sync.Mutex // one change at a time
@@ -57,11 +56,7 @@ func (a *Agent) writeMariaDBConf(ctx context.Context, db *mariadb.Server) error 
 		}
 		filters[c.Name] = f
 	}
-	path := a.mariadbConf
-	if _, err := os.Stat(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("MariaDB's configuration folder %s is missing", filepath.Dir(path))
-	}
-	return writeAtomic(path, mariadb.Config(a.ServerID(), filters), 0o644)
+	return a.sites.priv.WriteMariaDBConfig(ctx, privhelper.MariaDBConfig{ServerID: a.ServerID(), Filters: filters})
 }
 
 func (a *Agent) dbReplSetup(ctx context.Context, req agentproto.DBReplSetup) (agentproto.DBReplSetupResponse, error) {
@@ -111,14 +106,7 @@ func (a *Agent) restartMariaDB(ctx context.Context) error {
 	if a.restartDB != nil {
 		return a.restartDB()
 	}
-	if _, err := os.Stat("/run/systemd/system"); err != nil {
-		return errors.New("no systemd here: restart MariaDB yourself")
-	}
-	out, err := exec.CommandContext(ctx, "systemctl", "restart", "mariadb").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return a.sites.priv.RestartMariaDB(ctx)
 }
 
 // waitMariaDB waits for MariaDB to answer again after a restart.

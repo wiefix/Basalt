@@ -555,8 +555,10 @@ fi
 # Other servers' agents reach this one here for database replication; it
 # lets in only what the panel allows, with the panel's certificates.
 AGENT_FLAGS="$AGENT_FLAGS --peer-listen :8444"
-# The agent's privileged helper: what needs root (creating site users, for
-# now) the agent asks it on a socket that answers only the agent's user.
+# The agent's privileged helper: what needs root (the sites' users, their
+# PHP-FPM pools and services, Laravel's processes, MariaDB's replication
+# settings and restart) the agent asks it on a socket that answers only the
+# agent's user.
 cat >"$UNITS/basalt-agent-helper.service" <<EOF
 [Unit]
 Description=Basalt agent's privileged helper
@@ -568,8 +570,10 @@ Restart=always
 RestartSec=2
 RuntimeDirectory=basalt-helper
 RuntimeDirectoryMode=0700
-UMask=0077
-# useradd and friends: /etc (passwd, group, shadow) is all it writes.
+UMask=0022
+# /etc is all it writes: users (passwd, group, shadow), PHP-FPM pools and
+# configurations, systemd units, MariaDB's option file. The rest systemd
+# does (starting PHP-FPM, Laravel's processes, MariaDB).
 ProtectSystem=strict
 ReadWritePaths=/etc
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER CAP_FSETID CAP_AUDIT_WRITE
@@ -578,7 +582,21 @@ IPAddressDeny=any
 RestrictNamespaces=yes
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
-$HARDEN
+# Not MemoryDenyWriteExecute (PHP's JIT in php-fpm --test).
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

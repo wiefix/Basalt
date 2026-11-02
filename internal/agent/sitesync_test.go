@@ -21,8 +21,8 @@ import (
 func TestSiteSync(t *testing.T) {
 	ctx := context.Background()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	src := newSitesManager(Config{SitesRoot: t.TempDir()}, log)
-	dst := newSitesManager(Config{SitesRoot: t.TempDir()}, log)
+	src := testSites(t, Config{SitesRoot: t.TempDir()}, log)
+	dst := testSites(t, Config{SitesRoot: t.TempDir()}, log)
 	sd := filepath.Join(src.root, "1")
 	dd := filepath.Join(dst.root, "1")
 	for _, d := range []string{"public/sub", "logs", "tmp"} {
@@ -181,7 +181,7 @@ func TestSiteSync(t *testing.T) {
 // site's own files and whatever a symlink points at stay.
 func TestRemoveTemps(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	m := newSitesManager(Config{SitesRoot: t.TempDir()}, log)
+	m := testSites(t, Config{SitesRoot: t.TempDir()}, log)
 	sd := filepath.Join(m.root, "1")
 	os.MkdirAll(filepath.Join(sd, "public/sub"), 0o755)
 	outside := t.TempDir()

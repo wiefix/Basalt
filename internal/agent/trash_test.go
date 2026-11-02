@@ -13,7 +13,7 @@ import (
 
 func TestTrash(t *testing.T) {
 	root := t.TempDir()
-	m := newSitesManager(Config{SitesRoot: root}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	m := testSites(t, Config{SitesRoot: root}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	trash := filepath.Join(root, trashDir)
 	now := time.Now()
 	old := "4-" + strconv.FormatInt(now.Add(-31*24*time.Hour).Unix(), 10)

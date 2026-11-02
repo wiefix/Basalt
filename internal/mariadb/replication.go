@@ -29,6 +29,9 @@ func ConnName(source int64) string { return "basalt_" + strconv.FormatInt(source
 
 var connRE = regexp.MustCompile(`^basalt_[1-9][0-9]{0,9}$`)
 
+// ValidConnName reports whether name is a replica connection's name.
+func ValidConnName(name string) bool { return connRE.MatchString(name) }
+
 // Config is the option file that keeps a server's replication setup over
 // restarts: its identity, the binary log, and what each connection copies
 // (filters set at run time do not survive a restart, and a connection

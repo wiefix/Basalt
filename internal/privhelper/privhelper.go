@@ -10,6 +10,11 @@
 // Every operation is idempotent, so the client may repeat one after the
 // connection broke.
 //
+// It creates and removes the sites' users, puts the sites' PHP in place
+// (pools, their systemd services, Laravel's processes) and keeps MariaDB's
+// option file of database replication. MariaDB's databases themselves the
+// agent manages over MariaDB's socket.
+//
 // Without a helper (development, servers installed before it existed) the
 // agent runs the same Helper in its own process.
 package privhelper
@@ -24,6 +29,8 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/php"
 	"github.com/wiefix/basalt/internal/sysuser"
 )
 
@@ -34,13 +41,32 @@ const Command = "agent-helper"
 const (
 	// MsgHostIdentity creates the web group and puts the proxy's user in it.
 	MsgHostIdentity = "host_identity"
-	// MsgSiteUserEnsure creates a site's system user (SiteUserRequest →
-	// SiteUser); MsgSiteUserDelete removes it (SiteUserRequest).
+	// MsgSiteUserEnsure creates a site's system user (SiteRequest →
+	// SiteUser); MsgSiteUserDelete removes it (SiteRequest).
 	MsgSiteUserEnsure = "site_user_ensure"
 	MsgSiteUserDelete = "site_user_delete"
+
+	// MsgSitePHPApply puts a site's PHP in place: its pool or its own FPM
+	// service (SitePHP); MsgSitePHPRemove takes it away (SiteRequest).
+	MsgSitePHPApply  = "site_php_apply"
+	MsgSitePHPRemove = "site_php_remove"
+	// MsgSiteLaravelApply sets a site's Laravel processes (SiteLaravel);
+	// MsgSiteLaravel reports on or restarts them (agentproto.SiteLaravel →
+	// agentproto.SiteLaravelResponse).
+	MsgSiteLaravelApply = "site_laravel_apply"
+	MsgSiteLaravel      = "site_laravel"
+	// MsgPHPRestartUpdated restarts the sites' PHP that runs code replaced
+	// by an update (→ RestartedSites).
+	MsgPHPRestartUpdated = "php_restart_updated"
+
+	// MsgMariaDBConfig writes MariaDB's option file of database
+	// replication (MariaDBConfig); MsgMariaDBRestart restarts MariaDB.
+	MsgMariaDBConfig  = "mariadb_config"
+	MsgMariaDBRestart = "mariadb_restart"
 )
 
-type SiteUserRequest struct {
+// SiteRequest names a site.
+type SiteRequest struct {
 	SiteID int64 `json:"site_id"`
 }
 
@@ -58,19 +84,49 @@ type Config struct {
 	// basalt-www); ProxyUser is the proxy's system user ("": none).
 	WWWGroup  string
 	ProxyUser string
+	// PHPRunDir holds the sites' PHP-FPM sockets (default /run/basalt/php);
+	// SiteDBDir the sockets of the sites' databases the agent serves
+	// (default /run/basalt/db).
+	PHPRunDir string
+	SiteDBDir string
+	// MariaDBConf is the option file of database replication (default
+	// /etc/mysql/mariadb.conf.d/90-basalt.cnf).
+	MariaDBConf string
+	// PHP is the host's PHP (default: php.DefaultHost of PHPRunDir).
+	PHP *php.Host
 }
 
 // Helper carries out the privileged operations.
 type Helper struct {
 	cfg Config
 	log *slog.Logger
+	php *php.Host
 	// identityMu: concurrent requests would race usermod against itself.
 	identityMu sync.Mutex
+	// phpMu serializes changes of the sites' PHP: they rewrite shared
+	// files (pools of a version, systemd's units) and reload.
+	phpMu sync.Mutex
+	// mariadbMu: one writer of the option file at a time.
+	mariadbMu sync.Mutex
 }
 
 func New(cfg Config, log *slog.Logger) (*Helper, error) {
 	if cfg.WWWGroup == "" {
 		cfg.WWWGroup = "basalt-www"
+	}
+	if cfg.PHPRunDir == "" {
+		cfg.PHPRunDir = "/run/basalt/php"
+	}
+	if cfg.SiteDBDir == "" {
+		cfg.SiteDBDir = "/run/basalt/db"
+	}
+	if cfg.MariaDBConf == "" {
+		cfg.MariaDBConf = DefaultMariaDBConf
+	}
+	for _, p := range []string{cfg.PHPRunDir, cfg.SiteDBDir, cfg.MariaDBConf} {
+		if !filepath.IsAbs(p) {
+			return nil, fmt.Errorf("%q must be an absolute path", p)
+		}
 	}
 	if !filepath.IsAbs(cfg.SitesRoot) {
 		return nil, fmt.Errorf("sites root must be an absolute path, not %q", cfg.SitesRoot)
@@ -78,7 +134,18 @@ func New(cfg Config, log *slog.Logger) (*Helper, error) {
 	if err := sysuser.Check(cfg.WWWGroup); err != nil {
 		return nil, err
 	}
-	return &Helper{cfg: cfg, log: log}, nil
+	h := &Helper{cfg: cfg, log: log, php: cfg.PHP}
+	if h.php == nil {
+		h.php = php.DefaultHost(cfg.PHPRunDir)
+	}
+	return h, nil
+}
+
+// decode reads a request's payload.
+func decode[T any](payload json.RawMessage) (T, error) {
+	var v T
+	err := json.Unmarshal(payload, &v)
+	return v, err
 }
 
 // Handle serves one request of the agent (an agentproto.Handler).
@@ -87,8 +154,8 @@ func (h *Helper) Handle(ctx context.Context, msgType string, payload json.RawMes
 	case MsgHostIdentity:
 		return struct{}{}, h.HostIdentity(ctx)
 	case MsgSiteUserEnsure, MsgSiteUserDelete:
-		var req SiteUserRequest
-		if err := json.Unmarshal(payload, &req); err != nil {
+		req, err := decode[SiteRequest](payload)
+		if err != nil {
 			return nil, err
 		}
 		if msgType == MsgSiteUserDelete {
@@ -96,6 +163,41 @@ func (h *Helper) Handle(ctx context.Context, msgType string, payload json.RawMes
 		}
 		uid, gid, err := h.EnsureSiteUser(ctx, req.SiteID)
 		return SiteUser{UID: uid, GID: gid}, err
+	case MsgSitePHPApply:
+		req, err := decode[SitePHP](payload)
+		if err != nil {
+			return nil, err
+		}
+		return struct{}{}, h.ApplySitePHP(ctx, req)
+	case MsgSitePHPRemove:
+		req, err := decode[SiteRequest](payload)
+		if err != nil {
+			return nil, err
+		}
+		return struct{}{}, h.RemoveSitePHP(ctx, req.SiteID)
+	case MsgSiteLaravelApply:
+		req, err := decode[SiteLaravel](payload)
+		if err != nil {
+			return nil, err
+		}
+		return struct{}{}, h.ApplyLaravel(ctx, req.SitePHP, req.Laravel)
+	case MsgSiteLaravel:
+		req, err := decode[agentproto.SiteLaravel](payload)
+		if err != nil {
+			return nil, err
+		}
+		return h.LaravelProcesses(ctx, req)
+	case MsgPHPRestartUpdated:
+		ids, err := h.RestartUpdatedPHP(ctx)
+		return RestartedSites{SiteIDs: ids}, err
+	case MsgMariaDBConfig:
+		req, err := decode[MariaDBConfig](payload)
+		if err != nil {
+			return nil, err
+		}
+		return struct{}{}, h.WriteMariaDBConfig(ctx, req)
+	case MsgMariaDBRestart:
+		return struct{}{}, h.RestartMariaDB(ctx)
 	}
 	return nil, fmt.Errorf("unknown request %q", msgType)
 }

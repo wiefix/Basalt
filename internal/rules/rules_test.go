@@ -330,21 +330,29 @@ func checkExec(pkgs map[string]*pkg) []violation {
 
 // privilegedPrograms change the host as only root may; they are run by
 // the privileged helper alone (the agent asks it), so its requests are the
-// whole list of what needs root. Moving more there (21.3, 21.4) adds to it.
+// whole list of what needs root. Moving more there (21.4) adds to it.
 var privilegedPrograms = []string{"useradd", "userdel", "usermod", "groupadd", "groupdel", "groupmod"}
 
 // privilegedPkg is the privileged helper.
 const privilegedPkg = "internal/privhelper"
 
-// checkPrivileged finds the names of privileged programs (as string
-// literals: how a program is named to os/exec) outside the helper.
+// systemPrograms run the host's services and read their logs: only the
+// helper and the PHP code it runs (the agent uses package php to read the
+// installed versions) name them, and the agent's update until 21.4 moves
+// it into the helper. An entry ending in .go is one file of a package.
+var systemPrograms = map[string][]string{
+	"systemctl":  {privilegedPkg, "internal/php", "internal/agent/update.go"},
+	"journalctl": {privilegedPkg, "internal/php"},
+}
+
+// checkPrivileged finds the names of privileged and system programs (as
+// string literals: how a program is named to os/exec) outside where they
+// may be run.
 func checkPrivileged(pkgs map[string]*pkg) []violation {
 	var out []violation
 	for _, p := range sortedPkgs(pkgs) {
-		if p.path == privilegedPkg {
-			continue
-		}
 		for _, f := range p.files {
+			file := p.path + "/" + filepath.Base(p.fset.Position(f.Pos()).Filename)
 			ast.Inspect(f, func(n ast.Node) bool {
 				l, ok := n.(*ast.BasicLit)
 				if !ok || l.Kind != token.STRING {
@@ -354,8 +362,12 @@ func checkPrivileged(pkgs map[string]*pkg) []violation {
 				if err != nil {
 					return true
 				}
-				if prog := filepath.Base(v); slices.Contains(privilegedPrograms, prog) {
+				prog := filepath.Base(v)
+				if slices.Contains(privilegedPrograms, prog) && p.path != privilegedPkg {
 					out = append(out, violation{p.fset.Position(l.Pos()), fmt.Sprintf("%s names the privileged program %s: only %s runs it", p.path, prog, privilegedPkg)})
+				}
+				if allowed, ok := systemPrograms[prog]; ok && !slices.Contains(allowed, p.path) && !slices.Contains(allowed, file) {
+					out = append(out, violation{p.fset.Position(l.Pos()), fmt.Sprintf("%s names %s: only %s run it", file, prog, strings.Join(allowed, ", "))})
 				}
 				return true
 			})
@@ -571,7 +583,11 @@ func g() {
 	exec.Command("useradd", "x")
 	_ = "/usr/sbin/userdel"
 	_ = "useradd is fine in a sentence"
+	exec.Command("systemctl", "restart", "mariadb")
 }
+`,
+		"internal/php": `package php
+var _ = []string{"systemctl", "journalctl"}
 `,
 		"internal/privhelper": `package privhelper
 import "os/exec"
@@ -600,7 +616,7 @@ var _ = exec.Command("groupadd", "x")
 	if got := lines(checkHTTPTimeouts(pkgs)); got != "8,12,13" {
 		t.Errorf("timeout findings on lines %s, want 8,12,13", got)
 	}
-	if got := lines(checkPrivileged(pkgs)); got != "5,6" {
-		t.Errorf("privileged program findings on lines %s, want 5,6", got)
+	if got := lines(checkPrivileged(pkgs)); got != "5,6,8" {
+		t.Errorf("privileged program findings on lines %s, want 5,6,8", got)
 	}
 }

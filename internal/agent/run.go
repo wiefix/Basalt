@@ -87,8 +87,9 @@ type Config struct {
 	// MySQLSocket is the local MariaDB/MySQL socket ("" disables databases).
 	MySQLSocket string
 	// MariaDBConf is the option file database replication writes (default
-	// /etc/mysql/mariadb.conf.d/90-basalt.cnf); RestartMariaDB replaces,
-	// in tests, restarting MariaDB to turn its binary log on.
+	// /etc/mysql/mariadb.conf.d/90-basalt.cnf; with a helper, the helper's
+	// own); RestartMariaDB replaces, in tests, restarting MariaDB to turn
+	// its binary log on.
 	MariaDBConf    string
 	RestartMariaDB func() error
 	// DockerSocket is the local Docker Engine socket ("" disables apps).
@@ -132,14 +133,13 @@ type Agent struct {
 	tunnel *tunnelManager
 	siteDB *siteDBs
 	dbrepl dbRepl
-	// mariadbConf and restartDB: see Config.
-	mariadbConf string
-	restartDB   func() error
-	acme        *acmeRelay
-	apps        *appsManager
-	backups     *backupManager
-	mysql       string
-	docker      string
+	// restartDB: see Config.
+	restartDB func() error
+	acme      *acmeRelay
+	apps      *appsManager
+	backups   *backupManager
+	mysql     string
+	docker    string
 
 	health      *healthManager
 	dbExpose    *dbExposeManager
@@ -185,12 +185,11 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 			return nil, fmt.Errorf("site file worker: %w", err)
 		}
 	}
-	sites := newSitesManager(cfg, log.With("subsystem", "sites"))
-	if cfg.Isolate {
-		if sites.priv, err = newPrivileged(cfg, log.With("subsystem", "privileged")); err != nil {
-			return nil, err
-		}
+	priv, err := newPrivileged(cfg, log.With("subsystem", "privileged"))
+	if err != nil {
+		return nil, err
 	}
+	sites := newSitesManager(cfg, priv, log.With("subsystem", "sites"))
 	sftp, err := newSFTPManager(cfg, sites, log.With("subsystem", "sftp"))
 	if err != nil {
 		return nil, err
@@ -225,10 +224,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		updater:         newUpdater(cfg, log.With("subsystem", "update")),
 		wordpressURL:    cfg.WordPressURL,
 	}
-	a.mariadbConf, a.restartDB = cfg.MariaDBConf, cfg.RestartMariaDB
-	if a.mariadbConf == "" {
-		a.mariadbConf = defaultMariaDBConf
-	}
+	a.restartDB = cfg.RestartMariaDB
 	a.tunnel = newTunnelManager(cfg, func() tls.Certificate { return a.identity().tlsCertificate() },
 		func() *x509.Certificate { return a.identity().ca }, log.With("subsystem", "tunnel"))
 	a.siteDB = newSiteDBs(cfg, a.tunnel, log.With("subsystem", "sitedb"))
