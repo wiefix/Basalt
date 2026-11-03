@@ -23,4 +23,5 @@ exec docker run --rm \
     echo "PHP-FPM $V and $(mariadb -N -e "SELECT VERSION()") started; $(restic version | cut -d" " -f1-2)"
     go test -count=1 -tags linux_integration -run "TestLinux" -v ./internal/e2e/ ./internal/dns/ 2>&1 | grep -vE "^\{\"level\""
     go test -count=1 -run "TestSnapshotFiles|TestCheck" ./internal/restic/
+    go test -count=1 -run "TestRestic|TestRestoreSite" -v ./internal/privhelper/ 2>&1 | grep -E "^(---|ok|FAIL|PASS|panic)|_test.go"
   '

@@ -84,8 +84,16 @@ func TestInotifyWatch(t *testing.T) {
 	expect("a folder moved", true, func() { os.Rename(filepath.Join(site, "public/new"), filepath.Join(site, "public/moved")) })
 	expect("a file in the moved folder", true, write("public/moved/deep/g"))
 	expect("a removal", true, func() { os.Remove(filepath.Join(site, "public/a/index.html")) })
+	// A restore swaps in a new folder of the site and removes the old one.
+	expect("the folder replaced", true, func() {
+		os.MkdirAll(filepath.Join(root, "new", "public/b"), 0o755)
+		os.Rename(site, filepath.Join(root, "old"))
+		os.Rename(filepath.Join(root, "new"), site)
+		os.RemoveAll(filepath.Join(root, "old"))
+	})
+	expect("a file in the new folder of the site", true, write("public/b/index.html"))
 
 	// Unwatched: nothing more.
 	w.apply(agentproto.SiteWatch{Sites: []int64{}})
-	expect("after unwatching", false, write("public/a/z"))
+	expect("after unwatching", false, write("public/b/z"))
 }

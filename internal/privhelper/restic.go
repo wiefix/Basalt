@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 
@@ -280,24 +279,6 @@ func (h *Helper) resticBackup(ctx context.Context, r *restic.Runner, repo restic
 		return ResticResult{}, err
 	}
 	return ResticResult{Summary: &s, Incomplete: s.Incomplete}, nil
-}
-
-// restoreSite makes a site's folder hold exactly a snapshot of it: one of
-// this site's files, taken of this folder.
-func (h *Helper) restoreSite(ctx context.Context, r *restic.Runner, repo restic.Repo, req ResticRequest) error {
-	dir := h.siteDir(req.SiteID)
-	s, err := r.SnapshotByID(ctx, repo, req.Snapshot)
-	if err != nil {
-		return err
-	}
-	if s == nil {
-		return errors.New("no such snapshot")
-	}
-	if !slices.Contains(s.Tags, "res=site-"+strconv.FormatInt(req.SiteID, 10)) || !slices.Contains(s.Tags, "part=files") ||
-		len(s.Paths) != 1 || s.Paths[0] != dir {
-		return errors.New("the snapshot is not of this site's files")
-	}
-	return r.RestoreTree(ctx, repo, s.ID, dir, dir)
 }
 
 // resticRepo turns the panel's description into what restic opens. SFTP

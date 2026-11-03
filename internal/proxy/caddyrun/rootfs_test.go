@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 )
@@ -74,5 +75,53 @@ func TestRootFSUnreadable(t *testing.T) {
 	}
 	if _, err := fs.Stat(match, "../outside.php"); err == nil {
 		t.Fatal("parent path resolved")
+	}
+}
+
+// TestRootFSReplaced: a folder replaced under the proxy (a restore swaps in
+// a new one) is served within a second; a symlink put in its place to
+// another site's folder is not followed.
+func TestRootFSReplaced(t *testing.T) {
+	dir := t.TempDir()
+	site := filepath.Join(dir, "site")
+	public := filepath.Join(site, "public")
+	write := func(d, s string) {
+		os.MkdirAll(d, 0o755)
+		os.WriteFile(filepath.Join(d, "index.html"), []byte(s), 0o644)
+	}
+	write(public, "v1")
+	write(filepath.Join(dir, "other"), "another site")
+	f := &RootFS{Root: public}
+	if err := f.Provision(caddy.Context{}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Cleanup() })
+	read := func() string {
+		b, err := fs.ReadFile(f, "index.html")
+		if err != nil {
+			return err.Error()
+		}
+		return string(b)
+	}
+	if got := read(); got != "v1" {
+		t.Fatal(got)
+	}
+
+	write(filepath.Join(site, "new"), "v2")
+	os.Rename(public, filepath.Join(site, "old"))
+	os.Rename(filepath.Join(site, "new"), public)
+	os.RemoveAll(filepath.Join(site, "old"))
+	time.Sleep(recheck + 100*time.Millisecond)
+	if got := read(); got != "v2" {
+		t.Fatalf("after the folder was replaced: %q", got)
+	}
+
+	for _, target := range []string{filepath.Join(dir, "other"), "../other"} {
+		os.RemoveAll(public)
+		os.Symlink(target, public)
+		time.Sleep(recheck + 100*time.Millisecond)
+		if got := read(); got == "another site" {
+			t.Fatalf("followed a symlink to %s", target)
+		}
 	}
 }

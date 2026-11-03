@@ -7,8 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 )
@@ -35,9 +37,17 @@ type RootFS struct {
 }
 
 type rootState struct {
-	mu   sync.Mutex
-	root *os.Root
+	mu      sync.Mutex
+	root    *os.Root
+	checked time.Time
+	// stale is the root replaced last: requests may still be using it, so
+	// it is closed at the next replacement.
+	stale *os.Root
 }
+
+// recheck is how often an open root is compared with what its path holds
+// now: a site's folder may be replaced (a restore swaps in a new one).
+const recheck = time.Second
 
 func (RootFS) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
@@ -63,12 +73,14 @@ func (f *RootFS) Cleanup() error {
 	}
 	f.state.mu.Lock()
 	defer f.state.mu.Unlock()
-	if f.state.root != nil {
-		err := f.state.root.Close()
-		f.state.root = nil
-		return err
+	var errs []error
+	for _, r := range []**os.Root{&f.state.root, &f.state.stale} {
+		if *r != nil {
+			errs = append(errs, (*r).Close())
+			*r = nil
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (f *RootFS) open() (*os.Root, error) {
@@ -77,15 +89,41 @@ func (f *RootFS) open() (*os.Root, error) {
 	}
 	f.state.mu.Lock()
 	defer f.state.mu.Unlock()
-	if f.state.root != nil {
-		return f.state.root, nil
+	st := f.state
+	if st.root != nil {
+		if time.Since(st.checked) < recheck {
+			return st.root, nil
+		}
+		st.checked = time.Now()
+		cur, err1 := st.root.Stat(".")
+		now, err2 := os.Lstat(f.Root)
+		if err1 == nil && err2 == nil && os.SameFile(cur, now) {
+			return st.root, nil
+		}
+		if st.stale != nil {
+			st.stale.Close()
+		}
+		st.stale, st.root = st.root, nil
 	}
-	r, err := os.OpenRoot(f.Root)
+	r, err := openRoot(f.Root)
 	if err != nil {
 		return nil, err
 	}
-	f.state.root = r
+	st.root, st.checked = r, time.Now()
 	return r, nil
+}
+
+// openRoot opens dir through its parent: the last element of the path (a
+// site's public folder) belongs to the site's user, who could make it a
+// symlink to another site's folder; os.Root does not follow one out of
+// the parent.
+func openRoot(dir string) (*os.Root, error) {
+	parent, err := os.OpenRoot(filepath.Dir(dir))
+	if err != nil {
+		return nil, err
+	}
+	defer parent.Close()
+	return parent.OpenRoot(filepath.Base(dir))
 }
 
 // clean maps the names Caddy passes ("./a/b", "/a/b", ".") to fs.ValidPath form.

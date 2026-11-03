@@ -175,6 +175,12 @@ func (b *inotifyBackend) events(buf []byte) {
 		if mask&syscall.IN_IGNORED != 0 {
 			delete(b.dirs, wd)
 			b.sites[d.site] = slices.DeleteFunc(b.sites[d.site], func(x int32) bool { return x == wd })
+			if d.top {
+				// The site's folder was replaced (a restore swaps in a
+				// new one): watch what is there now.
+				changed = append(changed, d.site)
+				rescan = append(rescan, d.site)
+			}
 			continue
 		}
 		if name != "" && watchIgnored(name, d.top) {

@@ -137,6 +137,8 @@ echo "### the site's backup and restore: restic runs in the helper, within its s
 SST=$($API -d '{"name":"sites","kind":"local","path":"/var/backups/basalt-sites"}' http://127.0.0.1:8080/api/v1/backup-storages | python3 -c 'import sys,json; print(json.load(sys.stdin)["storage"]["id"])')
 $API -X PUT -d "{\"storage_id\":$SST,\"schedule\":\"manual\",\"keep_last\":3}" http://127.0.0.1:8080/api/v1/sites/$SITE/backup-policy >/dev/null
 SETGID=$(docker exec basalt-node1 find /srv/basalt/sites/$SITE -perm -2000 | sort)
+# A setuid file of root in the snapshot: the restore gives it to the site, without setuid.
+docker exec basalt-node1 install -o root -g root -m 4755 /bin/true /srv/basalt/sites/$SITE/public/suid
 site_run() { # $1: run id; waits for it and prints its status
   for i in $(seq 120); do
     S=$($API http://127.0.0.1:8080/api/v1/sites/$SITE/backups/$1 | python3 -c 'import sys,json; print(json.load(sys.stdin)["backup"]["status"])')
@@ -154,6 +156,9 @@ site_run $RS
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " || { echo "the site's page was not restored"; exit 1; }
 [ "$(docker exec basalt-node1 stat -c %U /srv/basalt/sites/$SITE/public/index.php)" = "basalt-s$SITE" ] || { echo "the restored file is not the site user's"; exit 1; }
 [ "$(docker exec basalt-node1 find /srv/basalt/sites/$SITE -perm -2000 | sort)" = "$SETGID" ] || { echo "the restore lost the site's setgid folders"; exit 1; }
+[ "$(docker exec basalt-node1 stat -c '%U %a' /srv/basalt/sites/$SITE/public/suid)" = "basalt-s$SITE 755" ] || { echo "the restore brought back a setuid file of root"; exit 1; }
+[ -z "$(docker exec basalt-node1 ls -A /srv/basalt/sites/.basalt-restore)" ] || { echo "the restore left files aside"; exit 1; }
+docker exec basalt-node1 rm /srv/basalt/sites/$SITE/public/suid
 echo "  backed up and restored, $(echo "$SETGID" | wc -l) setgid folder(s) kept"
 echo "### the proxy logs the site's requests"
 $API "http://127.0.0.1:8080/api/v1/sites/$SITE/access-log?limit=5" | python3 -c 'import sys,json; l=json.load(sys.stdin)["entries"]; [print("  ", e["at"], e["method"], e["host"], e["uri"], e["status"]) for e in l[:2]]; sys.exit(0 if l and l[0]["host"]=="shop.test" else "no access log")'

@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -128,6 +130,22 @@ func TestResticThroughHelper(t *testing.T) {
 		t.Fatalf("a stopped backup left %+v (%v)", res.Snapshots, err)
 	}
 
+	// What a restore must not bring back as it was: a setuid file, a
+	// pipe. A setgid folder it keeps.
+	site := filepath.Join(sites, "4")
+	os.WriteFile(filepath.Join(site, "public", "run.sh"), []byte("#!/bin/sh\n"), 0o755)
+	os.Chmod(filepath.Join(site, "public", "run.sh"), 0o755|fs.ModeSetuid)
+	if mode(t, filepath.Join(site, "public", "run.sh"))&fs.ModeSetuid == 0 {
+		t.Fatal("no setuid file to restore")
+	}
+	if err := syscall.Mkfifo(filepath.Join(site, "public", "pipe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.Mkdir(filepath.Join(site, "public", "up"), 0o750)
+	os.Chmod(filepath.Join(site, "public", "up"), 0o750|fs.ModeSetgid)
+	upMode := mode(t, filepath.Join(site, "public", "up"))
+	os.Chmod(site, 0o751)
+
 	// A site's files, by id: the temporary files stay out.
 	res, err := run(ResticRequest{Op: ResticBackupSite, Host: "basalt", Tags: []string{"res=site-4", "part=files"}, SiteID: 4}, Stdio{})
 	if err != nil || res.Summary == nil {
@@ -150,8 +168,27 @@ func TestResticThroughHelper(t *testing.T) {
 			t.Fatalf("restore %+v: %v", bad, err)
 		}
 	}
+	// The folder keeps its own mode, not the snapshot's; what a stopped
+	// restore left aside goes.
+	os.Chmod(site, 0o750)
+	os.MkdirAll(filepath.Join(sites, restoreDir, "4", "public"), 0o755)
 	if _, err := run(ResticRequest{Op: ResticRestoreSite, Snapshot: files, SiteID: 4}, Stdio{}); err != nil {
 		t.Fatal(err)
+	}
+	if m := mode(t, site); m != fs.ModeDir|0o750 {
+		t.Fatalf("the site's folder after a restore: %v", m)
+	}
+	if m := mode(t, filepath.Join(site, "public", "run.sh")); m != 0o755 {
+		t.Fatalf("a setuid file restored as %v", m)
+	}
+	if m := mode(t, filepath.Join(site, "public", "up")); m != upMode {
+		t.Fatalf("a setgid folder restored as %v, was %v", m, upMode)
+	}
+	if _, err := os.Lstat(filepath.Join(site, "public", "pipe")); !os.IsNotExist(err) {
+		t.Fatalf("a pipe came back: %v", err)
+	}
+	if left, err := os.ReadDir(filepath.Join(sites, restoreDir)); err != nil || len(left) != 0 || mode(t, filepath.Join(sites, restoreDir)) != fs.ModeDir|0o700 {
+		t.Fatalf("left aside: %v %v", left, err)
 	}
 	if b, _ := os.ReadFile(filepath.Join(sites, "4", "public", "index.html")); string(b) != "v1" {
 		t.Fatalf("restored %q", b)
@@ -298,4 +335,14 @@ func TestFilesOnlyWithMarker(t *testing.T) {
 	if err := sendFiles(nil, nil); err == nil {
 		t.Fatal("no files sent as files")
 	}
+}
+
+// mode is a file's mode, not following a symbolic link.
+func mode(t *testing.T, p string) fs.FileMode {
+	t.Helper()
+	fi, err := os.Lstat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Mode()
 }
