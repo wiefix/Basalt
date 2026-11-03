@@ -471,12 +471,29 @@ func runAgentHelper(ctx context.Context, args []string, stderr io.Writer) error 
 		return errors.New("the privileged helper runs as root")
 	}
 	h, err := privhelper.New(privhelper.Config{SitesRoot: cfg.SitesRoot, WWWGroup: cfg.WWWGroup, ProxyUser: cfg.ProxyUser,
-		StateDir: cfg.StateDir, AgentDataDir: cfg.AgentDataDir, Restic: cfg.Restic, ReleaseKey: cfg.ReleaseKey}, log)
+		StateDir: cfg.StateDir, AgentDataDir: cfg.AgentDataDir, Restic: cfg.Restic, ReleaseKey: cfg.ReleaseKey,
+		DockerSocket: cfg.DockerSocket}, log)
 	if err != nil {
 		return err
 	}
 	log.Info("starting", "version", buildinfo.Version)
-	return privhelper.Serve(ctx, cfg.Socket, cfg.AgentUID, h.Handle, log)
+	if cfg.DockerListen == "" {
+		return privhelper.Serve(ctx, cfg.Socket, cfg.AgentUID, h.Handle, log)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errs := make(chan error, 2)
+	go func() { errs <- privhelper.Serve(ctx, cfg.Socket, cfg.AgentUID, h.Handle, log) }()
+	go func() {
+		errs <- privhelper.ServeDocker(ctx, cfg.DockerListen, cfg.AgentUID, cfg.DockerSocket, log.With("subsystem", "docker"))
+	}()
+	// Either one ending stops the helper (systemd starts it again).
+	err = <-errs
+	cancel()
+	if err2 := <-errs; err == nil {
+		err = err2
+	}
+	return err
 }
 
 func runProxy(ctx context.Context, args []string, stderr io.Writer) error {

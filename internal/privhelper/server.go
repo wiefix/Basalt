@@ -21,29 +21,11 @@ const maxConns = 32
 // processes running as uid get answers: the kernel tells who is connected
 // (SO_PEERCRED), on top of the socket's mode (0600, of the helper's user).
 func Serve(ctx context.Context, path string, uid int, h agentproto.Handler, log *slog.Logger) error {
-	if fi, err := os.Lstat(path); err == nil {
-		if fi.Mode().Type() != fs.ModeSocket {
-			return fmt.Errorf("%s exists and is not a socket", path)
-		}
-		// Left by a helper that did not stop cleanly.
-		if err := os.Remove(path); err != nil {
-			return err
-		}
-	}
-	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	l, err := listen(path, uid, log)
 	if err != nil {
 		return err
 	}
 	defer l.Close()
-	if err := os.Chmod(path, 0o600); err != nil {
-		return err
-	}
-	if uid != os.Geteuid() && os.Geteuid() == 0 {
-		// The agent's user owns the socket (still only it may connect).
-		if err := os.Chown(path, uid, -1); err != nil {
-			return err
-		}
-	}
 	go func() {
 		<-ctx.Done()
 		l.Close()
@@ -51,27 +33,12 @@ func Serve(ctx context.Context, path string, uid int, h agentproto.Handler, log 
 	log.Info("listening", "socket", path, "agent_uid", uid)
 	slots := make(chan struct{}, maxConns)
 	for {
-		c, err := l.AcceptUnix()
+		c, err := l.accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			if errors.Is(err, net.ErrClosed) {
-				return err
-			}
-			log.Warn("accept", "err", err)
-			continue
-		}
-		peer, err := peerUID(c)
-		switch {
-		case err != nil:
-			log.Warn("refused a connection: unknown peer", "err", err)
-			c.Close()
-			continue
-		case peer != uid:
-			log.Warn("refused a connection from another user", "uid", peer)
-			c.Close()
-			continue
+			return err
 		}
 		select {
 		case slots <- struct{}{}:
@@ -96,3 +63,67 @@ func Serve(ctx context.Context, path string, uid int, h agentproto.Handler, log 
 		}()
 	}
 }
+
+// listen opens a unix socket at path that only uid may use: mode 0600,
+// owned by uid; a socket left there is replaced.
+func listen(path string, uid int, log *slog.Logger) (*peerListener, error) {
+	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode().Type() != fs.ModeSocket {
+			return nil, fmt.Errorf("%s exists and is not a socket", path)
+		}
+		// Left by a helper that did not stop cleanly.
+		if err := os.Remove(path); err != nil {
+			return nil, err
+		}
+	}
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		l.Close()
+		return nil, err
+	}
+	if uid != os.Geteuid() && os.Geteuid() == 0 {
+		// The agent's user owns the socket (still only it may connect).
+		if err := os.Chown(path, uid, -1); err != nil {
+			l.Close()
+			return nil, err
+		}
+	}
+	return &peerListener{UnixListener: l, uid: uid, log: log}, nil
+}
+
+// peerListener accepts connections of processes running as uid only: the
+// kernel tells who is connected (SO_PEERCRED), on top of the socket's mode.
+type peerListener struct {
+	*net.UnixListener
+	uid int
+	log *slog.Logger
+}
+
+func (l *peerListener) accept() (*net.UnixConn, error) {
+	for {
+		c, err := l.AcceptUnix()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil, err
+			}
+			l.log.Warn("accept", "err", err)
+			continue
+		}
+		peer, err := peerUID(c)
+		switch {
+		case err != nil:
+			l.log.Warn("refused a connection: unknown peer", "err", err)
+		case peer != l.uid:
+			l.log.Warn("refused a connection from another user", "uid", peer)
+		default:
+			return c, nil
+		}
+		c.Close()
+	}
+}
+
+// Accept makes it a net.Listener (for an HTTP server).
+func (l *peerListener) Accept() (net.Conn, error) { return l.accept() }

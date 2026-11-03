@@ -16,24 +16,24 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/docker"
+	"github.com/wiefix/basalt/internal/privhelper"
 )
 
 // Builds without a Dockerfile (20.7): `railpack prepare` works out how to
 // build the repository (language, versions, install, build and start
 // commands) into a plan, which BuildKit builds with Railpack's frontend,
 // pinned by digest. Docker's own builder cannot build these plans unless
-// the daemon keeps images in containerd; otherwise the agent runs a
-// BuildKit of its own in a container (builder basalt-railpack, its state
-// under the agent's data so it and its cache last) and loads the image into
-// Docker.
+// the daemon keeps images in containerd; otherwise BuildKit runs in a
+// container of its own, which the privileged helper makes (it is
+// privileged, which the agent's Docker proxy refuses the agent), and the
+// agent's buildx reaches it with buildx's remote driver (builder
+// basalt-buildkit, its configuration under the agent's data) and loads the
+// image into Docker.
 
-// railpackBuilder is the name of the agent's BuildKit builder (its
-// container is buildx_buildkit_<name>0).
+// railpackBuilder is the name of the agent's buildx builder, the same as
+// its BuildKit container's.
 func (m *appsManager) railpackBuilder() string {
-	if m.namespace != "" {
-		return "basalt-" + m.namespace + "-railpack"
-	}
-	return "basalt-railpack"
+	return privhelper.BuildKitName(m.namespace)
 }
 
 var railpackVersionRE = regexp.MustCompile(`\b(\d+\.\d+\.\d+)\b`)
@@ -202,22 +202,27 @@ func (m *appsManager) railpackBuild(ctx context.Context, dc *docker.Client, spec
 	return nil
 }
 
-// ensureBuilder makes sure the agent's BuildKit builder exists.
+// ensureBuilder makes sure the BuildKit container runs and the agent's
+// buildx has a builder for it.
 func (m *appsManager) ensureBuilder(ctx context.Context, dockerBin string, env []string, lg *deployLog) error {
 	if err := os.MkdirAll(filepath.Join(m.dataDir, "buildx"), 0o700); err != nil {
 		return err
+	}
+	container, err := m.priv.BuildKit(ctx, m.namespace)
+	if err != nil {
+		return fmt.Errorf("start BuildKit: %w", err)
 	}
 	run := func(args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, dockerBin, args...)
 		cmd.Env, cmd.WaitDelay = env, 5*time.Second
 		return cmd.CombinedOutput()
 	}
-	if _, err := run("buildx", "inspect", m.railpackBuilder()); err == nil {
+	if out, err := run("buildx", "inspect", m.railpackBuilder()); err == nil && strings.Contains(string(out), "remote") {
 		return nil
 	}
 	lg.printf("Setting up the builder for builds without a Dockerfile (once)")
-	if out, err := run("buildx", "create", "--name", m.railpackBuilder(), "--driver", "docker-container",
-		"--driver-opt", "image="+agentproto.BuildKitImage); err != nil {
+	if out, err := run("buildx", "create", "--name", m.railpackBuilder(), "--driver", "remote",
+		"docker-container://"+container); err != nil {
 		if strings.Contains(string(out), "unknown command") || strings.Contains(string(out), "is not a docker command") {
 			return errors.New("building without a Dockerfile needs docker buildx on this server (apt install docker-buildx)")
 		}

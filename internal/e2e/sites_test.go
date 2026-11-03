@@ -27,6 +27,8 @@ import (
 	"time"
 
 	"github.com/wiefix/basalt/internal/agent"
+	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/dockerproxy"
 	"github.com/wiefix/basalt/internal/proxy/caddyrun"
 )
 
@@ -61,6 +63,26 @@ func appLabels(appID string, kv ...string) map[string]string {
 	return labels
 }
 
+// dockerProxy serves Docker's API of socket through dockerproxy (what the
+// agent's helper does) and returns its socket.
+func dockerProxy(t *testing.T, socket string) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "bdp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "docker.sock")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: dockerproxy.New(socket, agentproto.BuildKitImage, slog.New(slog.NewTextHandler(io.Discard, nil)))}
+	go srv.Serve(l)
+	t.Cleanup(func() { srv.Close() })
+	return path
+}
+
 // dockerSocket ("" disables apps); configure adjusts the agent's settings.
 func startHostWith(t *testing.T, p *panel, dockerSocket string, configure ...func(*agent.Config)) *host {
 	t.Helper()
@@ -93,6 +115,12 @@ func startHostWith(t *testing.T, p *panel, dockerSocket string, configure ...fun
 		// Never ask real CAs for test domains (CI has a network): nothing
 		// listens here, so public certificates simply are not issued.
 		ACMEDirectory: "https://127.0.0.1:9/directory",
+	}
+	if dockerSocket != "" {
+		// The agent reaches Docker through the checking proxy, as with
+		// the helper; the in-process helper's own work (BuildKit) uses
+		// Docker's socket.
+		cfg.DockerSocket, cfg.DockerUpstream = dockerProxy(t, dockerSocket), dockerSocket
 	}
 	if bin, err := exec.LookPath("restic"); err == nil {
 		cfg.Restic = bin

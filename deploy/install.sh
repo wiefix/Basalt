@@ -559,14 +559,15 @@ AGENT_FLAGS="$AGENT_FLAGS --peer-listen :8444"
 # PHP-FPM pools and services, Laravel's processes, MariaDB's replication
 # settings and restart, restic reading and restoring every site's files,
 # installing an update) the agent asks it on a socket that answers only the
-# agent's user.
+# agent's user. Docker's API it serves the agent on a second socket,
+# checked: no privileged containers, host paths or host namespaces.
 cat >"$UNITS/basalt-agent-helper.service" <<EOF
 [Unit]
 Description=Basalt agent's privileged helper
 Before=basalt-agent.service
 
 [Service]
-ExecStart=$BIN agent-helper --socket /run/basalt-helper/helper.sock --agent-uid 0 --sites-root $SITES --proxy-user basalt-proxy --state-dir $LIB/helper --agent-data-dir $LIB/agent --log-format json
+ExecStart=$BIN agent-helper --socket /run/basalt-helper/helper.sock --agent-uid 0 --sites-root $SITES --proxy-user basalt-proxy --state-dir $LIB/helper --agent-data-dir $LIB/agent --docker-listen /run/basalt-helper/docker.sock --log-format json
 Restart=always
 RestartSec=2
 RuntimeDirectory=basalt-helper
@@ -605,11 +606,11 @@ SystemCallArchitectures=native
 [Install]
 WantedBy=multi-user.target
 EOF
-AGENT_FLAGS="$AGENT_FLAGS --helper-socket /run/basalt-helper/helper.sock"
+AGENT_FLAGS="$AGENT_FLAGS --helper-socket /run/basalt-helper/helper.sock --docker-socket /run/basalt-helper/docker.sock"
 cat >"$UNITS/basalt-agent.service" <<EOF
 [Unit]
 Description=Basalt agent
-After=network-online.target basalt-proxy.service basalt-agent-helper.service
+After=network-online.target basalt-proxy.service basalt-agent-helper.service docker.socket docker.service containerd.service
 Wants=network-online.target basalt-proxy.service basalt-agent-helper.service
 
 [Service]
@@ -623,6 +624,9 @@ RuntimeDirectoryPreserve=yes
 # files (chown, setgid folders, reading everything for backups),
 # binding port 53, signalling PHP-FPM. No module loading, raw devices,
 # tracing, clock or network administration.
+# Docker only through the helper's checking proxy: Docker's and
+# containerd's own sockets are hidden (as they are when the agent starts).
+InaccessiblePaths=-/run/docker.sock -/run/docker -/run/containerd
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_KILL CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE CAP_AUDIT_WRITE
 NoNewPrivileges=yes
 PrivateTmp=yes

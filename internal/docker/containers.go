@@ -45,7 +45,13 @@ type HealthConfig struct {
 }
 
 type HostConfig struct {
-	NetworkMode    string            `json:"NetworkMode,omitempty"`
+	NetworkMode string `json:"NetworkMode,omitempty"`
+	// Privileged only for the helper's BuildKit container (the agent's
+	// Docker proxy refuses it).
+	Privileged bool `json:"Privileged,omitempty"`
+	// UsernsMode "host" lets a privileged container start on a daemon
+	// with userns-remap.
+	UsernsMode     string            `json:"UsernsMode,omitempty"`
 	RestartPolicy  RestartPolicy     `json:"RestartPolicy"`
 	CapDrop        []string          `json:"CapDrop,omitempty"`
 	CapAdd         []string          `json:"CapAdd,omitempty"`

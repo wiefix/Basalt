@@ -337,8 +337,8 @@ func TestRailpackWithDocker(t *testing.T) {
 			dc.ImageRemove(ctx, d.(map[string]any)["image"].(string))
 		}
 		// The agent's BuildKit builder, if Docker needed one.
-		dc.ContainerRemove(ctx, "buildx_buildkit_basalt-"+e2eNamespace+"-railpack0", true)
-		dc.VolumeRemove(ctx, "buildx_buildkit_basalt-"+e2eNamespace+"-railpack0_state")
+		dc.ContainerRemove(ctx, "basalt-"+e2eNamespace+"-buildkit", true)
+		dc.VolumeRemove(ctx, "basalt-"+e2eNamespace+"-buildkit-state")
 	})
 	dep := p.call(http.StatusAccepted, "POST", base+"/deploy", map[string]any{})["deployment"].(map[string]any)
 	d1, log := followDeployment(t, p, base, jsonID(dep["id"]))

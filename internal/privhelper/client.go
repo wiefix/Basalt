@@ -110,6 +110,13 @@ func (c *Client) ActivateUpdate(ctx context.Context, req agentproto.UpdateActiva
 	return c.call(ctx, MsgUpdateActivate, req, nil)
 }
 
+// BuildKit may pull the image: a call of its own.
+func (c *Client) BuildKit(ctx context.Context, namespace string) (string, error) {
+	var res BuildKitContainer
+	err := c.callAlone(ctx, MsgBuildKit, BuildKitRequest{Namespace: namespace}, &res, nil, nil)
+	return res.Name, err
+}
+
 // Close drops the connection.
 func (c *Client) Close() {
 	c.mu.Lock()

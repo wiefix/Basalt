@@ -13,7 +13,8 @@
 // It creates and removes the sites' users, puts the sites' PHP in place
 // (pools, their systemd services, Laravel's processes), keeps MariaDB's
 // option file of database replication, runs restic for backups (it reads
-// and restores every site's files) and installs updates of Basalt.
+// and restores every site's files), installs updates of Basalt, and
+// stands between the agent and Docker (ServeDocker, BuildKit).
 // MariaDB's databases themselves the agent manages over MariaDB's socket.
 //
 // Without a helper (development, servers installed before it existed) the
@@ -112,6 +113,11 @@ type Config struct {
 	ReleaseKey string
 	UpdateExe  string
 	Restart    func(units []string) error
+
+	// DockerSocket is Docker's own socket ("": no Docker): the helper
+	// serves its API to the agent through dockerproxy and runs the
+	// BuildKit container.
+	DockerSocket string
 }
 
 // Helper carries out the privileged operations.
@@ -129,6 +135,8 @@ type Helper struct {
 	// updateMu guards staged, the version waiting in UpdateExe + ".new".
 	updateMu sync.Mutex
 	staged   string
+	// buildKitMu: one check of the BuildKit container at a time.
+	buildKitMu sync.Mutex
 }
 
 func New(cfg Config, log *slog.Logger) (*Helper, error) {
@@ -233,6 +241,13 @@ func (h *Helper) Handle(ctx context.Context, msgType string, payload json.RawMes
 		return struct{}{}, h.RestartMariaDB(ctx)
 	case MsgRestic:
 		return h.handleRestic(ctx, payload)
+	case MsgBuildKit:
+		req, err := decode[BuildKitRequest](payload)
+		if err != nil {
+			return nil, err
+		}
+		name, err := h.BuildKit(ctx, req.Namespace)
+		return BuildKitContainer{Name: name}, err
 	case MsgUpdateInfo, MsgUpdateStage, MsgUpdateActivate:
 		return h.handleUpdate(ctx, msgType, payload)
 	}

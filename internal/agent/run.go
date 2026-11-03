@@ -92,8 +92,13 @@ type Config struct {
 	// its binary log on.
 	MariaDBConf    string
 	RestartMariaDB func() error
-	// DockerSocket is the local Docker Engine socket ("" disables apps).
-	DockerSocket string
+	// DockerSocket is the local Docker Engine socket ("" disables apps):
+	// with a helper, the helper's checking proxy of it. DockerUpstream is
+	// Docker's own socket for the privileged work done in the agent's
+	// process without a helper (default DockerSocket; tests put a proxy in
+	// front of Docker and give it here).
+	DockerSocket   string
+	DockerUpstream string
 	// DockerNamespace separates this agent's Docker resources from another
 	// panel's agent on the same daemon ("" for the usual names).
 	DockerNamespace string
@@ -194,7 +199,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	apps := newAppsManager(cfg, log.With("subsystem", "apps"))
+	apps := newAppsManager(cfg, priv, log.With("subsystem", "apps"))
 	backups := newBackupManager(cfg, priv, sites, apps, log.With("subsystem", "backup"))
 	proxy := newProxyManager(cfg, sites, apps, log.With("subsystem", "proxy"))
 	apps.onChange = func() {
@@ -947,6 +952,10 @@ func (a *Agent) dockerVersion(ctx context.Context) (string, *docker.Security) {
 	defer cancel()
 	dc := docker.New(a.docker)
 	v, err := dc.Version(ctx)
+	if de := (*docker.Error)(nil); errors.As(err, &de) && de.Status == http.StatusServiceUnavailable {
+		// The helper's proxy of a Docker that is not installed.
+		return "", nil
+	}
 	if err != nil {
 		a.log.Warn("Docker socket present but not usable", "err", err)
 		return "", nil

@@ -142,6 +142,8 @@ var importers = map[string][]string{
 	// The privileged helper: run by main, used (or, without a helper
 	// process, run in-process) by the agent.
 	"internal/privhelper": {"cmd/basalt", "internal/agent"},
+	// The checking proxy of Docker's API, served by the helper.
+	"internal/dockerproxy": {privilegedPkg},
 }
 
 // testHelper matches packages made for tests (githubtest, webauthntest, ...).
@@ -358,6 +360,14 @@ func checkPrivileged(pkgs map[string]*pkg) []violation {
 		for _, f := range p.files {
 			file := p.path + "/" + filepath.Base(p.fset.Position(f.Pos()).Filename)
 			ast.Inspect(f, func(n ast.Node) bool {
+				if kv, ok := n.(*ast.KeyValueExpr); ok && p.path != privilegedPkg {
+					// A privileged container (Docker's HostConfig): only the
+					// helper's BuildKit; the agent's Docker proxy refuses it.
+					if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Privileged" {
+						out = append(out, violation{p.fset.Position(kv.Pos()), fmt.Sprintf("%s makes a privileged container: only %s does", p.path, privilegedPkg)})
+					}
+					return true
+				}
 				if c, ok := n.(*ast.CompositeLit); ok {
 					if sel, ok := c.Type.(*ast.SelectorExpr); ok && sel.Sel.Name == "Runner" && !slices.Contains(resticRunners, p.path) {
 						if x, ok := sel.X.(*ast.Ident); ok && x.Name == "restic" {
@@ -597,6 +607,7 @@ func g() {
 	_ = "useradd is fine in a sentence"
 	exec.Command("systemctl", "restart", "mariadb")
 	_ = &restic.Runner{Binary: "restic"}
+	_ = docker.HostConfig{Privileged: true}
 }
 `,
 		"internal/php": `package php
@@ -606,6 +617,7 @@ var _ = []string{"systemctl", "journalctl"}
 import "os/exec"
 var _ = exec.Command("groupadd", "x")
 var _ = restic.Runner{}
+var _ = docker.HostConfig{Privileged: true}
 `,
 	}
 	fset := token.NewFileSet()
@@ -630,7 +642,7 @@ var _ = restic.Runner{}
 	if got := lines(checkHTTPTimeouts(pkgs)); got != "8,12,13" {
 		t.Errorf("timeout findings on lines %s, want 8,12,13", got)
 	}
-	if got := lines(checkPrivileged(pkgs)); got != "5,6,8,9" {
-		t.Errorf("privileged program findings on lines %s, want 5,6,8,9", got)
+	if got := lines(checkPrivileged(pkgs)); got != "5,6,8,9,10" {
+		t.Errorf("privileged program findings on lines %s, want 5,6,8,9,10", got)
 	}
 }

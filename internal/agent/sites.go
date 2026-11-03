@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -111,6 +112,8 @@ type privileged interface {
 	Updatable(ctx context.Context) (bool, error)
 	StageUpdate(ctx context.Context, req agentproto.UpdatePrepare, bin *os.File) error
 	ActivateUpdate(ctx context.Context, req agentproto.UpdateActivate) error
+
+	BuildKit(ctx context.Context, namespace string) (string, error)
 }
 
 func newPrivileged(cfg Config, log *slog.Logger) (privileged, error) {
@@ -122,6 +125,7 @@ func newPrivileged(cfg Config, log *slog.Logger) (privileged, error) {
 		PHPRunDir: cfg.PHPRunDir, SiteDBDir: cfg.SiteDBDir, MariaDBConf: cfg.MariaDBConf,
 		Restic: cfg.Restic, StateDir: cfg.DataDir, AgentDataDir: cfg.DataDir,
 		ReleaseKey: cfg.ReleaseKey, UpdateExe: cfg.UpdateExe, Restart: cfg.Restart,
+		DockerSocket: cmp.Or(cfg.DockerUpstream, cfg.DockerSocket),
 	}, log)
 }
 

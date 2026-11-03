@@ -116,6 +116,10 @@ type AgentHelper struct {
 	AgentDataDir string
 	Restic       string
 	ReleaseKey   string
+	// DockerSocket is Docker's own socket; DockerListen ("": none) is
+	// where the helper serves its API to the agent.
+	DockerSocket string
+	DockerListen string
 	LogLevel     string
 	LogFormat    string
 }
@@ -296,6 +300,8 @@ func ParseAgentHelper(args []string, output io.Writer) (AgentHelper, error) {
 	fs.StringVar(&cfg.AgentDataDir, "agent-data-dir", "/var/lib/basalt/agent", "the agent's data directory (no local backup repository may be in it)")
 	fs.StringVar(&cfg.Restic, "restic", env("RESTIC", "restic"), "restic binary used for backups")
 	fs.StringVar(&cfg.ReleaseKey, "release-key", env("RELEASE_KEY", ""), "public key (authorized_keys line) updates must be signed with (default: the Basalt release key)")
+	fs.StringVar(&cfg.DockerSocket, "docker-socket", env("DOCKER_SOCKET", "/var/run/docker.sock"), "Docker Engine's own socket")
+	fs.StringVar(&cfg.DockerListen, "docker-listen", "", "unix socket to serve the agent Docker's API on, checked (empty: none)")
 	fs.StringVar(&cfg.LogLevel, "log-level", env("LOG_LEVEL", "info"), "log level: debug, info, warn, error")
 	fs.StringVar(&cfg.LogFormat, "log-format", env("LOG_FORMAT", "text"), "log format: text or json")
 	if err := fs.Parse(args); err != nil {
@@ -303,6 +309,9 @@ func ParseAgentHelper(args []string, output io.Writer) (AgentHelper, error) {
 	}
 	if fs.NArg() > 0 {
 		return cfg, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if cfg.DockerListen != "" && (!filepath.IsAbs(cfg.DockerListen) || !filepath.IsAbs(cfg.DockerSocket)) {
+		return cfg, errors.New("docker-listen and docker-socket must be absolute paths")
 	}
 	if !filepath.IsAbs(cfg.Socket) || !filepath.IsAbs(cfg.SitesRoot) || !filepath.IsAbs(cfg.StateDir) || !filepath.IsAbs(cfg.AgentDataDir) {
 		return cfg, errors.New("socket, sites-root, state-dir and agent-data-dir must be absolute paths")

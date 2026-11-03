@@ -90,11 +90,13 @@ type appsManager struct {
 	builds    chan struct{} // limits concurrent builds
 
 	stats appStats
+	// priv runs the BuildKit container of builds without a Dockerfile.
+	priv privileged
 }
 
-func newAppsManager(cfg Config, log *slog.Logger) *appsManager {
+func newAppsManager(cfg Config, priv privileged, log *slog.Logger) *appsManager {
 	m := &appsManager{
-		log: log, socket: cfg.DockerSocket, publish: runtime.GOOS != "linux", namespace: cfg.DockerNamespace,
+		log: log, priv: priv, socket: cfg.DockerSocket, publish: runtime.GOOS != "linux", namespace: cfg.DockerNamespace,
 		locks: map[int64]*sync.Mutex{}, upstreams: map[string]string{}, onChange: func() {},
 		dataDir: cfg.DataDir, gitCAFile: cfg.GitCAFile, railpack: cfg.Railpack, builds: make(chan struct{}, maxConcurrentBuilds),
 	}

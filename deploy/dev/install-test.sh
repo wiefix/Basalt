@@ -294,6 +294,14 @@ for i in $(seq 30); do
 done
 docker exec basalt-panel curl -sk --resolve auto.test:443:$NODEIP https://auto.test/; echo
 docker exec basalt-panel curl -sk --resolve auto.test:443:$NODEIP https://auto.test/ | grep -q "built by railpack" || { echo "the Railpack app does not answer"; exit 1; }
+echo "### Docker only through the helper's checking proxy; BuildKit made by the helper"
+APID=$(docker exec basalt-node1 systemctl show -p MainPID --value basalt-agent.service)
+[ "$(docker exec basalt-node1 stat -c '%a' /proc/$APID/root/run/docker.sock)" = 0 ] || { echo "the agent can reach Docker's own socket"; exit 1; }
+[ "$(docker exec basalt-node1 stat -c '%U %a' /run/basalt-helper/docker.sock)" = "root 600" ] || { echo "the helper's Docker socket is open to others"; exit 1; }
+CODE=$(docker exec basalt-node1 curl -s -o /dev/null -w '%{http_code}' --unix-socket /run/basalt-helper/docker.sock -H 'Content-Type: application/json' \
+  -d '{"Image":"busybox","HostConfig":{"Binds":["/:/host"]}}' http://docker/v1.44/containers/create)
+[ "$CODE" = 403 ] || { echo "the helper's Docker proxy let a bind mount of / through ($CODE)"; exit 1; }
+[ "$(docker exec basalt-node1 docker inspect -f '{{.HostConfig.Privileged}} {{.HostConfig.UsernsMode}}' basalt-buildkit)" = "true host" ] || { echo "the BuildKit container is not the helper's"; exit 1; }
 echo "### node1 serves DNS (--with-dns), zones from the panel"
 ZONE=$($API -d '{"name":"zone.test"}' http://127.0.0.1:8080/api/v1/dns/zones | python3 -c 'import sys,json; print(json.load(sys.stdin)["zone"]["id"])')
 $API -d '{"name":"www","type":"A","value":"192.0.2.44"}' http://127.0.0.1:8080/api/v1/dns/zones/$ZONE/records >/dev/null
