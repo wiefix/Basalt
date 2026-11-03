@@ -457,7 +457,7 @@ func (a *Agent) importDump(ctx context.Context, file string) error {
 		return err
 	}
 	defer f.Close()
-	cmd := exec.CommandContext(ctx, a.dumpBin("mariadb", "mysql"), "--socket="+a.mysql, "--user=root",
+	cmd := exec.CommandContext(ctx, a.dumpBin("mariadb", "mysql"), "--socket="+a.mysql, "--user="+mariadb.User(),
 		"--init-command=SET SESSION sql_log_bin = 0")
 	cmd.Stdin = bufio.NewReaderSize(f, 1<<20)
 	var stderr strings.Builder

@@ -2,7 +2,6 @@ package siteworker
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,8 +17,9 @@ import (
 const (
 	// Command is the basalt subcommand of a worker.
 	Command = "site-worker"
-	// ModeFiles serves file requests (agentproto frames, message MsgFiles)
-	// on stdin and stdout; ModeSFTP an SFTP session.
+	// ModeFiles serves the agent's requests (agentproto frames: MsgFiles
+	// and the others of Handler) on stdin and stdout; ModeSFTP an SFTP
+	// session.
 	ModeFiles = "files"
 	ModeSFTP  = "sftp"
 
@@ -79,11 +79,11 @@ type stdio struct {
 func (stdio) Close() error { return nil }
 
 func serveFiles(dir string, stdin io.Reader, stdout io.Writer) error {
-	f := NewFiles(func() (*files.Site, error) {
+	h := NewHandler(func() (*files.Site, error) {
 		s, err := files.Open(dir)
 		return s, files.PublicError(err)
 	})
-	defer f.Close()
+	defer h.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -94,20 +94,11 @@ func serveFiles(dir string, stdin io.Reader, stdout io.Writer) error {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				f.Expire(UploadIdleTimeout)
+				h.Expire(UploadIdleTimeout)
 			}
 		}
 	}()
-	peer := agentproto.NewPeer(stdin, stdout, nil, func(ctx context.Context, msgType string, payload json.RawMessage) (any, error) {
-		if msgType != MsgFiles {
-			return nil, fmt.Errorf("unknown message %q", msgType)
-		}
-		var req agentproto.FilesRequest
-		if err := json.Unmarshal(payload, &req); err != nil {
-			return nil, err
-		}
-		return f.Handle(ctx, req)
-	})
+	peer := agentproto.NewPeer(stdin, stdout, nil, h.Handle)
 	err := peer.Run(ctx)
 	if errors.Is(err, agentproto.ErrClosed) || errors.Is(err, io.EOF) {
 		return nil // the agent went away or closed us

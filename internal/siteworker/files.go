@@ -1,11 +1,14 @@
 // Package siteworker is the file access of one site, run as the site's own
-// system user: the agent (root) starts "basalt site-worker" with the site's
-// uid and gid and hands it the panel's file requests or an SFTP session.
-// A path bug here can then reach no further than the site user could on its
-// own; the kernel, not just os.Root, keeps other sites and the host out.
+// system user: the agent's privileged helper starts "basalt site-worker"
+// with the site's uid and gid on a socket the agent hands it, and the agent
+// sends it the panel's file requests, its own work in the site's folder
+// (Handler) or an SFTP session. A path bug here can then reach no further
+// than the site user could on its own; the kernel, not just os.Root, keeps
+// other sites and the host out. The agent itself has no rights over the
+// sites' files.
 //
-// Without isolation (development, agent not root) the agent runs the same
-// Files handler in its own process.
+// Without isolation (development) the agent runs the same Handler in its
+// own process.
 package siteworker
 
 import (

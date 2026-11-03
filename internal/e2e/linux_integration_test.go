@@ -75,7 +75,8 @@ func TestLinuxIsolationAndPHP(t *testing.T) {
 	// Site users, their PHP and restic come from the privileged helper,
 	// over its socket as on an installed server.
 	helper, err := privhelper.New(privhelper.Config{SitesRoot: sitesRoot, PHPRunDir: "/run/basalt-it/php",
-		Restic: "restic", StateDir: filepath.Join(filepath.Dir(agentDir), "helper"), AgentDataDir: agentDir}, log)
+		Restic: "restic", StateDir: filepath.Join(filepath.Dir(agentDir), "helper"), AgentDataDir: agentDir,
+		Isolate: true, WorkerExe: workerExe}, log)
 	if err != nil {
 		t.Fatal(err)
 	}

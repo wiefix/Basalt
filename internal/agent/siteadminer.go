@@ -48,7 +48,7 @@ include __DIR__ . '/../.basalt-adminer/adminer.php';
 }
 
 func (a *Agent) siteAdminer(ctx context.Context, req agentproto.SiteAdminer) (agentproto.SiteAdminerResponse, error) {
-	site, err := a.sites.open(req.SiteID)
+	site, err := a.sites.files(ctx, req.SiteID)
 	if err != nil {
 		return agentproto.SiteAdminerResponse{}, err
 	}
@@ -105,7 +105,7 @@ func (a *Agent) siteAdminer(ctx context.Context, req agentproto.SiteAdminer) (ag
 
 // adminerPages finds the pages Basalt wrote in public/ and the version
 // the first one names.
-func adminerPages(site *files.Site) ([]string, string, error) {
+func adminerPages(site *siteFS) ([]string, string, error) {
 	entries, err := site.List("/public")
 	if err != nil {
 		return nil, "", err
@@ -133,7 +133,7 @@ func adminerPages(site *files.Site) ([]string, string, error) {
 	return pages, version, nil
 }
 
-func removeAdminer(site *files.Site, pages []string) error {
+func removeAdminer(site *siteFS, pages []string) error {
 	for _, p := range pages {
 		if err := site.Delete("/public/" + p); err != nil {
 			return err

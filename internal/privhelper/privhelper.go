@@ -10,12 +10,15 @@
 // Every operation is idempotent, so the client may repeat one after the
 // connection broke.
 //
-// It creates and removes the sites' users, puts the sites' PHP in place
-// (pools, their systemd services, Laravel's processes), keeps MariaDB's
-// option file of database replication, runs restic for backups (it reads
-// and restores every site's files), installs updates of Basalt, and
-// stands between the agent and Docker (ServeDocker, BuildKit).
-// MariaDB's databases themselves the agent manages over MariaDB's socket.
+// It creates and removes the sites' users and folders (and the trash of
+// deleted sites), starts the sites' processes as their users (file
+// workers, SFTP sessions, PHP's CLI), puts the sites' PHP in place (pools,
+// their systemd services, Laravel's processes), keeps MariaDB's option
+// file of database replication and gives the agent's user its MariaDB
+// account, runs restic for backups (it reads and restores every site's
+// files), installs updates of Basalt, and stands between the agent and
+// Docker (ServeDocker, BuildKit). The agent runs as a user of its own
+// (basalt-agent); MariaDB's databases it manages with its account.
 //
 // Without a helper (development, servers installed before it existed) the
 // agent runs the same Helper in its own process.
@@ -27,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -66,6 +70,8 @@ const (
 	// replication (MariaDBConfig); MsgMariaDBRestart restarts MariaDB.
 	MsgMariaDBConfig  = "mariadb_config"
 	MsgMariaDBRestart = "mariadb_restart"
+	// MsgMariaDBAccount gives the agent's user its account of MariaDB.
+	MsgMariaDBAccount = "mariadb_account"
 )
 
 // SiteRequest names a site.
@@ -93,8 +99,14 @@ type Config struct {
 	PHPRunDir string
 	SiteDBDir string
 	// MariaDBConf is the option file of database replication (default
-	// /etc/mysql/mariadb.conf.d/90-basalt.cnf).
+	// /etc/mysql/mariadb.conf.d/90-basalt.cnf); MySQLSocket MariaDB's
+	// socket (default /run/mysqld/mysqld.sock).
 	MariaDBConf string
+	MySQLSocket string
+	// AgentUser is the agent's system user ("" or root: the agent is
+	// root and needs no account of its own), AgentUID its uid.
+	AgentUser string
+	AgentUID  int
 	// PHP is the host's PHP (default: php.DefaultHost of PHPRunDir).
 	PHP *php.Host
 
@@ -118,6 +130,15 @@ type Config struct {
 	// serves its API to the agent through dockerproxy and runs the
 	// BuildKit container.
 	DockerSocket string
+
+	// Isolate: each site has its own system user, whose rights the site's
+	// processes and files get (the helper is root on Linux). Without it
+	// (development) they run as, and belong to, this process's user.
+	Isolate bool
+	// WorkerExe is the binary of the sites' file workers (default: this
+	// one); PHPBinary the PHP CLI of a version (default /usr/bin/php<v>).
+	WorkerExe string
+	PHPBinary func(version string) string
 }
 
 // Helper carries out the privileged operations.
@@ -152,6 +173,9 @@ func New(cfg Config, log *slog.Logger) (*Helper, error) {
 	if cfg.MariaDBConf == "" {
 		cfg.MariaDBConf = DefaultMariaDBConf
 	}
+	if cfg.MySQLSocket == "" {
+		cfg.MySQLSocket = "/run/mysqld/mysqld.sock"
+	}
 	if cfg.StateDir == "" {
 		cfg.StateDir = "/var/lib/basalt/helper"
 	}
@@ -163,6 +187,14 @@ func New(cfg Config, log *slog.Logger) (*Helper, error) {
 	}
 	if cfg.Restart == nil {
 		cfg.Restart = systemctlRestart
+	}
+	if cfg.WorkerExe == "" {
+		// Resolved now: after an update replaces the binary, the path
+		// leads to the new one (the old one shows as "(deleted)").
+		cfg.WorkerExe, _ = os.Executable()
+	}
+	if cfg.PHPBinary == nil {
+		cfg.PHPBinary = func(v string) string { return "/usr/bin/php" + v }
 	}
 	for _, p := range []string{cfg.PHPRunDir, cfg.SiteDBDir, cfg.MariaDBConf, cfg.StateDir} {
 		if !filepath.IsAbs(p) {
@@ -239,6 +271,14 @@ func (h *Helper) Handle(ctx context.Context, msgType string, payload json.RawMes
 		return struct{}{}, h.WriteMariaDBConfig(ctx, req)
 	case MsgMariaDBRestart:
 		return struct{}{}, h.RestartMariaDB(ctx)
+	case MsgSiteDBSocket:
+		req, err := decode[SiteRequest](payload)
+		if err != nil {
+			return nil, err
+		}
+		return struct{}{}, h.GiveSiteDBSocket(ctx, req.SiteID)
+	case MsgMariaDBAccount:
+		return struct{}{}, h.MariaDBAccount(ctx)
 	case MsgRestic:
 		return h.handleRestic(ctx, payload)
 	case MsgBuildKit:
@@ -248,6 +288,49 @@ func (h *Helper) Handle(ctx context.Context, msgType string, payload json.RawMes
 		}
 		name, err := h.BuildKit(ctx, req.Namespace)
 		return BuildKitContainer{Name: name}, err
+	case MsgSiteFolderEnsure, MsgSiteFolderTrash:
+		req, err := decode[SiteRequest](payload)
+		if err != nil {
+			return nil, err
+		}
+		if msgType == MsgSiteFolderTrash {
+			return struct{}{}, h.TrashSiteFolder(ctx, req.SiteID)
+		}
+		return struct{}{}, h.EnsureSiteFolder(ctx, req.SiteID)
+	case MsgTrash:
+		req, err := decode[agentproto.SiteTrash](payload)
+		if err != nil {
+			return nil, err
+		}
+		return h.Trash(ctx, req)
+	case MsgTrashClean:
+		return struct{}{}, h.CleanTrash(ctx)
+	case MsgSiteUsage:
+		req, err := decode[SiteUsageRequest](payload)
+		if err != nil {
+			return nil, err
+		}
+		return h.SiteUsage(ctx, req.SiteIDs)
+	case MsgSiteTemps:
+		req, err := decode[SiteTemps](payload)
+		if err != nil {
+			return nil, err
+		}
+		return h.RemoveTemps(ctx, req.Before)
+	case MsgSiteProcess:
+		req, err := decode[SiteProcess](payload)
+		if err != nil {
+			return nil, err
+		}
+		files := requestFiles(ctx)
+		var stdio, stderr *os.File
+		if len(files) > 0 {
+			stdio = files[0]
+		}
+		if len(files) > 1 {
+			stderr = files[1]
+		}
+		return h.SiteProcess(ctx, req, stdio, stderr)
 	case MsgUpdateInfo, MsgUpdateStage, MsgUpdateActivate:
 		return h.handleUpdate(ctx, msgType, payload)
 	}

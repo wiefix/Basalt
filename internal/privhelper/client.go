@@ -47,6 +47,36 @@ func (c *Client) DeleteSiteUser(ctx context.Context, id int64) error {
 	return c.call(ctx, MsgSiteUserDelete, SiteRequest{SiteID: id}, nil)
 }
 
+func (c *Client) EnsureSiteFolder(ctx context.Context, id int64) error {
+	return c.call(ctx, MsgSiteFolderEnsure, SiteRequest{SiteID: id}, nil)
+}
+
+func (c *Client) TrashSiteFolder(ctx context.Context, id int64) error {
+	return c.call(ctx, MsgSiteFolderTrash, SiteRequest{SiteID: id}, nil)
+}
+
+func (c *Client) Trash(ctx context.Context, req agentproto.SiteTrash) (agentproto.SiteTrashResponse, error) {
+	var resp agentproto.SiteTrashResponse
+	err := c.call(ctx, MsgTrash, req, &resp)
+	return resp, err
+}
+
+func (c *Client) CleanTrash(ctx context.Context) error {
+	return c.call(ctx, MsgTrashClean, struct{}{}, nil)
+}
+
+func (c *Client) SiteUsage(ctx context.Context, ids []int64) (SiteUsageResult, error) {
+	var resp SiteUsageResult
+	err := c.call(ctx, MsgSiteUsage, SiteUsageRequest{SiteIDs: ids}, &resp)
+	return resp, err
+}
+
+func (c *Client) RemoveTemps(ctx context.Context, before time.Time) (RemovedTemps, error) {
+	var resp RemovedTemps
+	err := c.call(ctx, MsgSiteTemps, SiteTemps{Before: before}, &resp)
+	return resp, err
+}
+
 func (c *Client) ApplySitePHP(ctx context.Context, s SitePHP) error {
 	return c.call(ctx, MsgSitePHPApply, s, nil)
 }
@@ -79,6 +109,14 @@ func (c *Client) RestartMariaDB(ctx context.Context) error {
 	return c.call(ctx, MsgMariaDBRestart, struct{}{}, nil)
 }
 
+func (c *Client) GiveSiteDBSocket(ctx context.Context, id int64) error {
+	return c.call(ctx, MsgSiteDBSocket, SiteRequest{SiteID: id}, nil)
+}
+
+func (c *Client) MariaDBAccount(ctx context.Context) error {
+	return c.call(ctx, MsgMariaDBAccount, struct{}{}, nil)
+}
+
 // Restic runs a restic command in the helper, on a connection of its own
 // carrying the command's files.
 func (c *Client) Restic(ctx context.Context, req ResticRequest, stdio Stdio, line func(string)) (ResticResult, error) {
@@ -108,6 +146,18 @@ func (c *Client) StageUpdate(ctx context.Context, req agentproto.UpdatePrepare, 
 
 func (c *Client) ActivateUpdate(ctx context.Context, req agentproto.UpdateActivate) error {
 	return c.call(ctx, MsgUpdateActivate, req, nil)
+}
+
+// SiteProcess runs a program as a site's user on a connection of its own,
+// which carries stdio (and stderr, may be nil), until the program ends.
+func (c *Client) SiteProcess(ctx context.Context, req SiteProcess, stdio, stderr *os.File) (SiteProcessResult, error) {
+	res := SiteProcessResult{Exit: -1}
+	files := []*os.File{stdio}
+	if stderr != nil {
+		files = append(files, stderr)
+	}
+	err := c.callAlone(ctx, MsgSiteProcess, req, &res, files, nil)
+	return res, err
 }
 
 // BuildKit may pull the image: a call of its own.

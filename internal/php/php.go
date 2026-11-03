@@ -23,6 +23,9 @@ import (
 
 var versionRE = regexp.MustCompile(`^[5-9]\.[0-9]$`)
 
+// ValidVersion reports whether v names a PHP version ("8.4").
+func ValidVersion(v string) bool { return versionRE.MatchString(v) }
+
 // Functions that let PHP code start processes, signal them or change
 // identity. Sites that need them can use a container app instead.
 var disabledFunctions = []string{
@@ -67,7 +70,9 @@ func DefaultHost(runDir string) *Host {
 		Systemctl:    systemctl,
 		ExtensionDir: "/usr/lib/php",
 	}
-	if _, err := os.Stat("/run/systemd/system"); err == nil && os.Geteuid() == 0 {
+	// The helper (root) runs it; the agent reads it only (Units for its
+	// hello), whichever user it runs as.
+	if _, err := os.Stat("/run/systemd/system"); err == nil {
 		if _, err := exec.LookPath("systemctl"); err == nil {
 			h.Units = true
 		}

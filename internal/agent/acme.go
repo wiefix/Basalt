@@ -55,8 +55,15 @@ func (r *acmeRelay) run(ctx context.Context) {
 		r.log.Error("acme relay disabled", "err", err)
 		return
 	}
-	// Only the proxy may ask: the socket belongs to the owner of its directory.
-	if err := os.Chmod(r.socket, 0o600); err == nil {
+	// Only the proxy may ask. The agent as root hands the socket to the
+	// owner of the proxy's folder; otherwise the socket is the proxy's
+	// group's (the folder hands its group to new files), the agent's user
+	// and the proxy's being its only members.
+	mode := fs.FileMode(0o660)
+	if os.Geteuid() == 0 {
+		mode = 0o600
+	}
+	if err := os.Chmod(r.socket, mode); err == nil {
 		err = chownLike(r.socket, r.dir)
 	}
 	if err != nil {

@@ -69,13 +69,23 @@ func TLSLogPath(dir string) string { return filepath.Join(dir, "logs", "tls.log"
 // certificate issuance, configuration loads) except access logs.
 func OwnLogPath(dir string) string { return filepath.Join(dir, "logs", "proxy.log") }
 
+// logFile is a writer of the log file name: the agent's user reads it
+// (it is in the proxy's group), no one else.
+func logFile(name string, roll obj) obj {
+	w := obj{"output": "file", "filename": name, "mode": "0640", "dir_mode": "from_file"}
+	for k, v := range roll {
+		w[k] = v
+	}
+	return w
+}
+
 // ownLog is Caddy's default logger, written to OwnLogPath instead of
 // stderr so the agent can show it. The admin API's per-request lines stay
 // in (Caddy cannot drop them without its errors, such as a rejected
 // configuration); the agent skips them when reading.
 func ownLog(dir string) obj {
 	return obj{
-		"writer":  obj{"output": "file", "filename": OwnLogPath(dir), "roll_size_mb": 10, "roll_keep": 5, "roll_keep_days": 30},
+		"writer":  logFile(OwnLogPath(dir), obj{"roll_size_mb": 10, "roll_keep": 5, "roll_keep_days": 30}),
 		"encoder": obj{"format": "json"},
 		"exclude": []any{"http.log.access"},
 	}
@@ -88,7 +98,8 @@ var hiddenFiles = []string{".git", ".svn", ".hg", ".env", ".htaccess", ".htpassw
 
 func adminConfig(dir string) obj {
 	return obj{
-		"listen": "unix/" + AdminSocket(dir) + "|0600",
+		// The proxy's group: the agent's user is in it.
+		"listen": "unix/" + AdminSocket(dir) + "|0660",
 		// The agent re-applies desired state; Caddy must not autosave its own copy.
 		"config": obj{"persist": false},
 	}
@@ -114,7 +125,7 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 	logs := obj{
 		"default": ownLog(o.Dir),
 		"tls": obj{
-			"writer":  obj{"output": "file", "filename": TLSLogPath(o.Dir), "roll_size_mb": 5, "roll_keep": 2},
+			"writer":  logFile(TLSLogPath(o.Dir), obj{"roll_size_mb": 5, "roll_keep": 2}),
 			"encoder": obj{"format": "json"},
 			"include": []any{"tls"},
 			"exclude": []any{"tls.handshake"},
@@ -126,8 +137,7 @@ func Build(d Desired, o BuildOptions) (cfg []byte, id string, err error) {
 				loggerNames[dom] = name
 			}
 			logs[name] = obj{
-				"writer": obj{"output": "file", "filename": AccessLogPath(o.Dir, name),
-					"roll_size_mb": 10, "roll_keep": 3, "roll_keep_days": 30},
+				"writer":  logFile(AccessLogPath(o.Dir, name), obj{"roll_size_mb": 10, "roll_keep": 3, "roll_keep_days": 30}),
 				"encoder": obj{"format": "json"},
 				"include": []any{"http.log.access." + name},
 			}

@@ -2,6 +2,7 @@ package caddyrun
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -68,7 +69,39 @@ func (adminAPI) CaddyModule() caddy.ModuleInfo {
 }
 
 func (adminAPI) Routes() []caddy.AdminRoute {
-	return []caddy.AdminRoute{{Pattern: proxy.AppUpstreamsPath, Handler: caddy.AdminHandlerFunc(handleAppUpstreams)}}
+	return []caddy.AdminRoute{
+		{Pattern: proxy.AppUpstreamsPath, Handler: caddy.AdminHandlerFunc(handleAppUpstreams)},
+		{Pattern: proxy.CertificatesPath, Handler: caddy.AdminHandlerFunc(handleCertificates)},
+	}
+}
+
+// dataDir is the proxy's data folder (Run sets it), where its certificate
+// storage is.
+var dataDir string
+
+// handleCertificates serves POST <admin>/basalt/certificates: the newest
+// certificate of each name, from the storage.
+func handleCertificates(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return caddy.APIError{HTTPStatus: http.StatusMethodNotAllowed, Err: errors.New("POST only")}
+	}
+	var in proxy.CertificatesRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		return caddy.APIError{HTTPStatus: http.StatusBadRequest, Err: err}
+	}
+	if len(in.Names) > proxy.MaxCertificates || dataDir == "" {
+		return caddy.APIError{HTTPStatus: http.StatusBadRequest, Err: errors.New("too many names")}
+	}
+	out := proxy.CertificatesResponse{Certs: []proxy.Certificate{}}
+	for _, n := range in.Names {
+		c, err := proxy.StoredCertificate(dataDir, n, in.Keys)
+		if err != nil {
+			return caddy.APIError{HTTPStatus: http.StatusBadRequest, Err: err}
+		}
+		out.Certs = append(out.Certs, c)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(out)
 }
 
 func handleAppUpstreams(w http.ResponseWriter, r *http.Request) error {

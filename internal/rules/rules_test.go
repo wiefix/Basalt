@@ -366,6 +366,11 @@ func checkPrivileged(pkgs map[string]*pkg) []violation {
 					if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Privileged" {
 						out = append(out, violation{p.fset.Position(kv.Pos()), fmt.Sprintf("%s makes a privileged container: only %s does", p.path, privilegedPkg)})
 					}
+					// A process of another user (syscall.SysProcAttr): the
+					// sites' processes are the helper's to start (21.6).
+					if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "Credential" {
+						out = append(out, violation{p.fset.Position(kv.Pos()), fmt.Sprintf("%s starts a process as another user: only %s does", p.path, privilegedPkg)})
+					}
 					return true
 				}
 				if c, ok := n.(*ast.CompositeLit); ok {
@@ -608,6 +613,7 @@ func g() {
 	exec.Command("systemctl", "restart", "mariadb")
 	_ = &restic.Runner{Binary: "restic"}
 	_ = docker.HostConfig{Privileged: true}
+	_ = syscall.SysProcAttr{Credential: nil}
 }
 `,
 		"internal/php": `package php
@@ -618,6 +624,7 @@ import "os/exec"
 var _ = exec.Command("groupadd", "x")
 var _ = restic.Runner{}
 var _ = docker.HostConfig{Privileged: true}
+var _ = syscall.SysProcAttr{Credential: nil}
 `,
 	}
 	fset := token.NewFileSet()
@@ -642,7 +649,7 @@ var _ = docker.HostConfig{Privileged: true}
 	if got := lines(checkHTTPTimeouts(pkgs)); got != "8,12,13" {
 		t.Errorf("timeout findings on lines %s, want 8,12,13", got)
 	}
-	if got := lines(checkPrivileged(pkgs)); got != "5,6,8,9,10" {
-		t.Errorf("privileged program findings on lines %s, want 5,6,8,9,10", got)
+	if got := lines(checkPrivileged(pkgs)); got != "5,6,8,9,10,11" {
+		t.Errorf("privileged program findings on lines %s, want 5,6,8,9,10,11", got)
 	}
 }

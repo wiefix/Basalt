@@ -14,8 +14,9 @@ import (
 
 // maxConns bounds the helper's connections: the agent keeps one, and opens
 // one for each restic command (two backups, browsing and downloads of
-// backups, integrity checks) and each update.
-const maxConns = 32
+// backups, integrity checks), each update and each process of a site (a
+// file worker per site in use, an SFTP session, a PHP command).
+const maxConns = 1024
 
 // Serve answers requests on a unix socket at path until ctx ends. Only
 // processes running as uid get answers: the kernel tells who is connected

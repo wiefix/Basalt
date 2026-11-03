@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -28,16 +27,7 @@ const (
 	// looks for them every tempSweepEvery.
 	tempKeep       = 6 * time.Hour
 	tempSweepEvery = 6 * time.Hour
-	trashDir       = ".trash"
 )
-
-var siteDirs = []string{"public", "logs", "tmp"}
-
-const placeholderPage = `<!doctype html>
-<html><head><meta charset="utf-8"><title>Site is ready</title></head>
-<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">
-<h1>It works!</h1><p>Upload your files to replace this page.</p></body></html>
-`
 
 // sitesManager owns the per-site directories under SitesRoot:
 //
@@ -65,9 +55,6 @@ type sitesManager struct {
 	identityMu   sync.Mutex
 	identityDone bool
 
-	// workerExe is the binary run as a site's file worker (this one).
-	workerExe string
-
 	mu      sync.Mutex
 	workers map[int64]*siteWorker
 }
@@ -76,10 +63,9 @@ func newSitesManager(cfg Config, priv privileged, log *slog.Logger) *sitesManage
 	return &sitesManager{
 		log: log, root: cfg.SitesRoot,
 		isolate: cfg.Isolate, wwwGroup: cfg.WWWGroup,
-		php:       php.DefaultHost(cfg.PHPRunDir),
-		priv:      priv,
-		workerExe: cfg.WorkerExe,
-		workers:   map[int64]*siteWorker{},
+		php:     php.DefaultHost(cfg.PHPRunDir),
+		priv:    priv,
+		workers: map[int64]*siteWorker{},
 	}
 }
 
@@ -104,8 +90,18 @@ type privileged interface {
 	LaravelProcesses(ctx context.Context, req agentproto.SiteLaravel) (agentproto.SiteLaravelResponse, error)
 	RestartUpdatedPHP(ctx context.Context) ([]int64, error)
 
+	EnsureSiteFolder(ctx context.Context, id int64) error
+	TrashSiteFolder(ctx context.Context, id int64) error
+	Trash(ctx context.Context, req agentproto.SiteTrash) (agentproto.SiteTrashResponse, error)
+	CleanTrash(ctx context.Context) error
+	SiteUsage(ctx context.Context, ids []int64) (privhelper.SiteUsageResult, error)
+	RemoveTemps(ctx context.Context, before time.Time) (privhelper.RemovedTemps, error)
+	SiteProcess(ctx context.Context, req privhelper.SiteProcess, stdio, stderr *os.File) (privhelper.SiteProcessResult, error)
+
 	WriteMariaDBConfig(ctx context.Context, c privhelper.MariaDBConfig) error
 	RestartMariaDB(ctx context.Context) error
+	MariaDBAccount(ctx context.Context) error
+	GiveSiteDBSocket(ctx context.Context, id int64) error
 
 	Restic(ctx context.Context, req privhelper.ResticRequest, stdio privhelper.Stdio, line func(string)) (privhelper.ResticResult, error)
 
@@ -126,6 +122,7 @@ func newPrivileged(cfg Config, log *slog.Logger) (privileged, error) {
 		Restic: cfg.Restic, StateDir: cfg.DataDir, AgentDataDir: cfg.DataDir,
 		ReleaseKey: cfg.ReleaseKey, UpdateExe: cfg.UpdateExe, Restart: cfg.Restart,
 		DockerSocket: cmp.Or(cfg.DockerUpstream, cfg.DockerSocket),
+		Isolate:      cfg.Isolate, WorkerExe: cfg.WorkerExe, AgentUID: os.Geteuid(),
 	}, log)
 }
 
@@ -168,75 +165,17 @@ func (m *sitesManager) hasUser(id int64) bool {
 // Ensure makes the site exist: user, folders, PHP pool (with dbSocket, if
 // set, as its default MariaDB socket).
 func (m *sitesManager) Ensure(ctx context.Context, id int64, phpVersion string, settings php.Settings, dbSocket string) error {
-	d, err := m.dir(id)
-	if err != nil {
+	if _, err := m.dir(id); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(m.root, 0o755); err != nil {
-		return err
-	}
-	if fi, err := os.Lstat(d); err == nil && !fi.IsDir() {
-		return fmt.Errorf("%s exists and is not a directory", d)
-	}
-
-	uid, gid, wwwGID := -1, -1, -1
 	if m.isolate {
 		if err := m.hostIdentity(ctx); err != nil {
 			return fmt.Errorf("prepare host users: %w", err)
 		}
-		if uid, gid, err = m.priv.EnsureSiteUser(ctx, id); err != nil {
-			return err
-		}
-		if wwwGID, err = sysuser.LookupGroup(m.wwwGroup); err != nil {
-			return err
-		}
 	}
-
-	// The site's folder is in the root-owned sites folder; what is inside
-	// belongs to the site's user, who could swap a folder for a symlink
-	// meanwhile: it is reached through os.Root and changed through the
-	// open folder, never by path.
-	if err := os.Mkdir(d, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
+	// The helper makes the folders (and the site's user, who owns them).
+	if err := m.priv.EnsureSiteFolder(ctx, id); err != nil {
 		return err
-	}
-	r, err := os.OpenRoot(d)
-	if err != nil {
-		return err
-	}
-	defer r.Close()
-	layout := []struct {
-		name string
-		mode fs.FileMode
-		gid  int
-	}{
-		{".", 0o750 | fs.ModeSetgid, wwwGID},
-		{"public", 0o750 | fs.ModeSetgid, wwwGID},
-		{"logs", 0o750 | fs.ModeSetgid, wwwGID},
-		{"tmp", 0o700, gid},
-	}
-	for _, l := range layout {
-		if l.name != "." {
-			if err := r.Mkdir(l.name, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
-				return err
-			}
-		}
-		if !m.isolate {
-			continue
-		}
-		if err := ownDir(r, l.name, uid, l.gid, l.mode); err != nil {
-			return fmt.Errorf("%s: %w", filepath.Join(d, l.name), err)
-		}
-	}
-
-	s, err := m.open(id)
-	if err != nil {
-		return err
-	}
-	defer s.Close()
-	if entries, err := s.List("/public"); err == nil && len(entries) == 0 {
-		if err := s.WriteFile("/public/index.html", []byte(placeholderPage)); err != nil {
-			return err
-		}
 	}
 
 	if phpVersion == "" {
@@ -287,81 +226,20 @@ func (m *sitesManager) LaravelProcesses(ctx context.Context, req agentproto.Site
 // the trash directory rather than erasing them, so an accidental deletion
 // can be recovered by an operator.
 func (m *sitesManager) Delete(ctx context.Context, id int64) error {
-	d, err := m.dir(id)
-	if err != nil {
+	if _, err := m.dir(id); err != nil {
 		return err
 	}
 	m.stopWorker(id)
 	if err := m.priv.RemoveSitePHP(ctx, id); err != nil {
 		m.log.Warn("remove PHP pool", "site_id", id, "err", err)
 	}
-	if _, err := os.Lstat(d); err == nil {
-		trash := filepath.Join(m.root, trashDir)
-		if err := os.MkdirAll(trash, 0o700); err != nil {
-			return err
-		}
-		// The same site deleted twice within a second (a copy removed from
-		// a server and the site deleted) takes the next free second.
-		ts := time.Now().Unix()
-		dest := filepath.Join(trash, fmt.Sprintf("%d-%d", id, ts))
-		for _, err := os.Lstat(dest); err == nil; _, err = os.Lstat(dest) {
-			ts++
-			dest = filepath.Join(trash, fmt.Sprintf("%d-%d", id, ts))
-		}
-		if err := os.Rename(d, dest); err != nil {
-			return err
-		}
-		m.log.Info("site moved to trash", "site_id", id, "path", dest)
+	if err := m.priv.TrashSiteFolder(ctx, id); err != nil {
+		return err
 	}
 	if m.isolate {
 		return m.priv.DeleteSiteUser(ctx, id)
 	}
 	return nil
-}
-
-// ownDir gives the folder name in r its owner and mode, through the open
-// folder: a symlink put there instead cannot redirect the change (one
-// swapped in after the check leads, at most, to another folder of the
-// site).
-func ownDir(r *os.Root, name string, uid, gid int, mode fs.FileMode) error {
-	if fi, err := r.Lstat(name); err != nil || !fi.IsDir() {
-		return errors.New("not a directory")
-	}
-	f, err := r.Open(name)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if fi, err := f.Stat(); err != nil || !fi.IsDir() {
-		return errors.New("not a directory")
-	}
-	if err := f.Chown(uid, gid); err != nil {
-		return err
-	}
-	return f.Chmod(mode)
-}
-
-// open gives file access to a site. With isolation, everything created is
-// owned by the site's user so its PHP code can manage it.
-func (m *sitesManager) open(id int64) (*files.Site, error) {
-	d, err := m.dir(id)
-	if err != nil {
-		return nil, err
-	}
-	var s *files.Site
-	if m.isolate {
-		uid, _, lerr := sysuser.LookupUser(sysuser.SiteUser(id))
-		if lerr != nil {
-			return nil, fmt.Errorf("site %d has no system user", id)
-		}
-		s, err = files.OpenOwned(d, uid)
-	} else {
-		s, err = files.Open(d)
-	}
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("site %d does not exist on this server", id)
-	}
-	return s, err
 }
 
 // publicError strips absolute host paths from errors before they leave the
@@ -438,30 +316,6 @@ func (h hostPaths) text(s string) string {
 	return s
 }
 
-// removeTemps removes the sites' upload and copy temporaries last written
-// before before.
-func (m *sitesManager) removeTemps(ctx context.Context, before time.Time) {
-	entries, err := os.ReadDir(m.root)
-	if err != nil {
-		return
-	}
-	for _, e := range entries {
-		id, err := strconv.ParseInt(e.Name(), 10, 64)
-		if err != nil || id <= 0 || !e.IsDir() || ctx.Err() != nil {
-			continue
-		}
-		s, err := files.Open(filepath.Join(m.root, e.Name()))
-		if err != nil {
-			continue
-		}
-		n, err := s.RemoveTemps(before)
-		s.Close()
-		if n > 0 || err != nil {
-			m.log.Info("removed leftover temporary files", "site_id", id, "files", n, "err", err)
-		}
-	}
-}
-
 // janitor aborts uploads abandoned by the panel (e.g. browser closed),
 // cleans up, and has the sites' PHP run its current code. Every minute: a
 // security update of PHP must reach the sites soon.
@@ -487,10 +341,14 @@ func (m *sitesManager) janitor(ctx context.Context) {
 			}
 		}
 		if m.root != "" {
-			m.cleanTrash(time.Now())
+			if err := m.priv.CleanTrash(ctx); err != nil {
+				m.log.Warn("clean the trash", "err", err)
+			}
 			if time.Since(swept) >= tempSweepEvery {
 				swept = time.Now()
-				m.removeTemps(ctx, swept.Add(-tempKeep))
+				if _, err := m.priv.RemoveTemps(ctx, swept.Add(-tempKeep)); err != nil {
+					m.log.Warn("remove leftover temporary files", "err", err)
+				}
 			}
 		}
 		m.sweepWorkers(false)

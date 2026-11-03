@@ -1,9 +1,9 @@
 //go:build !linux
 
-package agent
+package privhelper
 
 import "syscall"
 
 // dieWithParent: only Linux has it; a worker also leaves when its input
-// (the agent) closes.
+// closes.
 func dieWithParent(*syscall.SysProcAttr) {}

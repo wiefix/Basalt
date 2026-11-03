@@ -3,8 +3,11 @@ package privhelper
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/php"
@@ -122,4 +125,42 @@ func (h *Helper) RestartUpdatedPHP(context.Context) ([]int64, error) {
 		ids = []int64{}
 	}
 	return ids, err
+}
+
+// MsgSiteDBSocket hands the socket of a site's database the agent serves
+// (SiteDBSocket) to the site's user (SiteRequest): its PHP alone may use
+// it.
+const MsgSiteDBSocket = "site_db_socket"
+
+// GiveSiteDBSocket makes the socket of the site's database the site
+// user's, mode 0600. Only a socket of the agent's in the sockets' folder
+// is changed, never through a link.
+func (h *Helper) GiveSiteDBSocket(_ context.Context, id int64) error {
+	if id <= 0 {
+		return errSiteID
+	}
+	uid, _, err := sysuser.LookupUser(sysuser.SiteUser(id))
+	if err != nil {
+		return fmt.Errorf("site %d has no system user", id)
+	}
+	r, err := os.OpenRoot(h.cfg.SiteDBDir)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	name := filepath.Base(SiteDBSocket(h.cfg.SiteDBDir, id))
+	fi, err := r.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if fi.Mode().Type() != fs.ModeSocket {
+		return fmt.Errorf("%s is not a socket", name)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != h.cfg.AgentUID && int(st.Uid) != uid {
+		return fmt.Errorf("%s is not the agent's", name)
+	}
+	if err := r.Lchown(name, uid, -1); err != nil {
+		return err
+	}
+	return r.Chmod(name, 0o600)
 }

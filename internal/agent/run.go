@@ -29,6 +29,7 @@ import (
 	"github.com/wiefix/basalt/internal/mailcheck"
 	"github.com/wiefix/basalt/internal/mariadb"
 	"github.com/wiefix/basalt/internal/pki"
+	"github.com/wiefix/basalt/internal/proxy"
 )
 
 const (
@@ -67,7 +68,8 @@ type Config struct {
 	// PeerListen is the address other servers' agents reach this one's
 	// tunnel at (empty: none).
 	PeerListen string
-	// Isolate runs each site as its own system user (Linux, root only).
+	// Isolate runs each site as its own system user (Linux; the agent is
+	// root or has the privileged helper).
 	Isolate bool
 	// WorkerExe is the binary started (as "<exe> site-worker …") for a
 	// site's file access with isolation; empty: this executable.
@@ -174,8 +176,8 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.Isolate && (runtime.GOOS != "linux" || os.Geteuid() != 0) {
-		return nil, errors.New("site isolation requires Linux and running as root")
+	if cfg.Isolate && (runtime.GOOS != "linux" || os.Geteuid() != 0 && cfg.HelperSocket == "") {
+		return nil, errors.New("site isolation requires Linux and running as root, or the privileged helper")
 	}
 	if cfg.WWWGroup == "" {
 		cfg.WWWGroup = "basalt-www"
@@ -232,7 +234,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 	a.restartDB = cfg.RestartMariaDB
 	a.tunnel = newTunnelManager(cfg, func() tls.Certificate { return a.identity().tlsCertificate() },
 		func() *x509.Certificate { return a.identity().ca }, log.With("subsystem", "tunnel"))
-	a.siteDB = newSiteDBs(cfg, a.tunnel, log.With("subsystem", "sitedb"))
+	a.siteDB = newSiteDBs(cfg, a.tunnel, a.sites.priv, log.With("subsystem", "sitedb"))
 	a.link.set(false) // not connected since the agent started
 	a.tunnel.status = a.panelStatus
 	return a, nil
@@ -253,10 +255,33 @@ const removedHelp = "sites keep running; to remove Basalt from this server run t
 
 // Run keeps a connection to the panel open until ctx is cancelled,
 // reconnecting with jittered exponential backoff.
+// mariadbAccount has the helper give the agent's user (not root) its
+// account of MariaDB, once MariaDB runs here: the agent signs in with it.
+func (a *Agent) mariadbAccount(ctx context.Context) {
+	if a.mysql == "" || mariadb.User() == "root" {
+		return
+	}
+	for {
+		if mariadb.Available(a.mysql) {
+			err := a.sites.priv.MariaDBAccount(ctx)
+			if err == nil {
+				return
+			}
+			a.log.Warn("MariaDB account of the agent", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(30 * time.Second):
+		}
+	}
+}
+
 func (a *Agent) Run(ctx context.Context) error {
 	// The proxy is managed independently of the panel connection.
 	go a.proxy.run(ctx)
 	go a.sites.janitor(ctx)
+	go a.mariadbAccount(ctx)
 	go a.sftp.run(ctx)
 	go a.dns.run(ctx)
 	go a.tunnel.run(ctx, a.tunnel.open())
@@ -494,7 +519,7 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return nil, err
 		}
-		return certStatus(a.proxy.opts.Dir, req)
+		return certStatus(ctx, proxy.TLSLogPath(a.proxy.opts.Dir), a.proxy.admin.Certificates, req)
 	case agentproto.TypeMailCert:
 		var req agentproto.MailCert
 		if err := json.Unmarshal(payload, &req); err != nil {
@@ -722,25 +747,20 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return nil, err
 		}
-		resp, err := a.sites.syncRead(req)
+		resp, err := a.sites.syncRead(ctx, req)
 		return resp, publicError(err)
 	case agentproto.TypeSiteSyncWrite:
 		var req agentproto.SiteSyncWriteRequest
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return nil, err
 		}
-		return struct{}{}, publicError(a.sites.syncWrite(req))
+		return struct{}{}, publicError(a.sites.syncWrite(ctx, req))
 	case agentproto.TypeSiteTrash:
 		var req agentproto.SiteTrash
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return nil, err
 		}
-		if req.Restore != "" {
-			if err := a.sites.restoreTrash(ctx, req.Restore, req.SiteID); err != nil {
-				return nil, err
-			}
-		}
-		return a.sites.trash(ctx, req.Remove)
+		return a.sites.priv.Trash(ctx, req)
 	case agentproto.TypeSiteUsage:
 		var req agentproto.SiteUsageRequest
 		if err := json.Unmarshal(payload, &req); err != nil {

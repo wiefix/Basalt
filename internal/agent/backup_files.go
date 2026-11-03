@@ -320,7 +320,7 @@ func (b *backupManager) RestoreCopy(ctx context.Context, req agentproto.Snapshot
 	if node.Type != "dir" && node.Type != "file" {
 		return agentproto.RestoreCopyResponse{}, errors.New("only files and folders can be restored")
 	}
-	site, err := b.sites.open(req.SiteID)
+	site, err := b.sites.files(ctx, req.SiteID)
 	if err != nil {
 		return agentproto.RestoreCopyResponse{}, err
 	}
@@ -352,7 +352,7 @@ func (b *backupManager) RestoreCopy(ctx context.Context, req agentproto.Snapshot
 // -2, -3… when taken).
 func restoredName() string { return "restored-" + time.Now().UTC().Format("20060102-150405") }
 
-func (b *backupManager) restoreInto(ctx context.Context, r resticRun, repo agentproto.BackupRepo, site *files.Site, id, abs, rel, typ, folder string) (*files.ExtractResult, error) {
+func (b *backupManager) restoreInto(ctx context.Context, r resticRun, repo agentproto.BackupRepo, site *siteFS, id, abs, rel, typ, folder string) (*files.ExtractResult, error) {
 	dest, base := folder, path.Base(rel)
 	if typ == "dir" && rel != "" {
 		dest = folder + "/" + base

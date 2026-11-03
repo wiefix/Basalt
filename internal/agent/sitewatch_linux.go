@@ -94,6 +94,12 @@ func (b *inotifyBackend) addTreeLocked(site int64, dir string, top bool) error {
 			if p != dir && errors.Is(err, fs.ErrNotExist) {
 				return nil // gone meanwhile
 			}
+			if p != dir && errors.Is(err, fs.ErrPermission) {
+				// A folder the site's user closed to the web group (the
+				// agent is in it, not root): its changes wait for the
+				// panel's round.
+				return nil
+			}
 			return err
 		}
 		if !d.IsDir() {
@@ -108,7 +114,7 @@ func (b *inotifyBackend) addTreeLocked(site int64, dir string, top bool) error {
 		}
 		wd, err := syscall.InotifyAddWatch(b.fd(), p, inotifyMask)
 		if err != nil {
-			if p != dir && (errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOTDIR)) {
+			if p != dir && (errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EACCES)) {
 				return fs.SkipDir
 			}
 			return err

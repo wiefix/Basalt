@@ -173,9 +173,11 @@ func (m *proxyManager) persist(d proxy.Desired, cfg []byte) error {
 		return err
 	}
 	// The proxy loads this file on its own start. It may run as its own
-	// user: hand the file to whoever owns the proxy directory.
+	// user: the agent as root hands the file to whoever owns the proxy
+	// directory; otherwise the proxy reads it as a member of its group,
+	// which the folder hands to new files.
 	path := proxy.ConfigPath(m.opts.Dir)
-	if err := writeAtomic(path, cfg, 0o600); err != nil {
+	if err := writeAtomic(path, cfg, 0o640); err != nil {
 		return err
 	}
 	return chownLike(path, m.opts.Dir)

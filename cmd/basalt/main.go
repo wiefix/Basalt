@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -383,19 +384,20 @@ func runAgent(ctx context.Context, args []string, stderr io.Writer) error {
 	log = log.With("component", "agent")
 
 	a, err := agent.New(agent.Config{
-		DataDir:         cfg.DataDir,
-		ProxyDir:        cfg.ProxyDir,
-		SitesRoot:       cfg.SitesRoot,
-		HTTPPort:        cfg.HTTPPort,
-		HTTPSPort:       cfg.HTTPSPort,
-		ACMEDirectory:   cfg.ACMEDirectory,
-		ACMECARoots:     splitList(cfg.ACMECARoot),
-		ACMEResolvers:   splitList(cfg.ACMEResolvers),
-		Resolvers:       splitList(cfg.Resolvers),
-		SFTPListen:      cfg.SFTPListen,
-		DNSListen:       cfg.DNSListen,
-		PeerListen:      cfg.PeerListen,
-		Isolate:         cfg.Isolate == "on" || (cfg.Isolate == "auto" && runtime.GOOS == "linux" && os.Geteuid() == 0),
+		DataDir:       cfg.DataDir,
+		ProxyDir:      cfg.ProxyDir,
+		SitesRoot:     cfg.SitesRoot,
+		HTTPPort:      cfg.HTTPPort,
+		HTTPSPort:     cfg.HTTPSPort,
+		ACMEDirectory: cfg.ACMEDirectory,
+		ACMECARoots:   splitList(cfg.ACMECARoot),
+		ACMEResolvers: splitList(cfg.ACMEResolvers),
+		Resolvers:     splitList(cfg.Resolvers),
+		SFTPListen:    cfg.SFTPListen,
+		DNSListen:     cfg.DNSListen,
+		PeerListen:    cfg.PeerListen,
+		Isolate: cfg.Isolate == "on" || (cfg.Isolate == "auto" && runtime.GOOS == "linux" &&
+			(os.Geteuid() == 0 || cfg.HelperSocket != "")),
 		ProxyUser:       cfg.ProxyUser,
 		HelperSocket:    cfg.HelperSocket,
 		MySQLSocket:     cfg.MySQLSocket,
@@ -470,9 +472,19 @@ func runAgentHelper(ctx context.Context, args []string, stderr io.Writer) error 
 	if os.Geteuid() != 0 {
 		return errors.New("the privileged helper runs as root")
 	}
+	agentUser := "root"
+	if cfg.AgentUID != 0 {
+		u, err := user.LookupId(strconv.Itoa(cfg.AgentUID))
+		if err != nil {
+			return fmt.Errorf("the agent's user %d: %w", cfg.AgentUID, err)
+		}
+		agentUser = u.Username
+	}
+	// The helper is root on Linux: the sites have their own users.
 	h, err := privhelper.New(privhelper.Config{SitesRoot: cfg.SitesRoot, WWWGroup: cfg.WWWGroup, ProxyUser: cfg.ProxyUser,
 		StateDir: cfg.StateDir, AgentDataDir: cfg.AgentDataDir, Restic: cfg.Restic, ReleaseKey: cfg.ReleaseKey,
-		DockerSocket: cfg.DockerSocket}, log)
+		DockerSocket: cfg.DockerSocket, Isolate: runtime.GOOS == "linux", AgentUser: agentUser, AgentUID: cfg.AgentUID,
+		MySQLSocket: cfg.MySQLSocket}, log)
 	if err != nil {
 		return err
 	}

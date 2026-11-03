@@ -46,6 +46,24 @@ func (h *Helper) WriteMariaDBConfig(_ context.Context, c MariaDBConfig) error {
 	return writeFile(path, mariadb.Config(c.ServerID, c.Filters), 0o644)
 }
 
+// MariaDBAccount gives the agent's system user (when not root) an account
+// of MariaDB on the server's socket (mariadb.AgentAccount); the agent signs
+// in with it.
+func (h *Helper) MariaDBAccount(ctx context.Context) error {
+	if h.cfg.AgentUser == "" || h.cfg.AgentUser == "root" {
+		return nil
+	}
+	if !mariadb.Available(h.cfg.MySQLSocket) {
+		return errors.New("MariaDB is not running on this server")
+	}
+	db, err := mariadb.Open(h.cfg.MySQLSocket)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.AgentAccount(ctx, h.cfg.AgentUser)
+}
+
 // RestartMariaDB restarts MariaDB (its binary log only starts with it).
 func (h *Helper) RestartMariaDB(ctx context.Context) error {
 	if _, err := os.Stat("/run/systemd/system"); err != nil {

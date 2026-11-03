@@ -1,5 +1,8 @@
 // Package mariadb manages per-site databases on the host's MariaDB (or
-// MySQL) server, connecting as root over the local unix socket.
+// MySQL) server, connecting over the local unix socket as the account of
+// the process's own system user (unix_socket authentication): root's, or
+// the one the agent's privileged helper makes for the agent's user
+// (AgentAccountSQL).
 //
 // Identifiers cannot be bound as query parameters, so database and user
 // names are restricted to [a-z0-9_] and validated before being quoted.
@@ -12,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"regexp"
 	"strings"
 	"time"
@@ -35,7 +39,7 @@ func Open(socket string) (*Server, error) {
 	cfg := mysql.NewConfig()
 	cfg.Net = "unix"
 	cfg.Addr = socket
-	cfg.User = "root"
+	cfg.User = User()
 	cfg.InterpolateParams = true // CREATE USER / GRANT cannot be prepared
 	cfg.Timeout = 5 * time.Second
 	cfg.ReadTimeout = 30 * time.Second
@@ -49,6 +53,36 @@ func Open(socket string) (*Server, error) {
 	db.SetConnMaxIdleTime(time.Minute)
 	return &Server{db: db}, nil
 }
+
+// User is the MariaDB account this process signs in as: its system user's
+// name (root when that cannot be read).
+func User() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return "root"
+}
+
+// AgentAccount creates the account of the system user name, signing in
+// over the socket only, with every right (the agent creates the sites'
+// databases and users, and replicates them): what root's account is to
+// root, for a user that is not root.
+func (s *Server) AgentAccount(ctx context.Context, name string) error {
+	if !accountRE.MatchString(name) {
+		return fmt.Errorf("invalid account name %q", name)
+	}
+	for _, q := range []string{
+		"CREATE USER IF NOT EXISTS ?@'localhost' IDENTIFIED VIA unix_socket",
+		"GRANT ALL PRIVILEGES ON *.* TO ?@'localhost' WITH GRANT OPTION",
+	} {
+		if _, err := s.db.ExecContext(ctx, q, name); err != nil {
+			return fmt.Errorf("account %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+var accountRE = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 
 // Available reports whether a socket exists at path.
 func Available(socket string) bool {

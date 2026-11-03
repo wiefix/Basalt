@@ -43,8 +43,12 @@ echo "$OUT"
 case "$OUT" in *"Ready to install"*"Agents:  $PANELIP:8443"*"Basalt is running"*) ;; *) echo "the guided install did not ask or finish"; exit 6 ;; esac
 # The installer's service starts the agent: no advice to start it by hand.
 case "$OUT" in *"start the agent with"*) echo "the installer tells to start the agent by hand"; exit 6 ;; esac
-echo "### a second run without --agent-host keeps it"
+echo "### a second run without --agent-host keeps it, and takes an agent of root (before 0.10) to its own user"
+# As an agent of root left them: its data root's, the proxy's folder private.
+docker exec basalt-panel sh -c 'systemctl stop basalt-agent && chown -R root:root /var/lib/basalt/agent && chmod 0700 /var/lib/basalt/proxy'
 docker exec basalt-panel sh /deploy/install.sh panel --binary /dist/basalt-linux-$ARCH >/dev/null
+[ "$(docker exec basalt-panel stat -c '%U %a' /var/lib/basalt/agent /var/lib/basalt/agent/agent.json /var/lib/basalt/proxy | tr '\n' ' ')" = "basalt-agent 700 basalt-agent 600 basalt-proxy 2770 " ] ||
+  { docker exec basalt-panel stat -c '%n %U %a' /var/lib/basalt/agent /var/lib/basalt/agent/agent.json /var/lib/basalt/proxy; echo "the re-run did not hand the agent's data to its user"; exit 1; }
 docker exec basalt-panel grep -q -- "--agent-url https://$PANELIP:8443 " /etc/systemd/system/basalt-server.service
 docker exec basalt-panel sh /deploy/install.sh panel --agent-host 'a;b' >/dev/null 2>&1 && exit 5
 
@@ -69,6 +73,11 @@ docker exec basalt-node1 sh -c "$CMD --with-php --with-mariadb --with-docker --w
 docker exec basalt-node1 systemctl is-active basalt-proxy basalt-agent-helper basalt-agent
 docker exec basalt-node1 sh -c 'git --version && docker buildx version | cut -d" " -f1-2' 
 docker exec basalt-node1 ps -o user=,comm= -C basalt | sort | uniq -c
+echo "### the agent is not root: its user, no capability but binding low ports"
+APID=$(docker exec basalt-node1 systemctl show -p MainPID --value basalt-agent.service)
+[ "$(docker exec basalt-node1 ps -o user= -p "$APID")" = basalt-agent ] || { echo "the agent runs as $(docker exec basalt-node1 ps -o user= -p "$APID")"; exit 1; }
+docker exec basalt-node1 grep -E '^(Uid|Groups|CapEff|CapBnd)' /proc/$APID/status | sed 's/^/  /'
+[ "$(docker exec basalt-node1 sed -n 's/^CapEff:\t//p' /proc/$APID/status)" = 0000000000000400 ] || { echo "the agent has more than CAP_NET_BIND_SERVICE"; exit 1; }
 echo "### a standby panel on its own server, from its one-line command"
 SBCMD=$($API -d '{"name":"spare"}' http://127.0.0.1:8080/api/v1/standbys | python3 -c 'import sys,json; print(json.load(sys.stdin)["enrollment"]["install_command"])')
 case "$SBCMD" in *"| sh -s -- standby --panel https://$PANELIP:8443 "*"--agent-token "*) ;; *) echo "standby command: $SBCMD"; exit 5 ;; esac
@@ -129,9 +138,13 @@ for i in $(seq 30); do
   docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " && break; sleep 1
 done
 docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/; echo
+docker exec basalt-panel curl -sk --resolve shop.test:443:$NODEIP https://shop.test/ | grep -q "php " ||
+  { docker exec basalt-node1 journalctl -u basalt-agent -u basalt-agent-helper --no-pager -o cat | tail -20; echo "the file manager did not put the page in place"; exit 1; }
 echo "### the site's user was made by the privileged helper, which answers only root"
 docker exec basalt-node1 journalctl -u basalt-agent-helper --no-pager -o cat | grep -q "site user created.*\"site_id\":$SITE" || { echo "the helper did not create the site user"; exit 1; }
-[ "$(docker exec basalt-node1 stat -c '%U %a' /run/basalt-helper/helper.sock)" = "root 600" ] || { echo "the helper's socket is open to others"; exit 1; }
+[ "$(docker exec basalt-node1 stat -c '%U %a' /run/basalt-helper/helper.sock)" = "basalt-agent 600" ] || { echo "the helper's socket is open to others"; exit 1; }
+# The agent signs in to MariaDB with its own account (unix_socket), which the helper made.
+docker exec basalt-node1 mariadb -N -e "SELECT CONCAT(user, ' ', plugin) FROM mysql.user WHERE user = 'basalt-agent'" | grep -qx "basalt-agent unix_socket" || { echo "no MariaDB account of the agent"; exit 1; }
 docker exec basalt-node1 runuser -u basalt-proxy -- python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.connect("/run/basalt-helper/helper.sock")' 2>/dev/null && { echo "another user reached the helper's socket"; exit 1; }
 echo "### the site's backup and restore: restic runs in the helper, within its sandbox"
 SST=$($API -d '{"name":"sites","kind":"local","path":"/var/backups/basalt-sites"}' http://127.0.0.1:8080/api/v1/backup-storages | python3 -c 'import sys,json; print(json.load(sys.stdin)["storage"]["id"])')
@@ -297,8 +310,8 @@ docker exec basalt-panel curl -sk --resolve auto.test:443:$NODEIP https://auto.t
 echo "### Docker only through the helper's checking proxy; BuildKit made by the helper"
 APID=$(docker exec basalt-node1 systemctl show -p MainPID --value basalt-agent.service)
 [ "$(docker exec basalt-node1 stat -c '%a' /proc/$APID/root/run/docker.sock)" = 0 ] || { echo "the agent can reach Docker's own socket"; exit 1; }
-[ "$(docker exec basalt-node1 stat -c '%U %a' /run/basalt-helper/docker.sock)" = "root 600" ] || { echo "the helper's Docker socket is open to others"; exit 1; }
-CODE=$(docker exec basalt-node1 curl -s -o /dev/null -w '%{http_code}' --unix-socket /run/basalt-helper/docker.sock -H 'Content-Type: application/json' \
+[ "$(docker exec basalt-node1 stat -c '%U %a' /run/basalt-helper/docker.sock)" = "basalt-agent 600" ] || { echo "the helper's Docker socket is open to others"; exit 1; }
+CODE=$(docker exec basalt-node1 runuser -u basalt-agent -- curl -s -o /dev/null -w '%{http_code}' --unix-socket /run/basalt-helper/docker.sock -H 'Content-Type: application/json' \
   -d '{"Image":"busybox","HostConfig":{"Binds":["/:/host"]}}' http://docker/v1.44/containers/create)
 [ "$CODE" = 403 ] || { echo "the helper's Docker proxy let a bind mount of / through ($CODE)"; exit 1; }
 [ "$(docker exec basalt-node1 docker inspect -f '{{.HostConfig.Privileged}} {{.HostConfig.UsernsMode}}' basalt-buildkit)" = "true host" ] || { echo "the BuildKit container is not the helper's"; exit 1; }
@@ -333,7 +346,7 @@ docker exec basalt-panel dig +noall +answer @$NODEIP panel.zone.test A
 [ "$(docker exec basalt-panel dig +short @$NODEIP panel.zone.test A)" = "$PANELIP" ] || { echo "no record for the panel's domain"; exit 1; }
 echo "### DNS-01 relay: the proxy user asks the agent, the panel publishes the TXT record"
 docker exec basalt-node1 stat -c '  %n %U %a' /var/lib/basalt/proxy/acme.sock
-[ "$(docker exec basalt-node1 stat -c '%U %a' /var/lib/basalt/proxy/acme.sock)" = "basalt-proxy 600" ] || { echo "acme socket not private to the proxy"; exit 1; }
+[ "$(docker exec basalt-node1 stat -c '%U:%G %a' /var/lib/basalt/proxy/acme.sock)" = "basalt-agent:basalt-proxy 660" ] || { echo "acme socket not private to the proxy and the agent"; exit 1; }
 docker exec basalt-node1 runuser -u basalt-proxy -- curl -fsS --unix-socket /var/lib/basalt/proxy/acme.sock \
   -X POST -d '{"name":"_acme-challenge.shop.test","value":"relay-token"}' http://agent/acme-challenge
 [ "$(docker exec basalt-panel dig +short @$NODEIP _acme-challenge.shop.test TXT)" = '"relay-token"' ] || { echo "challenge not published"; exit 1; }
@@ -656,7 +669,7 @@ docker exec basalt-node1 sh -c '! systemctl is-active -q basalt-agent basalt-age
 docker exec basalt-node1 sh /deploy/install.sh uninstall --purge --yes
 docker exec basalt-node1 sh -c '
   ! test -e /srv/basalt && ! test -e /var/lib/basalt || exit 1
-  ! id basalt-s'$SITE' 2>/dev/null && ! id basalt 2>/dev/null && ! id basalt-proxy 2>/dev/null || exit 2
+  ! id basalt-s'$SITE' 2>/dev/null && ! id basalt 2>/dev/null && ! id basalt-proxy 2>/dev/null && ! id basalt-agent 2>/dev/null || exit 2
   ! ls /etc/php/*/fpm/pool.d/basalt-site-* /etc/systemd/system/basalt-php-site-* 2>/dev/null && ! test -e /etc/basalt || exit 3
   ! systemctl list-units --all --plain --no-legend "basalt-php-site-*" | grep -q . || exit 7
   [ -z "$(docker ps -aq --filter label=basalt.app)" ] && [ -z "$(docker volume ls -q --filter label=basalt.app)" ] && [ -z "$(docker network ls -q --filter label=basalt.app)" ] || exit 4

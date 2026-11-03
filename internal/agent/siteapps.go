@@ -38,7 +38,7 @@ func (a *Agent) siteInstall(ctx context.Context, req agentproto.SiteInstall) (ag
 		strings.ContainsAny(req.DBPassword, "'\\\x00\n") || len(req.DBPassword) > 128 {
 		return agentproto.SiteInstallResponse{}, errors.New("invalid database credentials")
 	}
-	site, err := a.sites.open(req.SiteID)
+	site, err := a.sites.files(ctx, req.SiteID)
 	if err != nil {
 		return agentproto.SiteInstallResponse{}, err
 	}
@@ -67,7 +67,7 @@ func (a *Agent) siteInstall(ctx context.Context, req agentproto.SiteInstall) (ag
 // wp-cli, as the site's user, make its tables and admin account. Only then
 // do its files move into public/: nobody ever finds WordPress's installer
 // open. A failure leaves the site as it was.
-func (a *Agent) installWordPress(ctx context.Context, req agentproto.SiteInstall, site *files.Site, placeholder bool) (agentproto.SiteInstallResponse, error) {
+func (a *Agent) installWordPress(ctx context.Context, req agentproto.SiteInstall, site *siteFS, placeholder bool) (agentproto.SiteInstallResponse, error) {
 	if a.sitePHP == nil && !slices.Contains(a.sites.PHPVersions(), req.PHPVersion) {
 		return agentproto.SiteInstallResponse{}, fmt.Errorf("PHP %q is not installed on this server", req.PHPVersion)
 	}

@@ -6,33 +6,35 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"net"
 	"os"
-	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/files"
+	"github.com/wiefix/basalt/internal/privhelper"
 	"github.com/wiefix/basalt/internal/sftpd"
 	"github.com/wiefix/basalt/internal/siteworker"
-	"github.com/wiefix/basalt/internal/sysuser"
 )
 
 // workerIdle is how long a site's file worker lives without requests (and
 // without an upload in progress).
 const workerIdle = 10 * time.Minute
 
-// siteWorker gives the file manager access to one site. With isolation it
-// is a "basalt site-worker" process of the site's user, so the requests of
-// the file manager are carried out with the site user's rights, not root's;
-// otherwise the same handler runs in the agent.
+// siteWorker gives the agent access to one site's files: the file
+// manager's requests and the agent's own work in the site's folder (copies
+// between servers, applications put in place, backups restored as copies).
+// With isolation it is a "basalt site-worker" process of the site's user,
+// started by the privileged helper, so all of it is carried out with the
+// site user's rights; otherwise the same handler runs in the agent.
 type siteWorker struct {
-	local *siteworker.Files
+	local *siteworker.Handler
 
-	peer *agentproto.Peer
-	cmd  *exec.Cmd
-	done chan struct{}
+	peer   *agentproto.Peer
+	cancel context.CancelFunc
+	done   chan struct{}
 
 	lastUsed time.Time
 	uploads  int
@@ -56,8 +58,66 @@ func (w *siteWorker) stop() {
 		w.local.Close()
 		return
 	}
-	w.cmd.Process.Kill()
+	w.cancel()
 	<-w.done
+}
+
+// call sends a request to the worker (a stream when fn is set: its frames
+// go to fn).
+func (w *siteWorker) call(ctx context.Context, msgType string, req, resp any, fn func(json.RawMessage) error) error {
+	if w.local == nil {
+		var err error
+		if fn != nil {
+			err = w.peer.Stream(ctx, msgType, req, resp, fn)
+		} else {
+			err = w.peer.Call(ctx, msgType, req, resp)
+		}
+		if re := (*agentproto.RemoteError)(nil); errors.As(err, &re) {
+			return errors.New(re.Msg) // the panel reads the worker's own message
+		} else if err != nil {
+			return fmt.Errorf("site file worker: %w", err)
+		}
+		return nil
+	}
+	// In this process: the same handler, through JSON as over the pipe.
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	if fn != nil {
+		ctx = agentproto.WithStreamSender(ctx, func(v any) error {
+			b, err := json.Marshal(v)
+			if err != nil {
+				return err
+			}
+			return fn(b)
+		})
+	}
+	out, err := w.local.Handle(ctx, msgType, payload)
+	if err != nil {
+		return err
+	}
+	if resp == nil {
+		return nil
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, resp)
+}
+
+// callSite sends a request to the site's worker.
+func (m *sitesManager) callSite(ctx context.Context, id int64, msgType string, req, resp any, fn func(json.RawMessage) error) error {
+	w, err := m.worker(id)
+	if err != nil {
+		return err
+	}
+	err = w.call(ctx, msgType, req, resp, fn)
+	m.mu.Lock()
+	w.lastUsed = time.Now()
+	m.mu.Unlock()
+	return err
 }
 
 // handleFiles passes a file manager request to the site's worker.
@@ -66,18 +126,8 @@ func (m *sitesManager) handleFiles(ctx context.Context, req agentproto.FilesRequ
 	if err != nil {
 		return nil, err
 	}
-	var resp *agentproto.FilesResponse
-	if w.local != nil {
-		resp, err = w.local.Handle(ctx, req)
-	} else {
-		resp = &agentproto.FilesResponse{}
-		err = w.peer.Call(ctx, siteworker.MsgFiles, req, resp)
-		if re := (*agentproto.RemoteError)(nil); errors.As(err, &re) {
-			err = errors.New(re.Msg) // the panel reads the worker's own message
-		} else if err != nil {
-			err = fmt.Errorf("site file worker: %w", err)
-		}
-	}
+	resp := &agentproto.FilesResponse{}
+	err = w.call(ctx, siteworker.MsgFiles, req, resp, nil)
 	m.mu.Lock()
 	w.lastUsed = time.Now()
 	switch req.Op {
@@ -109,44 +159,36 @@ func (m *sitesManager) worker(id int64) (*siteWorker, error) {
 
 func (m *sitesManager) startWorker(id int64) (*siteWorker, error) {
 	now := time.Now()
+	if _, err := m.siteDir(id); err != nil {
+		return nil, err
+	}
 	if !m.isolate {
-		if _, err := m.siteDir(id); err != nil {
-			return nil, err
-		}
-		return &siteWorker{local: siteworker.NewFiles(func() (*files.Site, error) { return m.open(id) }), lastUsed: now}, nil
+		return &siteWorker{local: siteworker.NewHandler(func() (*files.Site, error) { return m.open(id) }), lastUsed: now}, nil
 	}
-	cmd, err := m.workerCommand(context.Background(), id, siteworker.ModeFiles)
+	ctx, cancel := context.WithCancel(context.Background())
+	conn, done, err := m.startProcess(ctx, id, privhelper.SiteProcess{SiteID: id, Worker: siteworker.ModeFiles})
 	if err != nil {
-		return nil, err
-	}
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
+		cancel()
 		return nil, fmt.Errorf("start site file worker: %w", err)
 	}
-	w := &siteWorker{cmd: cmd, done: make(chan struct{}), lastUsed: now}
-	w.peer = agentproto.NewPeer(stdout, stdin, nil, func(context.Context, string, json.RawMessage) (any, error) {
+	w := &siteWorker{cancel: cancel, done: make(chan struct{}), lastUsed: now}
+	w.peer = agentproto.NewPeer(conn, conn, nil, func(context.Context, string, json.RawMessage) (any, error) {
 		return nil, errors.New("the agent serves no requests of a site worker")
 	})
 	go func() {
 		err := w.peer.Run(context.Background())
-		cmd.Process.Kill()
-		werr := cmd.Wait()
+		cancel()
+		conn.Close()
+		perr := <-done
 		if !errors.Is(err, agentproto.ErrClosed) {
-			m.log.Warn("site file worker ended", "site_id", id, "err", err, "exit", werr)
+			m.log.Warn("site file worker ended", "site_id", id, "err", err, "exit", perr)
 		}
 		close(w.done)
 	}()
 	return w, nil
 }
 
-// siteDir is the directory of a site that exists on this server.
+// siteDir is the folder of a site that exists on this server.
 func (m *sitesManager) siteDir(id int64) (string, error) {
 	d, err := m.dir(id)
 	if err != nil {
@@ -158,34 +200,61 @@ func (m *sitesManager) siteDir(id int64) (string, error) {
 	return d, nil
 }
 
-// workerCommand is a worker process for the site, as the site's user with
-// no other group, an empty environment and in a session of its own (killed
-// whole when ctx ends), that dies with the agent.
-func (m *sitesManager) workerCommand(ctx context.Context, id int64, mode string) (*exec.Cmd, error) {
-	d, err := m.siteDir(id)
+// open gives the agent's own process access to a site's files: only
+// without isolation (with it, they belong to the site's user and its
+// worker reaches them).
+func (m *sitesManager) open(id int64) (*files.Site, error) {
+	d, err := m.dir(id)
 	if err != nil {
 		return nil, err
 	}
-	uid, gid, err := sysuser.LookupUser(sysuser.SiteUser(id))
+	s, err := files.Open(d)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("site %d does not exist on this server", id)
+	}
+	return s, err
+}
+
+// startProcess has the helper run a program as the site's user on a
+// socket whose other end it returns; what the program writes on standard
+// error goes to the agent's log. done tells how the program ended (it ends
+// with ctx); conn then reads to the end of what it wrote. The caller
+// closes conn.
+func (m *sitesManager) startProcess(ctx context.Context, id int64, req privhelper.SiteProcess) (*net.UnixConn, <-chan error, error) {
+	mine, theirs, err := privhelper.SocketPair()
 	if err != nil {
-		return nil, fmt.Errorf("site %d has no system user", id)
+		return nil, nil, err
 	}
-	if m.workerExe == "" {
-		return nil, errors.New("site file worker: agent executable unknown")
+	c, err := net.FileConn(mine)
+	mine.Close()
+	if err != nil {
+		theirs.Close()
+		return nil, nil, err
 	}
-	cmd := exec.CommandContext(ctx, m.workerExe, siteworker.Args(mode, d)...)
-	// HOME only so that libraries in the binary (Caddy) find no reason to
-	// complain at start; the worker reads and writes nothing there.
-	cmd.Dir, cmd.Env = "/", []string{"HOME=/nonexistent"}
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid:     true,
-		Credential: &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: []uint32{}},
+	conn := c.(*net.UnixConn)
+	errR, errW, err := os.Pipe()
+	if err != nil {
+		theirs.Close()
+		conn.Close()
+		return nil, nil, err
 	}
-	dieWithParent(cmd.SysProcAttr)
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = 5 * time.Second
-	cmd.Stderr = &workerLog{m: m, id: id}
-	return cmd, nil
+	go func() {
+		defer errR.Close()
+		io.Copy(&workerLog{m: m, id: id}, errR)
+	}()
+	done := make(chan error, 1)
+	go func() {
+		res, err := m.priv.SiteProcess(ctx, req, theirs, errW)
+		// Its ends of the socket and of the pipe are the program's alone:
+		// with them closed, the agent's ends see the program leave.
+		theirs.Close()
+		errW.Close()
+		if err == nil && res.Exit != 0 {
+			err = fmt.Errorf("exit status %d", res.Exit)
+		}
+		done <- err
+	}()
+	return conn, done, nil
 }
 
 // workerLog puts what a worker says on stderr into the agent's log.
@@ -246,25 +315,23 @@ func (m *sitesManager) serveSFTP(ctx context.Context, id int64, ch io.ReadWriteC
 		defer site.Close()
 		return sftpd.ServeSFTP(site, ch)
 	}
+	if _, err := m.siteDir(id); err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd, err := m.workerCommand(ctx, id, siteworker.ModeSFTP)
+	conn, done, err := m.startProcess(ctx, id, privhelper.SiteProcess{SiteID: id, Worker: siteworker.ModeSFTP})
 	if err != nil {
-		return err
-	}
-	cmd.Stdout = ch
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start site SFTP worker: %w", err)
 	}
+	defer conn.Close()
 	// The client closing the channel ends the worker's input; the worker
-	// leaving ends the session (the caller closes ch, which ends the copy).
+	// leaving ends the session (conn closes, which ends the copy to the
+	// client; the caller closes ch).
 	go func() {
-		io.Copy(stdin, ch)
-		stdin.Close()
+		io.Copy(conn, ch)
+		conn.CloseWrite()
 	}()
-	return cmd.Wait()
+	io.Copy(ch, conn)
+	return <-done
 }

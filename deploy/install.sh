@@ -276,15 +276,17 @@ if [ "$MODE" = uninstall ]; then
 			while read -r db; do mariadb -e "DROP DATABASE \`$db\`"; done
 		mariadb -N -e "SELECT user FROM mysql.user WHERE host = 'localhost' AND user REGEXP '^s[0-9]+_[a-z0-9_]+\$'" |
 			while read -r u; do mariadb -e "DROP USER '$u'@'localhost'"; done
+		mariadb -e "DROP USER IF EXISTS 'basalt-agent'@'localhost'" >/dev/null 2>&1 || true
 	fi
 	say "Removing site users and Basalt's data"
 	for u in $(getent passwd | cut -d: -f1 | grep -E '^basalt-s[0-9]+$' || true); do
 		pkill -u "$u" >/dev/null 2>&1 || true
 		userdel "$u" >/dev/null 2>&1 || true
 	done
-	rm -rf "$LIB" /srv/basalt /run/basalt
+	rm -rf "$LIB" /srv/basalt /run/basalt /etc/tmpfiles.d/basalt.conf
 	userdel basalt >/dev/null 2>&1 || true
 	userdel basalt-proxy >/dev/null 2>&1 || true
+	userdel basalt-agent >/dev/null 2>&1 || true
 	groupdel basalt-www >/dev/null 2>&1 || true
 	say "Basalt and its data are removed"
 	[ -d /var/backups/basalt ] && echo "  Backups kept in /var/backups/basalt."
@@ -438,9 +440,31 @@ ensure_user() { # name home
 getent group basalt-www >/dev/null || groupadd --system basalt-www
 ensure_user basalt-proxy "$LIB/proxy"
 usermod --append --groups basalt-www basalt-proxy
+# The agent runs as its own user: the web group lets it see the sites'
+# folders the proxy sees (to watch them for copies), the proxy's group its
+# logs, configuration and admin socket. The sites' files it reaches through
+# their users' workers, the rest through the privileged helper.
+ensure_user basalt-agent "$LIB/agent"
+usermod --append --groups basalt-www,basalt-proxy basalt-agent
 install -d -m 0755 "$LIB" /srv/basalt "$SITES"
-install -d -m 0700 -o root -g root "$LIB/agent"
-install -d -m 0700 -o basalt-proxy -g basalt-proxy "$LIB/proxy"
+install -d -m 0700 -o basalt-agent -g basalt-agent "$LIB/agent"
+# Agents before 0.10 ran as root: their data becomes the agent's user's.
+chown -R basalt-agent:basalt-agent "$LIB/agent"
+# The proxy's folder is its group's: setgid hands the group to what the
+# agent writes there (the configuration, the DNS-01 socket). Its storage
+# (keys) stays the proxy's own; the agent asks the proxy for certificates.
+install -d -m 2770 -o basalt-proxy -g basalt-proxy "$LIB/proxy"
+[ ! -d "$LIB/proxy/logs" ] || chmod 0750 "$LIB/proxy/logs"
+# /run/basalt: the sites' PHP-FPM sockets (root's folder, the helper's
+# pools), the sockets of the sites' databases the agent serves (its own).
+# Not the agent's RuntimeDirectory: systemd would hand everything in it,
+# the sites' sockets too, to the agent's user at each start.
+cat >/etc/tmpfiles.d/basalt.conf <<EOF
+d /run/basalt 0755 root root -
+d /run/basalt/php 0755 root root -
+d /run/basalt/db 0711 basalt-agent basalt-agent -
+EOF
+systemd-tmpfiles --create /etc/tmpfiles.d/basalt.conf
 if [ "$PANEL_HOST" -eq 1 ]; then
 	ensure_user basalt "$LIB/server"
 	install -d -m 0700 -o basalt -g basalt "$LIB/server"
@@ -567,11 +591,12 @@ Description=Basalt agent's privileged helper
 Before=basalt-agent.service
 
 [Service]
-ExecStart=$BIN agent-helper --socket /run/basalt-helper/helper.sock --agent-uid 0 --sites-root $SITES --proxy-user basalt-proxy --state-dir $LIB/helper --agent-data-dir $LIB/agent --docker-listen /run/basalt-helper/docker.sock --log-format json
+ExecStart=$BIN agent-helper --socket /run/basalt-helper/helper.sock --agent-uid $(id -u basalt-agent) --sites-root $SITES --proxy-user basalt-proxy --state-dir $LIB/helper --agent-data-dir $LIB/agent --docker-listen /run/basalt-helper/docker.sock --log-format json
 Restart=always
 RestartSec=2
 RuntimeDirectory=basalt-helper
-RuntimeDirectoryMode=0700
+# The agent reaches its two sockets (each its user's alone) in it.
+RuntimeDirectoryMode=0711
 StateDirectory=basalt/helper
 StateDirectoryMode=0700
 UMask=0022
@@ -582,7 +607,9 @@ UMask=0022
 # Laravel's processes, MariaDB). restic reaches S3 and SFTP storages.
 ProtectSystem=yes
 ReadWritePaths=$(dirname "$BIN")
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_AUDIT_WRITE
+# SETUID, SETGID and KILL: it starts the sites' processes as their users
+# (file workers, SFTP, PHP's CLI) and stops them.
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_SETUID CAP_SETGID CAP_KILL CAP_AUDIT_WRITE
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 RestrictNamespaces=yes
 SystemCallFilter=@system-service
@@ -614,24 +641,28 @@ After=network-online.target basalt-proxy.service basalt-agent-helper.service doc
 Wants=network-online.target basalt-proxy.service basalt-agent-helper.service
 
 [Service]
+User=basalt-agent
+Group=basalt-agent
+SupplementaryGroups=basalt-www basalt-proxy
 Environment=HOME=$LIB/agent
 ExecStart=$BIN agent --data-dir $LIB/agent --proxy-dir $LIB/proxy --sites-root $SITES --proxy-user basalt-proxy $AGENT_FLAGS --log-format json
 Restart=always
 RestartSec=2
-RuntimeDirectory=basalt
-RuntimeDirectoryPreserve=yes
-# Root, but only with the powers its work needs: managing the sites'
-# files (chown, setgid folders, reading everything for backups),
-# binding port 53, signalling PHP-FPM. No module loading, raw devices,
-# tracing, clock or network administration.
+# Not root: the sites' files it reaches through workers of their users,
+# what needs root (users, PHP, MariaDB's settings, restic, updates, Docker)
+# through the privileged helper. Its one power: binding port 53 (DNS) and
+# the database ports the panel opens.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ProtectSystem=strict
+ReadWritePaths=$LIB/agent $LIB/proxy /run/basalt
 # Docker only through the helper's checking proxy: Docker's and
-# containerd's own sockets are hidden (as they are when the agent starts).
+# containerd's own sockets are hidden.
 InaccessiblePaths=-/run/docker.sock -/run/docker -/run/containerd
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_KILL CAP_SETUID CAP_SETGID CAP_NET_BIND_SERVICE CAP_AUDIT_WRITE
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
-ProtectHome=read-only
+ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -640,6 +671,7 @@ ProtectClock=yes
 ProtectHostname=yes
 LockPersonality=yes
 RestrictRealtime=yes
+RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
@@ -684,6 +716,7 @@ if [ ! -f "$LIB/agent/agent.json" ] || [ -f "$LIB/agent/removed" ]; then
 	fi
 	# shellcheck disable=SC2086
 	"$BIN" agent enroll --data-dir "$LIB/agent" $ENROLL
+	chown -R basalt-agent:basalt-agent "$LIB/agent"
 fi
 
 systemctl enable --now basalt-proxy.service basalt-agent-helper.service basalt-agent.service >/dev/null 2>&1

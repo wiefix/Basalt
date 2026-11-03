@@ -9,9 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
@@ -96,7 +93,7 @@ func (a *Agent) MailCheck(ctx context.Context, req agentproto.MailCheck) (agentp
 // key never leaves the host.
 func (a *Agent) MailCert(ctx context.Context, req agentproto.MailCert) (agentproto.MailCertResponse, error) {
 	var out agentproto.MailCertResponse
-	chain, key, notAfter, err := proxyCertificate(a.proxy.opts.Dir, req.Hostname)
+	chain, key, notAfter, err := proxyCertificate(ctx, a.proxy.admin.Certificates, req.Hostname)
 	if err != nil {
 		return out, err
 	}
@@ -108,34 +105,26 @@ func (a *Agent) MailCert(ctx context.Context, req agentproto.MailCert) (agentpro
 	return out, err
 }
 
-// proxyCertificate finds the newest certificate the proxy holds for host
-// (any issuer) in its storage.
-func proxyCertificate(proxyDir, host string) (chain, key []byte, notAfter time.Time, err error) {
+// proxyCertificate is the newest certificate (and its key) the proxy
+// holds for host, from any issuer.
+func proxyCertificate(ctx context.Context, certs certSource, host string) (chain, key []byte, notAfter time.Time, err error) {
 	if mailserver.ValidHostname(host) != nil {
 		return nil, nil, notAfter, errors.New("invalid host name")
 	}
-	files, _ := filepath.Glob(filepath.Join(proxyDir, "storage", "certificates", "*", host, host+".crt"))
-	for _, f := range files {
-		c, err := os.ReadFile(f)
-		if err != nil {
-			continue
-		}
-		block, _ := pem.Decode(c)
-		if block == nil {
+	list, err := certs(ctx, []string{host}, true)
+	if err != nil {
+		return nil, nil, notAfter, err
+	}
+	for _, c := range list {
+		block, _ := pem.Decode(c.Chain)
+		if c.Name != host || block == nil || len(c.Key) == 0 {
 			continue
 		}
 		leaf, err := x509.ParseCertificate(block.Bytes)
-		if err != nil || !leaf.NotAfter.After(notAfter) {
-			continue
-		}
-		k, err := os.ReadFile(strings.TrimSuffix(f, ".crt") + ".key")
 		if err != nil {
 			continue
 		}
-		chain, key, notAfter = c, k, leaf.NotAfter
+		return c.Chain, c.Key, leaf.NotAfter, nil
 	}
-	if chain == nil {
-		return nil, nil, notAfter, errors.New("the proxy has no certificate for " + host + " yet")
-	}
-	return chain, key, notAfter, nil
+	return nil, nil, notAfter, errors.New("the proxy has no certificate for " + host + " yet")
 }

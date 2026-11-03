@@ -3,41 +3,59 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
-	"os/exec"
+	"io"
+	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
-	"github.com/wiefix/basalt/internal/sysuser"
+	"github.com/wiefix/basalt/internal/privhelper"
 )
 
 // maxRunOutput is how much of a program's output an error carries.
 const maxRunOutput = 2000
 
-// runAsSite runs a program as the site's system user (with isolation; as
-// the agent otherwise) in dir, with nothing but env and stdin, in a session
-// of its own that goes whole when ctx ends.
-func (m *sitesManager) runAsSite(ctx context.Context, id int64, dir string, env []string, stdin, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.Dir, cmd.Env = dir, env
-	cmd.Stdin = strings.NewReader(stdin)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	if m.isolate {
-		uid, gid, err := sysuser.LookupUser(sysuser.SiteUser(id))
-		if err != nil {
-			return fmt.Errorf("site %d has no system user", id)
-		}
-		// No supplementary groups: the site's own group only.
-		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(uid), Gid: uint32(gid), Groups: []uint32{}}
+// runSitePHPCLI runs the site's PHP CLI (php<version> args) as the site's
+// system user (with isolation; as the agent otherwise) in dir, a folder of
+// the site, with nothing but env and stdin: the privileged helper starts
+// it, in a session of its own that goes whole when ctx ends.
+func (m *sitesManager) runSitePHPCLI(ctx context.Context, id int64, dir string, env []string, stdin, version string, args ...string) error {
+	site, err := m.siteDir(id)
+	if err != nil {
+		return err
 	}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = 10 * time.Second
+	rel, err := filepath.Rel(site, dir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, "../") {
+		return errors.New("the working folder must be inside the site's folder")
+	}
+	conn, done, err := m.startProcess(ctx, id, privhelper.SiteProcess{SiteID: id, PHP: version, Dir: rel, Env: env, Args: args})
+	if err != nil {
+		return fmt.Errorf("start php%s: %w", version, err)
+	}
+	defer conn.Close()
+	go func() {
+		io.Copy(conn, strings.NewReader(stdin))
+		conn.CloseWrite()
+	}()
 	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
+	read := make(chan struct{})
+	go func() {
+		io.Copy(&out, io.LimitReader(conn, 1<<20))
+		io.Copy(io.Discard, conn)
+		close(read)
+	}()
+	err = <-done
+	// The program is gone (conn closed): what it wrote is all there.
+	select {
+	case <-read:
+	case <-time.After(5 * time.Second): // a child of it holds the socket
+		conn.Close()
+		<-read
+	}
+	if err != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("%s did not finish in time", name)
+			return fmt.Errorf("php%s did not finish in time", version)
 		}
 		return fmt.Errorf("%w: %s", err, tail(out.String(), maxRunOutput))
 	}

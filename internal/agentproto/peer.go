@@ -234,6 +234,12 @@ func StreamSender(ctx context.Context) func(v any) error {
 	return f
 }
 
+// WithStreamSender gives a handler called in-process (not through a Peer)
+// the function that receives its frames.
+func WithStreamSender(ctx context.Context, send func(v any) error) context.Context {
+	return context.WithValue(ctx, streamKey{}, send)
+}
+
 // serve runs the handler for one request or notification.
 func (p *Peer) serve(ctx context.Context, e *Envelope) {
 	if e.ID == 0 {

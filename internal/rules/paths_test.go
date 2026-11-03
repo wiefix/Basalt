@@ -45,22 +45,7 @@ var (
 // in it belong to root (0755, 0700): a site's user cannot put a symlink
 // there, only below its own folder.
 var sitePathsAllowed = map[string]string{
-	"internal/agent: sitesManager.Ensure os.MkdirAll":               "creates the sites folder itself",
-	"internal/agent: sitesManager.Ensure os.Lstat":                  "the site's own folder, in the root-owned sites folder",
-	"internal/agent: sitesManager.Ensure os.Mkdir":                  "the site's own folder, in the root-owned sites folder; what is inside goes through os.Root",
-	"internal/agent: sitesManager.Delete os.Lstat":                  "the site's folder and the trash entry, both in root-owned folders",
-	"internal/agent: sitesManager.Delete os.MkdirAll":               "the trash folder, in the root-owned sites folder",
-	"internal/agent: sitesManager.Delete os.Rename":                 "moves the site's folder (not into it) between root-owned folders",
 	"internal/agent: sitesManager.siteDir os.Lstat":                 "the site's own folder, in the root-owned sites folder; the worker opens it as the site's user",
-	"internal/agent: sitesManager.removeTemps os.ReadDir":           "lists the root-owned sites folder; each site is opened with files.Open (os.Root)",
-	"internal/agent: sitesManager.trash os.Lstat":                   "a trash entry, in the root-only trash folder",
-	"internal/agent: sitesManager.trash os.RemoveAll":               "a trash entry, in the root-only trash folder; RemoveAll does not follow symlinks",
-	"internal/agent: sitesManager.trash os.ReadDir":                 "lists the root-only trash folder",
-	"internal/agent: sitesManager.cleanTrash os.ReadDir":            "lists the root-only trash folder",
-	"internal/agent: sitesManager.cleanTrash os.RemoveAll":          "a trash entry, in the root-only trash folder; RemoveAll does not follow symlinks",
-	"internal/agent: sitesManager.restoreTrash os.Lstat":            "the trash entry and the new site's folder, both in root-owned folders",
-	"internal/agent: sitesManager.restoreTrash os.Rename":           "moves the folder (not into it) between root-owned folders; owners change through os.Root",
-	"internal/agent: diskUsage filepath.WalkDir":                    "only counts sizes: WalkDir does not follow symlinks, and a component swapped meanwhile only changes the count",
 	"internal/sftpd: LoadOrCreateHostKey os.ReadFile":               "the host key in the agent's data folder, not a site's",
 	"internal/sftpd: LoadOrCreateHostKey os.OpenFile":               "the host key in the agent's data folder, not a site's",
 	"internal/agent: inotifyBackend.addTreeLocked filepath.WalkDir": "only adds inotify watches (IN_DONT_FOLLOW | IN_ONLYDIR), read nothing and change nothing",

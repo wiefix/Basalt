@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
+	"github.com/wiefix/basalt/internal/proxy"
 )
 
 // writeCert stores a self-signed certificate where Caddy keeps the
@@ -33,6 +35,21 @@ func writeCert(t *testing.T, proxyDir, issuerDir, name, issuer string, notAfter 
 	os.WriteFile(filepath.Join(dir, name+".crt"), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)
 }
 
+// storedCerts reads the certificates as the proxy would.
+func storedCerts(dir string) certSource {
+	return func(_ context.Context, names []string, keys bool) ([]proxy.Certificate, error) {
+		var out []proxy.Certificate
+		for _, n := range names {
+			c, err := proxy.StoredCertificate(dir, n, keys)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, c)
+		}
+		return out, nil
+	}
+}
+
 func TestCertStatus(t *testing.T) {
 	dir := t.TempDir()
 	soon, later := time.Now().Add(10*24*time.Hour).Truncate(time.Second), time.Now().Add(80*24*time.Hour).Truncate(time.Second)
@@ -44,7 +61,7 @@ func TestCertStatus(t *testing.T) {
 		`{"level":"info","ts":1792250000,"logger":"tls.obtain","msg":"acquiring lock","identifier":"new.example.com"}`+"\n"+
 			`{"level":"error","ts":1792250001,"logger":"tls.obtain","msg":"could not get certificate from issuer","identifier":"new.example.com","error":"HTTP 400 urn:ietf:params:acme:error:dns - no valid A records"}`+"\n"+
 			"garbage\n"), 0o600)
-	resp, err := certStatus(dir, agentproto.CertStatus{Names: []string{"shop.example.com", "*.example.org", "new.example.com"}})
+	resp, err := certStatus(context.Background(), proxy.TLSLogPath(dir), storedCerts(dir), agentproto.CertStatus{Names: []string{"shop.example.com", "*.example.org", "new.example.com"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +74,7 @@ func TestCertStatus(t *testing.T) {
 		t.Fatalf("errors = %q %v / %q", c[2].Error, c[2].ErrorAt, c[0].Error)
 	}
 	for _, bad := range []string{"../etc", "Shop.example.com", "a/b.example.com", "*"} {
-		if _, err := certStatus(dir, agentproto.CertStatus{Names: []string{bad}}); err == nil {
+		if _, err := certStatus(context.Background(), proxy.TLSLogPath(dir), storedCerts(dir), agentproto.CertStatus{Names: []string{bad}}); err == nil {
 			t.Errorf("accepted %q", bad)
 		}
 	}

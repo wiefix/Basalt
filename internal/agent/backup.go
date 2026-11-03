@@ -255,7 +255,7 @@ func (b *backupManager) dumpCommand(name string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []string{bin, "--socket=" + b.mysql, "--user=root", "--single-transaction", "--quick", "--routines",
+	return []string{bin, "--socket=" + b.mysql, "--user=" + mariadb.User(), "--single-transaction", "--quick", "--routines",
 		"--events", "--triggers", "--hex-blob", "--default-character-set=utf8mb4", name}, nil
 }
 
@@ -360,7 +360,7 @@ func (b *backupManager) restoreDatabase(ctx context.Context, r resticRun, repo a
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, bin, "--socket="+b.mysql, "--user=root", "--default-character-set=utf8mb4",
+	cmd := exec.CommandContext(ctx, bin, "--socket="+b.mysql, "--user="+mariadb.User(), "--default-character-set=utf8mb4",
 		"--binary-mode", it.Item.Database)
 	if err := pipeSnapshot(ctx, r, repo, it.Snapshot, "/"+dumpFile(it.Item.Database), cmd); err != nil {
 		return fmt.Errorf("load the dump: %w", err)

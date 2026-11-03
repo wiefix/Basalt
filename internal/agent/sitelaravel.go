@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/wiefix/basalt/internal/agentproto"
-	"github.com/wiefix/basalt/internal/files"
 )
 
 // pinnedFile is a download whose SHA-256 is part of the agent.
@@ -64,7 +63,7 @@ func (a *Agent) runSitePHP(ctx context.Context, siteID int64, version, dir strin
 	if a.sitePHP != nil {
 		return a.sitePHP(ctx, siteID, version, dir, env, args, stdin)
 	}
-	return a.sites.runAsSite(ctx, siteID, dir, env, stdin, "/usr/bin/php"+version, args...)
+	return a.sites.runSitePHPCLI(ctx, siteID, dir, env, stdin, version, args...)
 }
 
 var appURLRE = regexp.MustCompile(`^https?://[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?$`)
@@ -79,7 +78,7 @@ type composerApp struct {
 	scripts bool
 	// setup configures the project in app (hostApp on the host): its
 	// database and secrets, and its tables.
-	setup func(req agentproto.SiteInstall, site *files.Site, app, hostApp string, php func(wd string, args ...string) error) error
+	setup func(req agentproto.SiteInstall, site *siteFS, app, hostApp string, php func(wd string, args ...string) error) error
 	// version is the file whose VERSION constant is the version installed
 	// (from the site's folder).
 	version string
@@ -97,7 +96,7 @@ var (
 // configuration (MariaDB, fresh secrets) and its tables; only then do its
 // files take their places, public/ becoming the site's public folder. A
 // failure leaves the site as it was.
-func (a *Agent) installComposerApp(ctx context.Context, req agentproto.SiteInstall, site *files.Site, placeholder bool, c composerApp) (agentproto.SiteInstallResponse, error) {
+func (a *Agent) installComposerApp(ctx context.Context, req agentproto.SiteInstall, site *siteFS, placeholder bool, c composerApp) (agentproto.SiteInstallResponse, error) {
 	if a.sitePHP == nil && !slices.Contains(a.sites.PHPVersions(), req.PHPVersion) {
 		return agentproto.SiteInstallResponse{}, fmt.Errorf("PHP %q is not installed on this server", req.PHPVersion)
 	}
@@ -159,13 +158,8 @@ func (a *Agent) installComposerApp(ctx context.Context, req agentproto.SiteInsta
 		return agentproto.SiteInstallResponse{}, err
 	}
 
-	count := 0
-	if err := site.Walk(func(p string, _ bool) bool { return !strings.HasPrefix(p+"/", installStage+"/") }, func(e files.WalkEntry) error {
-		if strings.HasPrefix(e.Path, installStage+"/app/") && !e.Dir {
-			count++
-		}
-		return nil
-	}); err != nil {
+	count, err := site.CountFiles(app)
+	if err != nil {
 		return agentproto.SiteInstallResponse{}, err
 	}
 	if err := moveProject(site, app, placeholder, c.name); err != nil {
@@ -182,7 +176,7 @@ func (a *Agent) installComposerApp(ctx context.Context, req agentproto.SiteInsta
 
 // newStage makes the folder an application is put together in (one left
 // by an agent that stopped midway goes first).
-func newStage(site *files.Site) (string, error) {
+func newStage(site *siteFS) (string, error) {
 	stage := "/" + installStage
 	if _, err := site.Stat(stage); err == nil {
 		if err := site.Delete(stage); err != nil {
@@ -194,7 +188,7 @@ func newStage(site *files.Site) (string, error) {
 
 // setupLaravel writes Laravel's .env (MariaDB, a fresh key) and creates
 // its tables.
-func setupLaravel(req agentproto.SiteInstall, site *files.Site, app, hostApp string, php func(wd string, args ...string) error) error {
+func setupLaravel(req agentproto.SiteInstall, site *siteFS, app, hostApp string, php func(wd string, args ...string) error) error {
 	example, _, err := site.Read(app+"/.env.example", 0, 64<<10)
 	if err != nil {
 		return fmt.Errorf("the project has no .env.example: %w", err)
@@ -232,7 +226,7 @@ func setupLaravel(req agentproto.SiteInstall, site *files.Site, app, hostApp str
 // setupSymfony writes Symfony's .env.local (production, a fresh secret,
 // DATABASE_URL of the site's MariaDB, for Doctrine when
 // the project adds it) and builds the production cache.
-func setupSymfony(req agentproto.SiteInstall, site *files.Site, app, hostApp string, php func(wd string, args ...string) error) error {
+func setupSymfony(req agentproto.SiteInstall, site *siteFS, app, hostApp string, php func(wd string, args ...string) error) error {
 	if _, err := site.Stat(app + "/bin/console"); err != nil {
 		return fmt.Errorf("the project has no bin/console (Symfony Flex did not set it up): %w", err)
 	}
@@ -258,7 +252,7 @@ func setupSymfony(req agentproto.SiteInstall, site *files.Site, app, hostApp str
 // moveProject gives the project's files their places: public/'s entries
 // into the site's public folder, the rest beside it. Every name is checked
 // before anything moves.
-func moveProject(site *files.Site, app string, placeholder bool, name string) error {
+func moveProject(site *siteFS, app string, placeholder bool, name string) error {
 	top, err := site.List(app)
 	if err != nil {
 		return err
@@ -299,7 +293,7 @@ func moveProject(site *files.Site, app string, placeholder bool, name string) er
 // laravelStorage does what artisan storage:link would without a link out
 // of public/ (the proxy follows none): the files of the public disk move to
 // public/storage and storage/app/public becomes a link to them.
-func laravelStorage(site *files.Site, app string) error {
+func laravelStorage(site *siteFS, app string) error {
 	disk, link := app+"/storage/app/public", app+"/public/storage"
 	if e, err := site.Stat(disk); err != nil || e.Type != "dir" {
 		return nil // a project without one
@@ -408,34 +402,11 @@ func fileSHA256(path string) string {
 }
 
 // copyIntoSite writes the agent's file src to p in the site, as the site's.
-func copyIntoSite(site *files.Site, p, src string) error {
+func copyIntoSite(site *siteFS, p, src string) error {
 	f, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	u, err := site.BeginUpload(p)
-	if err != nil {
-		return err
-	}
-	buf := make([]byte, files.MaxChunk)
-	var off int64
-	for {
-		n, err := io.ReadFull(f, buf)
-		if n > 0 {
-			if werr := u.Write(off, buf[:n]); werr != nil {
-				u.Abort()
-				return werr
-			}
-			off += int64(n)
-		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
-		}
-		if err != nil {
-			u.Abort()
-			return err
-		}
-	}
-	return u.Commit()
+	return site.CopyIn(p, f)
 }

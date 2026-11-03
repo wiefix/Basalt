@@ -77,7 +77,7 @@ func TestSiteSync(t *testing.T) {
 			w.Mkdir = append(w.Mkdir, e)
 		}
 	}
-	if err := dst.syncWrite(w); err != nil {
+	if err := dst.syncWrite(ctx, w); err != nil {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
@@ -85,13 +85,13 @@ func TestSiteSync(t *testing.T) {
 			continue
 		}
 		for off := int64(0); ; {
-			r, err := src.syncRead(agentproto.SiteSyncReadRequest{SiteID: 1, Reads: []agentproto.SyncRead{{Path: e.Path, Offset: off, Length: 1 << 20}}})
+			r, err := src.syncRead(ctx, agentproto.SiteSyncReadRequest{SiteID: 1, Reads: []agentproto.SyncRead{{Path: e.Path, Offset: off, Length: 1 << 20}}})
 			if err != nil {
 				t.Fatal(err)
 			}
 			c := r.Chunks[0]
 			final := off+int64(len(c.Data)) >= c.Size
-			if err := dst.syncWrite(agentproto.SiteSyncWriteRequest{SiteID: 1, Write: []agentproto.SyncWrite{{Path: e.Path, Offset: off,
+			if err := dst.syncWrite(ctx, agentproto.SiteSyncWriteRequest{SiteID: 1, Write: []agentproto.SyncWrite{{Path: e.Path, Offset: off,
 				Data: c.Data, Final: final, Mode: e.Mode, MTime: c.MTime}}}); err != nil {
 				t.Fatal(err)
 			}
@@ -122,7 +122,7 @@ func TestSiteSync(t *testing.T) {
 		}
 	}
 	// The setgid bit of the site's folders stays.
-	if err := dst.syncWrite(agentproto.SiteSyncWriteRequest{SiteID: 1, Chmod: []agentproto.ManifestEntry{{Path: "public", Mode: 0o750}}}); err != nil {
+	if err := dst.syncWrite(ctx, agentproto.SiteSyncWriteRequest{SiteID: 1, Chmod: []agentproto.ManifestEntry{{Path: "public", Mode: 0o750}}}); err != nil {
 		t.Fatal(err)
 	}
 	if fi, _ := os.Stat(filepath.Join(dd, "public")); fi.Mode()&fs.ModeSetgid == 0 || fi.Mode().Perm() != 0o750 {
@@ -137,7 +137,7 @@ func TestSiteSync(t *testing.T) {
 	}
 
 	// Gone and changed files, refused paths, out-of-order writes.
-	r, err := src.syncRead(agentproto.SiteSyncReadRequest{SiteID: 1, Reads: []agentproto.SyncRead{{Path: "public/nope", Length: 10}, {Path: "public/link", Length: 10}}})
+	r, err := src.syncRead(ctx, agentproto.SiteSyncReadRequest{SiteID: 1, Reads: []agentproto.SyncRead{{Path: "public/nope", Length: 10}, {Path: "public/link", Length: 10}}})
 	if err != nil || !r.Chunks[0].Missing || !r.Chunks[1].Missing {
 		t.Fatalf("missing reads: %+v %v", r, err)
 	}
@@ -150,12 +150,12 @@ func TestSiteSync(t *testing.T) {
 		{SiteID: 1, Write: []agentproto.SyncWrite{{Path: "public/x", Data: make([]byte, agentproto.MaxSyncData+1)}}},
 		{SiteID: 0},
 	} {
-		if err := dst.syncWrite(bad); err == nil {
+		if err := dst.syncWrite(ctx, bad); err == nil {
 			t.Errorf("accepted %+v", bad)
 		}
 	}
 	// ".." stays inside the site.
-	if err := dst.syncWrite(agentproto.SiteSyncWriteRequest{SiteID: 1, Write: []agentproto.SyncWrite{{Path: "../escape", Data: []byte("x"), Final: true, Mode: 0o644}}}); err != nil {
+	if err := dst.syncWrite(ctx, agentproto.SiteSyncWriteRequest{SiteID: 1, Write: []agentproto.SyncWrite{{Path: "../escape", Data: []byte("x"), Final: true, Mode: 0o644}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(dd), "escape")); err == nil {
@@ -164,52 +164,17 @@ func TestSiteSync(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dd, "escape")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := src.syncRead(agentproto.SiteSyncReadRequest{SiteID: 1, Reads: []agentproto.SyncRead{{Path: "logs/access.log", Length: 1}}}); err == nil {
+	if _, err := src.syncRead(ctx, agentproto.SiteSyncReadRequest{SiteID: 1, Reads: []agentproto.SyncRead{{Path: "logs/access.log", Length: 1}}}); err == nil {
 		t.Fatal("read the site's logs")
 	}
 	// A deletion removes a folder with what it holds.
-	if err := dst.syncWrite(agentproto.SiteSyncWriteRequest{SiteID: 1, Delete: []string{"public/sub"}}); err != nil {
+	if err := dst.syncWrite(ctx, agentproto.SiteSyncWriteRequest{SiteID: 1, Delete: []string{"public/sub"}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dd, "public/sub")); err == nil {
 		t.Fatal("folder not deleted")
 	}
 	_ = time.Now
-}
-
-// TestRemoveTemps: temporaries not written for a while go; fresh ones, a
-// site's own files and whatever a symlink points at stay.
-func TestRemoveTemps(t *testing.T) {
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	m := testSites(t, Config{SitesRoot: t.TempDir()}, log)
-	sd := filepath.Join(m.root, "1")
-	os.MkdirAll(filepath.Join(sd, "public/sub"), 0o755)
-	outside := t.TempDir()
-	os.WriteFile(filepath.Join(outside, ".basalt-upload-x"), []byte("x"), 0o644)
-	os.Symlink(outside, filepath.Join(sd, "public/out"))
-	old := time.Now().Add(-7 * time.Hour)
-	for _, f := range []string{"public/.basalt-upload-abc", "public/sub/.basalt-upload-sync-0011", "public/.basalt-upload-fresh", "public/page.html"} {
-		os.WriteFile(filepath.Join(sd, f), []byte("x"), 0o644)
-		if !strings.Contains(f, "fresh") {
-			os.Chtimes(filepath.Join(sd, f), old, old)
-		}
-	}
-	os.Chtimes(filepath.Join(outside, ".basalt-upload-x"), old, old)
-	os.MkdirAll(filepath.Join(m.root, ".trash"), 0o755)
-	m.removeTemps(context.Background(), time.Now().Add(-tempKeep))
-	for f, want := range map[string]bool{
-		"public/.basalt-upload-abc":           false,
-		"public/sub/.basalt-upload-sync-0011": false,
-		"public/.basalt-upload-fresh":         true,
-		"public/page.html":                    true,
-	} {
-		if _, err := os.Stat(filepath.Join(sd, f)); (err == nil) != want {
-			t.Errorf("%s: exists %v, want %v", f, err == nil, want)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(outside, ".basalt-upload-x")); err != nil {
-		t.Error("a file behind a symlink was removed")
-	}
 }
 
 // TestClearSeeds: dumps of seeds cut short are gone after a restart.

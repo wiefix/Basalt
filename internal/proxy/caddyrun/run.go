@@ -28,6 +28,7 @@ func Run(ctx context.Context, dir string, log *slog.Logger) error {
 		return fmt.Errorf("remove stale admin socket: %w", err)
 	}
 
+	dataDir = dir
 	if err := loadTable(dir); err != nil {
 		log.Warn("saved app upstreams ignored", "err", err)
 	}

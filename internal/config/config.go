@@ -109,6 +109,7 @@ type Agent struct {
 type AgentHelper struct {
 	Socket       string
 	AgentUID     int
+	MySQLSocket  string
 	SitesRoot    string
 	WWWGroup     string
 	ProxyUser    string
@@ -302,6 +303,7 @@ func ParseAgentHelper(args []string, output io.Writer) (AgentHelper, error) {
 	fs.StringVar(&cfg.ReleaseKey, "release-key", env("RELEASE_KEY", ""), "public key (authorized_keys line) updates must be signed with (default: the Basalt release key)")
 	fs.StringVar(&cfg.DockerSocket, "docker-socket", env("DOCKER_SOCKET", "/var/run/docker.sock"), "Docker Engine's own socket")
 	fs.StringVar(&cfg.DockerListen, "docker-listen", "", "unix socket to serve the agent Docker's API on, checked (empty: none)")
+	fs.StringVar(&cfg.MySQLSocket, "mysql-socket", env("MYSQL_SOCKET", "/run/mysqld/mysqld.sock"), "local MariaDB socket (the agent's account is made there)")
 	fs.StringVar(&cfg.LogLevel, "log-level", env("LOG_LEVEL", "info"), "log level: debug, info, warn, error")
 	fs.StringVar(&cfg.LogFormat, "log-format", env("LOG_FORMAT", "text"), "log format: text or json")
 	if err := fs.Parse(args); err != nil {

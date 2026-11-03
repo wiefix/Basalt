@@ -13,7 +13,6 @@ import (
 
 	"github.com/wiefix/basalt/internal/agentproto"
 	"github.com/wiefix/basalt/internal/privhelper"
-	"github.com/wiefix/basalt/internal/sysuser"
 )
 
 // On a server serving a copy of a site whose databases live on its
@@ -31,6 +30,7 @@ type siteDBs struct {
 	state   string // the routes' file
 	isolate bool
 	tunnel  *tunnelManager
+	priv    privileged
 
 	mu     sync.Mutex
 	routes map[int64]agentproto.SiteDBRoute
@@ -38,12 +38,12 @@ type siteDBs struct {
 	ctx    context.Context
 }
 
-func newSiteDBs(cfg Config, tunnel *tunnelManager, log *slog.Logger) *siteDBs {
+func newSiteDBs(cfg Config, tunnel *tunnelManager, priv privileged, log *slog.Logger) *siteDBs {
 	dir := cfg.SiteDBDir
 	if dir == "" {
 		dir = "/run/basalt/db"
 	}
-	return &siteDBs{log: log, dir: dir, state: filepath.Join(cfg.DataDir, siteDBFile), isolate: cfg.Isolate, tunnel: tunnel,
+	return &siteDBs{log: log, dir: dir, state: filepath.Join(cfg.DataDir, siteDBFile), isolate: cfg.Isolate, tunnel: tunnel, priv: priv,
 		routes: map[int64]agentproto.SiteDBRoute{}, ln: map[int64]net.Listener{}, ctx: context.Background()}
 }
 
@@ -138,12 +138,10 @@ func (m *siteDBs) listen(id int64) (net.Listener, error) {
 	}
 	l.(*net.UnixListener).SetUnlinkOnClose(false)
 	if m.isolate {
-		uid, _, err := sysuser.LookupUser(sysuser.SiteUser(id))
+		// The helper hands it to the site's user.
+		err := os.Chmod(path, 0o600)
 		if err == nil {
-			err = os.Chown(path, uid, -1)
-		}
-		if err == nil {
-			err = os.Chmod(path, 0o600)
+			err = m.priv.GiveSiteDBSocket(m.ctx, id)
 		}
 		if err != nil {
 			l.Close()
