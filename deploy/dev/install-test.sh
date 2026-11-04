@@ -44,9 +44,21 @@ case "$OUT" in *"Ready to install"*"Agents:  $PANELIP:8443"*"Basalt is running"*
 # The installer's service starts the agent: no advice to start it by hand.
 case "$OUT" in *"start the agent with"*) echo "the installer tells to start the agent by hand"; exit 6 ;; esac
 echo "### a second run without --agent-host keeps it, and takes an agent of root (before 0.10) to its own user"
-# As an agent of root left them: its data root's, the proxy's folder private.
-docker exec basalt-panel sh -c 'systemctl stop basalt-agent && chown -R root:root /var/lib/basalt/agent && chmod 0700 /var/lib/basalt/proxy'
+# As an agent of root left them: its data root's, the proxy's folder private,
+# and the agent running as root during the re-run (it rewrites its files when
+# the panel restarts). The drop-in goes before the re-run, the process stays.
+docker exec basalt-panel sh -c 'systemctl stop basalt-agent && chown -R root:root /var/lib/basalt/agent && chmod 0700 /var/lib/basalt/proxy &&
+  mkdir -p /etc/systemd/system/basalt-agent.service.d &&
+  printf "[Service]\nUser=root\nGroup=root\nCapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER\nAmbientCapabilities=\nInaccessiblePaths=\n" >/etc/systemd/system/basalt-agent.service.d/root.conf &&
+  systemctl daemon-reload && systemctl start basalt-agent && rm -r /etc/systemd/system/basalt-agent.service.d'
+[ "$(docker exec basalt-panel sh -c 'ps -o user= -p $(systemctl show -p MainPID --value basalt-agent)')" = root ] ||
+  { docker exec basalt-panel ps -o user,cmd -C basalt; echo "the agent does not run as root before the re-run"; exit 1; }
 docker exec basalt-panel sh /deploy/install.sh panel --binary /dist/basalt-linux-$ARCH >/dev/null
+# The agent of its own user reads what the agent of root left.
+sleep 2
+if docker exec basalt-panel sh -c 'journalctl -q -o cat _SYSTEMD_INVOCATION_ID=$(systemctl show -p InvocationID --value basalt-agent)' | grep -i "permission denied"; then
+  echo "the agent cannot read its data after the re-run"; exit 1
+fi
 [ "$(docker exec basalt-panel stat -c '%U %a' /var/lib/basalt/agent /var/lib/basalt/agent/agent.json /var/lib/basalt/proxy | tr '\n' ' ')" = "basalt-agent 700 basalt-agent 600 basalt-proxy 2770 " ] ||
   { docker exec basalt-panel stat -c '%n %U %a' /var/lib/basalt/agent /var/lib/basalt/agent/agent.json /var/lib/basalt/proxy; echo "the re-run did not hand the agent's data to its user"; exit 1; }
 docker exec basalt-panel grep -q -- "--agent-url https://$PANELIP:8443 " /etc/systemd/system/basalt-server.service

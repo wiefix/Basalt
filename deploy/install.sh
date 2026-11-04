@@ -448,8 +448,6 @@ ensure_user basalt-agent "$LIB/agent"
 usermod --append --groups basalt-www,basalt-proxy basalt-agent
 install -d -m 0755 "$LIB" /srv/basalt "$SITES"
 install -d -m 0700 -o basalt-agent -g basalt-agent "$LIB/agent"
-# Agents before 0.10 ran as root: their data becomes the agent's user's.
-chown -R basalt-agent:basalt-agent "$LIB/agent"
 # The proxy's folder is its group's: setgid hands the group to what the
 # agent writes there (the configuration, the DNS-01 socket). Its storage
 # (keys) stays the proxy's own; the agent asks the proxy for certificates.
@@ -716,9 +714,14 @@ if [ ! -f "$LIB/agent/agent.json" ] || [ -f "$LIB/agent/removed" ]; then
 	fi
 	# shellcheck disable=SC2086
 	"$BIN" agent enroll --data-dir "$LIB/agent" $ENROLL
-	chown -R basalt-agent:basalt-agent "$LIB/agent"
 fi
 
+# Agents before 0.10 ran as root: their data becomes the agent's user's.
+# A running one is stopped first, since it rewrites its files as root
+# until then (e.g. on reconnecting to the panel restarted above). The
+# proxy and the sites keep serving meanwhile.
+systemctl stop basalt-agent.service >/dev/null 2>&1 || true
+chown -R basalt-agent:basalt-agent "$LIB/agent"
 systemctl enable --now basalt-proxy.service basalt-agent-helper.service basalt-agent.service >/dev/null 2>&1
 systemctl restart basalt-proxy.service basalt-agent-helper.service basalt-agent.service
 

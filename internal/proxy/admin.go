@@ -21,6 +21,13 @@ func NewAdmin(socket string) *Admin {
 	return &Admin{hc: &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
+			// Caddy replaces its admin server on every config load and
+			// shuts the old one down in the background. A POST sent over
+			// a kept-alive connection to the old server can then fail
+			// with EOF (Go replays only idempotent requests), e.g. the
+			// panel's push right after the agent's own reload. A fresh
+			// connection always reaches the current server.
+			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				var d net.Dialer
 				return d.DialContext(ctx, "unix", socket)

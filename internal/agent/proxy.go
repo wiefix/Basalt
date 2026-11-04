@@ -39,6 +39,11 @@ type proxyManager struct {
 	mu      sync.Mutex
 	desired *proxy.Desired
 	lastErr string
+	// unreadable: the saved state exists but could not be loaded. The
+	// proxy then keeps what it runs (its own copy from disk) until the
+	// panel sends the state, rather than being cut down to the panel's
+	// route.
+	unreadable bool
 }
 
 func newProxyManager(cfg Config, sites *sitesManager, apps *appsManager, log *slog.Logger) *proxyManager {
@@ -71,16 +76,19 @@ func (m *proxyManager) loadSaved() error {
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	if err != nil {
-		return err
-	}
 	var d proxy.Desired
-	if err := json.Unmarshal(b, &d); err != nil {
-		return fmt.Errorf("parse %s: %w", m.stateFile, err)
+	if err == nil {
+		if err = json.Unmarshal(b, &d); err != nil {
+			err = fmt.Errorf("parse %s: %w", m.stateFile, err)
+		}
 	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err != nil {
+		m.unreadable = true
+		return err
+	}
 	m.desired = &d
-	m.mu.Unlock()
 	return nil
 }
 
@@ -196,7 +204,7 @@ func (m *proxyManager) reconcile(ctx context.Context) {
 		d.Routes = slices.Clone(d.Routes)
 	}
 	m.mu.Unlock()
-	if !have && m.panel == nil {
+	if !have && (m.panel == nil || m.unreadable) {
 		return
 	}
 	m.resolve(&d)
