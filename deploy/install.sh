@@ -298,7 +298,8 @@ trap 'rm -rf "$TMP"' EXIT
 
 # ---------- packages ----------
 
-PKGS="ca-certificates curl bzip2 openssh-client"
+# iproute2: the helper puts floating IPs on the interface.
+PKGS="ca-certificates curl bzip2 openssh-client iproute2"
 [ "$WITH_PHP" -eq 1 ] && PKGS="$PKGS php-fpm php-mysql php-curl php-gd php-intl php-mbstring php-xml php-zip"
 [ "$WITH_DB" -eq 1 ] && PKGS="$PKGS mariadb-server"
 export DEBIAN_FRONTEND=noninteractive
@@ -606,8 +607,9 @@ UMask=0022
 ProtectSystem=yes
 ReadWritePaths=$(dirname "$BIN")
 # SETUID, SETGID and KILL: it starts the sites' processes as their users
-# (file workers, SFTP, PHP's CLI) and stops them.
-CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_SETUID CAP_SETGID CAP_KILL CAP_AUDIT_WRITE
+# (file workers, SFTP, PHP's CLI) and stops them. NET_ADMIN: it puts the
+# floating IPs on the host's interface (ip addr, over netlink).
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_SETUID CAP_SETGID CAP_KILL CAP_AUDIT_WRITE CAP_NET_ADMIN
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 RestrictNamespaces=yes
 SystemCallFilter=@system-service

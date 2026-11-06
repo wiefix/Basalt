@@ -110,6 +110,8 @@ type privileged interface {
 	ActivateUpdate(ctx context.Context, req agentproto.UpdateActivate) error
 
 	BuildKit(ctx context.Context, namespace string) (string, error)
+
+	SetFloatingIPs(ctx context.Context, f agentproto.FloatingIPs) error
 }
 
 func newPrivileged(cfg Config, log *slog.Logger) (privileged, error) {

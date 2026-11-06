@@ -15,7 +15,7 @@
 // workers, SFTP sessions, PHP's CLI), puts the sites' PHP in place (pools,
 // their systemd services, Laravel's processes), keeps MariaDB's option
 // file of database replication and gives the agent's user its MariaDB
-// account, runs restic for backups (it reads and restores every site's
+// account, puts the floating IPs on the host's interface, runs restic for backups (it reads and restores every site's
 // files), installs updates of Basalt, and stands between the agent and
 // Docker (ServeDocker, BuildKit). The agent runs as a user of its own
 // (basalt-agent); MariaDB's databases it manages with its account.
@@ -158,6 +158,10 @@ type Helper struct {
 	staged   string
 	// buildKitMu: one check of the BuildKit container at a time.
 	buildKitMu sync.Mutex
+	// floatingMu: one change of the floating IPs at a time; ip replaces
+	// iproute2 in tests.
+	floatingMu sync.Mutex
+	ip         func(ctx context.Context, args ...string) ([]byte, error)
 }
 
 func New(cfg Config, log *slog.Logger) (*Helper, error) {
@@ -331,6 +335,12 @@ func (h *Helper) Handle(ctx context.Context, msgType string, payload json.RawMes
 			stderr = files[1]
 		}
 		return h.SiteProcess(ctx, req, stdio, stderr)
+	case MsgFloatingIPs:
+		req, err := decode[agentproto.FloatingIPs](payload)
+		if err != nil {
+			return nil, err
+		}
+		return struct{}{}, h.SetFloatingIPs(ctx, req)
 	case MsgUpdateInfo, MsgUpdateStage, MsgUpdateActivate:
 		return h.handleUpdate(ctx, msgType, payload)
 	}

@@ -167,6 +167,10 @@ func (c *Client) BuildKit(ctx context.Context, namespace string) (string, error)
 	return res.Name, err
 }
 
+func (c *Client) SetFloatingIPs(ctx context.Context, f agentproto.FloatingIPs) error {
+	return c.call(ctx, MsgFloatingIPs, f, nil)
+}
+
 // Close drops the connection.
 func (c *Client) Close() {
 	c.mu.Lock()

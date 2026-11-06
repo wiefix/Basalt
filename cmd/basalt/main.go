@@ -253,6 +253,7 @@ func runPanel(ctx context.Context, cfg config.Server, baseLog *slog.Logger) erro
 		ReleaseKey:          cfg.ReleaseKey,
 		ReleaseAllowPrivate: cfg.ReleaseAllowPrivate,
 		GitHubAPI:           cfg.GitHubAPI,
+		HetznerAPI:          cfg.HetznerAPI,
 		GitHubWeb:           cfg.GitHubURL,
 	})
 	hub.OnConnect(func(ctx context.Context, serverID int64) {

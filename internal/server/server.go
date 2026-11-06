@@ -77,6 +77,8 @@ type Options struct {
 	// then private addresses are allowed).
 	GitHubAPI string
 	GitHubWeb string
+	// HetznerAPI is the Hetzner Cloud API (tests: a fake).
+	HetznerAPI string
 	// FailoverMinAfter is the shortest delay a standby may be given to
 	// take over by itself (default a minute; tests make it shorter).
 	FailoverMinAfter time.Duration
@@ -147,20 +149,23 @@ type Server struct {
 	githubAPI         string
 	githubWeb         string
 	githubPrivate     bool
-	manifests         manifestStates
-	certCheckEvery    time.Duration
-	auditCheckEvery   time.Duration
-	auditWatch        auditWatch
-	anchors           auditAnchors
-	rel               releaseOptions
-	usageEvery        time.Duration
-	siteSyncEvery     time.Duration
-	syncs             siteSyncs
-	peers             peerState
-	dbReplRun         sync.Mutex  // one round of database replication at a time
-	dbReplAgain       atomic.Bool // a round was asked for while one ran
-	updates           updater
-	respCheck         func(string)
+	hetznerAPI        string
+	// floatingLocks orders the pushes of floating IPs to each agent (server id → *sync.Mutex).
+	floatingLocks   sync.Map
+	manifests       manifestStates
+	certCheckEvery  time.Duration
+	auditCheckEvery time.Duration
+	auditWatch      auditWatch
+	anchors         auditAnchors
+	rel             releaseOptions
+	usageEvery      time.Duration
+	siteSyncEvery   time.Duration
+	syncs           siteSyncs
+	peers           peerState
+	dbReplRun       sync.Mutex  // one round of database replication at a time
+	dbReplAgain     atomic.Bool // a round was asked for while one ran
+	updates         updater
+	respCheck       func(string)
 
 	setupMu    sync.Mutex
 	setupToken string
@@ -266,6 +271,7 @@ func New(o Options) *Server {
 		offlineAfter:    o.OfflineAfter,
 		failoverMin:     o.FailoverMinAfter,
 		githubAPI:       o.GitHubAPI,
+		hetznerAPI:      o.HetznerAPI,
 		githubWeb:       strings.TrimRight(o.GitHubWeb, "/"),
 		githubPrivate:   githubPrivate,
 		certCheckEvery:  o.CertCheckEvery,
@@ -482,6 +488,18 @@ func (s *Server) Handler() http.Handler {
 	rt.Handle("POST /api/v1/mail/domains/{id}/mailboxes", s.requireRole(store.RoleAdmin, s.handleCreateMailbox))
 	rt.Handle("PUT /api/v1/mail/domains/{id}/mailboxes/{mid}", s.requireRole(store.RoleAdmin, s.handleUpdateMailbox))
 	rt.Handle("DELETE /api/v1/mail/domains/{id}/mailboxes/{mid}", s.requireRole(store.RoleAdmin, s.handleDeleteMailbox))
+
+	rt.Handle("GET /api/v1/cloud-accounts", s.requireRole(store.RoleAdmin, s.handleListCloudAccounts))
+	rt.Handle("POST /api/v1/cloud-accounts", s.requireRole(store.RoleAdmin, s.handleCreateCloudAccount))
+	rt.Handle("PUT /api/v1/cloud-accounts/{id}", s.requireRole(store.RoleAdmin, s.handleUpdateCloudAccount))
+	rt.Handle("DELETE /api/v1/cloud-accounts/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteCloudAccount))
+	rt.Handle("GET /api/v1/cloud-accounts/{id}/floating-ips", s.requireRole(store.RoleAdmin, s.handleProviderFloatingIPs))
+	rt.Handle("GET /api/v1/floating-ips", s.requireRole(store.RoleAdmin, s.handleListFloatingIPs))
+	rt.Handle("POST /api/v1/floating-ips", s.requireRole(store.RoleAdmin, s.handleAddFloatingIP))
+	rt.Handle("PUT /api/v1/floating-ips/{id}/servers", s.requireRole(store.RoleAdmin, s.handleSetFloatingIPServers))
+	rt.Handle("POST /api/v1/floating-ips/{id}/assign", s.requireRole(store.RoleAdmin, s.handleAssignFloatingIP))
+	rt.Handle("POST /api/v1/floating-ips/{id}/refresh", s.requireRole(store.RoleAdmin, s.handleRefreshFloatingIP))
+	rt.Handle("DELETE /api/v1/floating-ips/{id}", s.requireRole(store.RoleAdmin, s.handleDeleteFloatingIP))
 
 	rt.Handle("GET /api/v1/registries", s.requireRole(store.RoleAdmin, s.handleListRegistries))
 	rt.Handle("POST /api/v1/registries", s.requireRole(store.RoleAdmin, s.handleCreateRegistry))

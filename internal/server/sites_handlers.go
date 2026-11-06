@@ -104,6 +104,7 @@ func (s *Server) SyncSites(ctx context.Context, serverID int64) {
 	}
 	s.PushDNS(ctx, serverID)
 	s.PushHealth(ctx, serverID)
+	s.pushFloating(ctx, serverID)
 	if err := s.SyncApps(ctx, serverID); err != nil {
 		s.log.Warn("sync apps", "server_id", serverID, "err", err)
 	}

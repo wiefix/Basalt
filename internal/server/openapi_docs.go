@@ -313,6 +313,22 @@ var apiDocs = map[string]apiDoc{
 	"PUT /api/v1/registries/{id}":    {summary: "Replace registry credentials", body: registryRequest{}, resp: obj("registry", registryView{})},
 	"DELETE /api/v1/registries/{id}": {summary: "Remove registry credentials", resp: noContent},
 
+	// Cloud accounts and floating IPs.
+	"GET /api/v1/cloud-accounts":         {summary: "Cloud provider accounts (API tokens) for floating IPs", resp: obj("accounts", []cloudAccountView{})},
+	"POST /api/v1/cloud-accounts":        {summary: "Add a cloud provider account; the provider must accept the token", body: cloudAccountRequest{}, resp: obj("account", cloudAccountView{})},
+	"PUT /api/v1/cloud-accounts/{id}":    {summary: "Rename an account or replace its token (empty: kept)", body: cloudAccountRequest{}, resp: obj("account", cloudAccountView{})},
+	"DELETE /api/v1/cloud-accounts/{id}": {summary: "Remove an account without floating IPs in Basalt", resp: noContent},
+	"GET /api/v1/cloud-accounts/{id}/floating-ips": {summary: "The account's floating IPs and servers at the provider",
+		resp: obj("floating_ips", []providerFloatingIPView{}, "servers", []providerServerView{})},
+	"GET /api/v1/floating-ips": {summary: "Floating IPs with their servers", resp: obj("floating_ips", []floatingIPView{})},
+	"POST /api/v1/floating-ips": {summary: "Add a floating IP of an account: the servers of its group put it on their interface",
+		body: addFloatingIPRequest{}, resp: obj("floating_ip", floatingIPView{})},
+	"PUT /api/v1/floating-ips/{id}/servers": {summary: "Replace the servers of a floating IP's group", body: floatingServersRequest{}, resp: obj("floating_ip", floatingIPView{})},
+	"POST /api/v1/floating-ips/{id}/assign": {summary: "Have the provider route the floating IP to a server of its group",
+		body: assignFloatingIPRequest{}, resp: obj("floating_ip", floatingIPView{})},
+	"POST /api/v1/floating-ips/{id}/refresh": {summary: "Read where the provider routes the floating IP", resp: obj("floating_ip", floatingIPView{})},
+	"DELETE /api/v1/floating-ips/{id}":       {summary: "Remove a floating IP from Basalt and the servers (the provider keeps it)", resp: noContent},
+
 	// Apps and container databases.
 	"GET /api/v1/apps": {summary: "List apps, databases and the mail server", resp: obj("apps", []appView{})},
 	"POST /api/v1/apps": {summary: "Create an app (image, git, compose) or a database", body: createAppRequest{},

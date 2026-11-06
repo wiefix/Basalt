@@ -643,6 +643,47 @@ export interface Registry {
   updated_at: string;
 }
 
+export interface CloudAccount {
+  id: number;
+  provider: "hetzner";
+  name: string;
+  floating_ips: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProviderFloatingIP {
+  provider_id: string;
+  name: string;
+  address: string;
+  network: string;
+  location: string;
+  assigned_to: string; // provider's server id, "" none
+  floating_ip_id: number; // 0: not added to Basalt
+}
+
+export interface ProviderServer {
+  provider_id: string;
+  name: string;
+  server_id: number; // Basalt's server, 0 none
+}
+
+export interface FloatingIP {
+  id: number;
+  account_id: number;
+  account_name: string;
+  provider: string;
+  provider_id: string;
+  name: string;
+  address: string;
+  network: string;
+  location: string;
+  server_id: number; // the server of the group it is routed to, 0 none
+  assigned_at: string | null;
+  servers: { server_id: number; name: string; provider_server_id: string; online: boolean; error: string }[];
+  created_at: string;
+}
+
 export interface DNSZone {
   id: number;
   project_id: number;
@@ -1260,6 +1301,24 @@ export const api = {
   updateRegistry: (id: number, b: { username: string; password: string }) =>
     put<{ registry: Registry }>(`/api/v1/registries/${id}`, b),
   deleteRegistry: (id: number) => del<void>(`/api/v1/registries/${id}`),
+
+  cloudAccounts: () => get<{ accounts: CloudAccount[] }>("/api/v1/cloud-accounts"),
+  createCloudAccount: (b: { provider: "hetzner"; name: string; token: string }) =>
+    post<{ account: CloudAccount }>("/api/v1/cloud-accounts", b),
+  updateCloudAccount: (id: number, b: { name: string; token: string }) =>
+    put<{ account: CloudAccount }>(`/api/v1/cloud-accounts/${id}`, b),
+  deleteCloudAccount: (id: number) => del<void>(`/api/v1/cloud-accounts/${id}`),
+  providerFloatingIPs: (id: number) =>
+    get<{ floating_ips: ProviderFloatingIP[]; servers: ProviderServer[] }>(`/api/v1/cloud-accounts/${id}/floating-ips`),
+  floatingIPs: () => get<{ floating_ips: FloatingIP[] }>("/api/v1/floating-ips"),
+  addFloatingIP: (b: { account_id: number; provider_id: string; server_ids: number[] }) =>
+    post<{ floating_ip: FloatingIP }>("/api/v1/floating-ips", b),
+  setFloatingIPServers: (id: number, server_ids: number[]) =>
+    put<{ floating_ip: FloatingIP }>(`/api/v1/floating-ips/${id}/servers`, { server_ids }),
+  assignFloatingIP: (id: number, server_id: number) =>
+    post<{ floating_ip: FloatingIP }>(`/api/v1/floating-ips/${id}/assign`, { server_id }),
+  refreshFloatingIP: (id: number) => post<{ floating_ip: FloatingIP }>(`/api/v1/floating-ips/${id}/refresh`),
+  deleteFloatingIP: (id: number) => del<void>(`/api/v1/floating-ips/${id}`),
 
   dns: () => get<{ zones: DNSZone[]; nameservers: string[]; servers: DNSServer[] }>("/api/v1/dns"),
   setNameservers: (nameservers: string[]) => put<{ nameservers: string[] }>("/api/v1/dns/nameservers", { nameservers }),

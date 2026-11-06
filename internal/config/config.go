@@ -55,6 +55,9 @@ type Server struct {
 	// Server ("": github.com).
 	GitHubAPI string
 	GitHubURL string
+	// HetznerAPI is the Hetzner Cloud API floating IPs are moved with
+	// ("": Hetzner's).
+	HetznerAPI string
 }
 
 // LocalEnroll configures `basalt server local-enroll`.
@@ -189,6 +192,7 @@ func ParseServer(args []string, output io.Writer) (Server, error) {
 	}
 	fs.BoolVar(&cfg.ReleaseAllowPrivate, "release-allow-private", relPrivate, "allow a release mirror on a private address or over plain http")
 	fs.StringVar(&cfg.GitHubAPI, "github-api", env("GITHUB_API", ""), "GitHub API for git sources, e.g. https://github.example.com/api/v3 (default GitHub's)")
+	fs.StringVar(&cfg.HetznerAPI, "hetzner-api", env("HETZNER_API", ""), "Hetzner Cloud API for floating IPs (default Hetzner's)")
 	fs.StringVar(&cfg.GitHubURL, "github-url", env("GITHUB_URL", ""), "GitHub site for git sources, e.g. https://github.example.com (default GitHub's)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, err

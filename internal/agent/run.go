@@ -94,6 +94,9 @@ type Config struct {
 	// its binary log on.
 	MariaDBConf    string
 	RestartMariaDB func() error
+	// FloatingIPs replaces, in tests, the helper putting the floating IPs
+	// on the host's interface.
+	FloatingIPs func(ctx context.Context, f agentproto.FloatingIPs) error
 	// DockerSocket is the local Docker Engine socket ("" disables apps):
 	// with a helper, the helper's checking proxy of it. DockerUpstream is
 	// Docker's own socket for the privileged work done in the agent's
@@ -150,6 +153,7 @@ type Agent struct {
 
 	health      *healthManager
 	dbExpose    *dbExposeManager
+	floating    *floatingManager
 	link        panelLink
 	watch       *siteWatcher
 	mailCheck   *mailcheck.Checker
@@ -218,6 +222,7 @@ func New(cfg Config, log *slog.Logger) (*Agent, error) {
 		acme:            newACMERelay(cfg, log.With("subsystem", "acme")),
 		health:          newHealthManager(log.With("subsystem", "health")),
 		dbExpose:        newDBExposeManager(cfg, apps.serviceAddr, log.With("subsystem", "dbexpose")),
+		floating:        newFloatingManager(cfg, priv, log.With("subsystem", "floating")),
 		watch:           newSiteWatcher(log.With("subsystem", "sitewatch"), sites.root),
 		mailCheck:       &mailcheck.Checker{Resolvers: cfg.Resolvers, SMTPProbes: cfg.MailCheckProbes},
 		apps:            apps,
@@ -290,6 +295,7 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.acme.run(ctx)
 	go a.apps.run(ctx)
 	a.dbExpose.start(ctx)
+	go a.floating.run(ctx)
 	defer a.health.stop()
 	a.watch.start()
 	defer a.watch.close()
@@ -412,6 +418,7 @@ func (a *Agent) session(ctx context.Context, url string) (connected bool, err er
 	a.log.Info("connected to panel", "panel", url, "server_id", a.identity().ServerID)
 
 	hello := hostFacts()
+	hello.PublicIPs = a.floating.exclude(hello.PublicIPs)
 	hello.SFTPPort, hello.SFTPFingerprint = a.sftp.Port(), a.sftp.Fingerprint()
 	hello.PHPVersions, hello.Isolated = a.sites.PHPVersions(), a.sites.isolate
 	hello.MariaDB = a.mariadbVersion(ctx)
@@ -699,6 +706,12 @@ func (a *Agent) handle(ctx context.Context, typ string, payload json.RawMessage)
 		}
 		resp, err := a.sites.LaravelProcesses(ctx, req)
 		return resp, publicError(err)
+	case agentproto.TypeFloatingIPs:
+		var req agentproto.FloatingIPs
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, err
+		}
+		return struct{}{}, a.floating.Apply(ctx, req)
 	case agentproto.TypeDBExpose:
 		var req agentproto.DBExposeApply
 		if err := json.Unmarshal(payload, &req); err != nil {

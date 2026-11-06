@@ -144,6 +144,18 @@ export const checks = [
   fits<Returns<A["updateRegistry"]>>()<G.PutRegistriesIdResponse>(),
   fits<Returns<A["deleteRegistry"]>>()<G.DeleteRegistriesIdResponse>(),
 
+  fits<Returns<A["cloudAccounts"]>>()<G.GetCloudAccountsResponse>(),
+  fits<Returns<A["createCloudAccount"]>>()<G.PostCloudAccountsResponse>(),
+  fits<Returns<A["updateCloudAccount"]>>()<G.PutCloudAccountsIdResponse>(),
+  fits<Returns<A["deleteCloudAccount"]>>()<G.DeleteCloudAccountsIdResponse>(),
+  fits<Returns<A["providerFloatingIPs"]>>()<G.GetCloudAccountsIdFloatingIpsResponse>(),
+  fits<Returns<A["floatingIPs"]>>()<G.GetFloatingIpsResponse>(),
+  fits<Returns<A["addFloatingIP"]>>()<G.PostFloatingIpsResponse>(),
+  fits<Returns<A["setFloatingIPServers"]>>()<G.PutFloatingIpsIdServersResponse>(),
+  fits<Returns<A["assignFloatingIP"]>>()<G.PostFloatingIpsIdAssignResponse>(),
+  fits<Returns<A["refreshFloatingIP"]>>()<G.PostFloatingIpsIdRefreshResponse>(),
+  fits<Returns<A["deleteFloatingIP"]>>()<G.DeleteFloatingIpsIdResponse>(),
+
   fits<Returns<A["dns"]>>()<G.GetDnsResponse>(),
   fits<Returns<A["setNameservers"]>>()<G.PutDnsNameserversResponse>(),
   fits<Returns<A["createZone"]>>()<G.PostDnsZonesResponse>(),

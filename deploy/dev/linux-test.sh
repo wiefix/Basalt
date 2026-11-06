@@ -4,13 +4,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 GOMODCACHE="$(go env GOMODCACHE)"
-exec docker run --rm \
+# NET_ADMIN: the helper puts floating IPs on the container's interface.
+exec docker run --rm --cap-add NET_ADMIN \
   -v "$PWD":/src -w /src \
   -v "$GOMODCACHE":/go/pkg/mod \
   -e GOFLAGS=-mod=mod -e CGO_ENABLED=0 -e GOTOOLCHAIN=auto \
   golang:1.27-trixie bash -euo pipefail -c '
     apt-get update -qq >/dev/null
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-fpm php-mysql php-mbstring php-xml php-curl php-zip php-intl mariadb-server restic >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-fpm php-mysql php-mbstring php-xml php-curl php-zip php-intl mariadb-server restic iproute2 >/dev/null
     V=$(ls /etc/php | sort -V | tail -1)
     mkdir -p /run/php /run/mysqld && chown mysql:mysql /run/mysqld
     php-fpm$V --daemonize
@@ -23,5 +24,5 @@ exec docker run --rm \
     echo "PHP-FPM $V and $(mariadb -N -e "SELECT VERSION()") started; $(restic version | cut -d" " -f1-2)"
     go test -count=1 -tags linux_integration -run "TestLinux" -v ./internal/e2e/ ./internal/dns/ 2>&1 | grep -vE "^\{\"level\""
     go test -count=1 -run "TestSnapshotFiles|TestCheck" ./internal/restic/
-    go test -count=1 -run "TestRestic|TestRestoreSite" -v ./internal/privhelper/ 2>&1 | grep -E "^(---|ok|FAIL|PASS|panic)|_test.go"
+    BASALT_NET_TESTS=1 go test -count=1 -run "TestRestic|TestRestoreSite|TestFloatingIPsLinux" -v ./internal/privhelper/ 2>&1 | grep -E "^(---|ok|FAIL|PASS|panic)|_test.go"
   '

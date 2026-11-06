@@ -4,6 +4,12 @@
 // <Operation>Response is what a route answers, <Operation>Body what it reads;
 // api.check.ts checks the client in api.ts against them.
 
+export interface AddFloatingIPRequest {
+  account_id?: number;
+  provider_id?: string;
+  server_ids?: number[];
+}
+
 export interface AddMemberRequest {
   email?: string;
   role?: string;
@@ -180,6 +186,10 @@ export interface AppView {
   tls: string;
   version?: string;
   volumes: AgentprotoAppVolumeOut[];
+}
+
+export interface AssignFloatingIPRequest {
+  server_id?: number;
 }
 
 export interface AuditActor {
@@ -377,6 +387,21 @@ export interface CheckView {
   status: string;
   storage_id: number;
   trigger: string;
+}
+
+export interface CloudAccountRequest {
+  name?: string;
+  provider?: string;
+  token?: string;
+}
+
+export interface CloudAccountView {
+  created_at: string;
+  floating_ips: number;
+  id: number;
+  name: string;
+  provider: string;
+  updated_at: string;
 }
 
 export interface CodeRequest {
@@ -712,6 +737,34 @@ export interface FilesExtractResult {
   dirs: number;
   files: number;
   skipped?: string[];
+}
+
+export interface FloatingIPView {
+  account_id: number;
+  account_name: string;
+  address: string;
+  assigned_at: string | null;
+  created_at: string;
+  id: number;
+  location: string;
+  name: string;
+  network: string;
+  provider: string;
+  provider_id: string;
+  server_id: number;
+  servers: FloatingServerView[];
+}
+
+export interface FloatingServerView {
+  error: string;
+  name: string;
+  online: boolean;
+  provider_server_id: string;
+  server_id: number;
+}
+
+export interface FloatingServersRequest {
+  server_ids?: number[];
 }
 
 export interface ForgeSourceRequest {
@@ -1118,6 +1171,22 @@ export interface ProjectView {
   name: string;
   resources: number;
   role: string;
+}
+
+export interface ProviderFloatingIPView {
+  address: string;
+  assigned_to: string;
+  floating_ip_id: number;
+  location: string;
+  name: string;
+  network: string;
+  provider_id: string;
+}
+
+export interface ProviderServerView {
+  name: string;
+  provider_id: string;
+  server_id: number;
 }
 
 export interface ProxySyncView {
@@ -1620,9 +1689,13 @@ export type DeleteBackupStoragesIdResponse = {
   ok: boolean;
 };
 
+export type DeleteCloudAccountsIdResponse = void;
+
 export type DeleteDnsZonesIdResponse = void;
 
 export type DeleteDnsZonesIdRecordsRidResponse = void;
+
+export type DeleteFloatingIpsIdResponse = void;
 
 export type DeleteGitSourcesIdResponse = void;
 
@@ -1833,6 +1906,15 @@ export type GetCatalogResponse = {
   templates: TemplateView[];
 };
 
+export type GetCloudAccountsResponse = {
+  accounts: CloudAccountView[];
+};
+
+export type GetCloudAccountsIdFloatingIpsResponse = {
+  floating_ips: ProviderFloatingIPView[];
+  servers: ProviderServerView[];
+};
+
 export type GetDatabaseEnginesResponse = {
   engines: DbengineEngine[];
 };
@@ -1848,6 +1930,10 @@ export type GetDnsZonesIdResponse = {
   records: DnsRecordView[];
   types: string[];
   zone: DnsZoneView;
+};
+
+export type GetFloatingIpsResponse = {
+  floating_ips: FloatingIPView[];
 };
 
 export type GetGitSourcesResponse = {
@@ -2272,6 +2358,12 @@ export type PostCatalogRefreshResponse = {
   source: CatalogSourceView | null;
 };
 
+export type PostCloudAccountsResponse = {
+  account: CloudAccountView;
+};
+
+export type PostCloudAccountsBody = CloudAccountRequest;
+
 export type PostDnsZonesResponse = {
   zone: DnsZoneView;
 };
@@ -2283,6 +2375,22 @@ export type PostDnsZonesIdRecordsResponse = {
 };
 
 export type PostDnsZonesIdRecordsBody = DnsRecord;
+
+export type PostFloatingIpsResponse = {
+  floating_ip: FloatingIPView;
+};
+
+export type PostFloatingIpsBody = AddFloatingIPRequest;
+
+export type PostFloatingIpsIdAssignResponse = {
+  floating_ip: FloatingIPView;
+};
+
+export type PostFloatingIpsIdAssignBody = AssignFloatingIPRequest;
+
+export type PostFloatingIpsIdRefreshResponse = {
+  floating_ip: FloatingIPView;
+};
 
 export type PostGitSourcesResponse = {
   source: GitSourceView;
@@ -2624,6 +2732,12 @@ export type PutCatalogSourceResponse = {
 
 export type PutCatalogSourceBody = CatalogSourceRequest;
 
+export type PutCloudAccountsIdResponse = {
+  account: CloudAccountView;
+};
+
+export type PutCloudAccountsIdBody = CloudAccountRequest;
+
 export type PutDnsNameserversResponse = {
   nameservers: string[];
 };
@@ -2645,6 +2759,12 @@ export type PutDnsZonesIdRecordsRidResponse = {
 };
 
 export type PutDnsZonesIdRecordsRidBody = DnsRecord;
+
+export type PutFloatingIpsIdServersResponse = {
+  floating_ip: FloatingIPView;
+};
+
+export type PutFloatingIpsIdServersBody = FloatingServersRequest;
 
 export type PutHealthChecksIdResponse = void;
 
